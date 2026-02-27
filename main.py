@@ -2,86 +2,63 @@ import os, sys, datetime, asyncio, psycopg2, requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler, CommandHandler, ContextTypes
 
-# --- الإعدادات الفنية ---
+# --- الإعدادات الفنية المحدثة ---
+KEY_1 = "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"
+KEY_2 = "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"
+KEY_3 = "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"
+
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
-API_KEY_PRIMARY = "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"
-API_KEY_NVIDIA = "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"
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 
-# --- دالة الذكاء الاصطناعي (مؤمنة بالكامل) ---
 def ask_ai(model_name, api_key, prompt):
-    print(f"🔄 جاري إرسال الطلب إلى: {model_name}...")
     try:
         resp = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "HTTP-Referer": "https://railway.app", # ضروري لـ OpenRouter
-                "X-Title": "Poker Analysis Bot",       # ضروري لـ OpenRouter
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": model_name,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.2,
-                "max_tokens": 50
-            },
-            timeout=10 # أقصى مدة انتظار 10 ثواني
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model_name, "messages": [{"role": "user", "content": prompt}], "temperature": 0.2, "max_tokens": 40},
+            timeout=12
         )
-        print(f"✅ تم استلام الرد من {model_name}: الكود {resp.status_code}")
-        if resp.status_code == 200:
-            return resp.json()['choices'][0]['message']['content'].strip()
-        return f"خطأ سيرفر {resp.status_code}"
-    except Exception as e:
-        print(f"❌ فشل الاتصال مع {model_name}: {e}")
-        return "فشل الاتصال"
+        return resp.json()['choices'][0]['message']['content'].strip() if resp.status_code == 200 else f"خطأ {resp.status_code}"
+    except: return "فشل الاتصال"
 
-# ==================== معالجات البوت ====================
+# ==================== المعالجات المحدثة (بدون نوع اليد) ====================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = [[InlineKeyboardButton("👑 رويال", callback_data="h_رويال"), InlineKeyboardButton("✌️ زوجين", callback_data="h_زوجين")],
-          [InlineKeyboardButton("🏠 فل هاوس", callback_data="h_فل_هاوس"), InlineKeyboardButton("🃏 الأكبر", callback_data="h_أكبر")]]
-    await update.message.reply_text("🏛️ **الكيان V64.0 (النسخة المستقرة)**\nاختر اليد:", reply_markup=InlineKeyboardMarkup(kb))
+    # البدء مباشرة باختيار نوع الورقة المكشوفة
+    kb = [[InlineKeyboardButton("♦️", callback_data="s_♦️"), InlineKeyboardButton("♥️", callback_data="s_♥️")],
+          [InlineKeyboardButton("♠️", callback_data="s_♠️"), InlineKeyboardButton("♣️", callback_data="s_♣️")]]
+    await update.message.reply_text("🏛️ **الكيان V66.0 السريع**\nاختر نوع الورقة المكشوفة الآن:", reply_markup=InlineKeyboardMarkup(kb))
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); data = query.data
-    if data.startswith("h_"):
-        context.user_data['hand'] = data[2:]
-        kb = [[InlineKeyboardButton("♦️", callback_data="s_♦️"), InlineKeyboardButton("♥️", callback_data="s_♥️"),
-               InlineKeyboardButton("♠️", callback_data="s_♠️"), InlineKeyboardButton("♣️", callback_data="s_♣️")]]
-        await query.edit_message_text(f"اليد: {data[2:]}\nاختر النوع:", reply_markup=InlineKeyboardMarkup(kb))
-    elif data.startswith("s_"):
+    
+    if data.startswith("s_"):
         context.user_data['suit'] = data[2:]
-        await query.edit_message_text("📥 أرسل رقم البونص:")
+        await query.edit_message_text(f"✅ تم اختيار النوع: {data[2:]}\n📥 أرسل الآن رقم البونص (7-8 أرقام):")
+    
     elif data.startswith("save_"):
         winner = data.split("_")[1]
-        print(f"💾 جاري حفظ النتيجة في قاعدة البيانات: {winner}")
         try:
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             with conn.cursor() as cur:
-                cur.execute("INSERT INTO history (b_num, suit, hand, winner, timestamp) VALUES (%s, %s, %s, %s, %s)",
-                           (context.user_data['bonus'], context.user_data['suit'], context.user_data['hand'], winner, datetime.datetime.now()))
+                cur.execute("INSERT INTO history (b_num, suit, winner, timestamp) VALUES (%s, %s, %s, %s)",
+                           (context.user_data['bonus'], context.user_data['suit'], winner, datetime.datetime.now()))
                 conn.commit()
             conn.close()
-            await query.edit_message_text(f"✅ تم الحفظ: {winner}")
-            print("✅ تم الحفظ بنجاح!")
-        except Exception as e:
-            print(f"❌ خطأ في قاعدة البيانات عند الحفظ: {e}")
-            await query.edit_message_text("⚠️ خطأ في الحفظ.")
+            await query.edit_message_text(f"✅ تم الحفظ: {winner}\nاضغط /start لجولة جديدة.")
+        except: await query.edit_message_text("⚠️ خطأ في الحفظ.")
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text.isdigit() and len(text) in [7, 8]:
         if 'suit' not in context.user_data:
-            await update.message.reply_text("⚠️ ابدأ بـ /start أولاً")
+            await update.message.reply_text("⚠️ اختر نوع الورقة أولاً عبر /start")
             return
             
         context.user_data['bonus'] = text
-        msg = await update.message.reply_text("📡 **جاري التحليل...**")
+        msg = await update.message.reply_text("🧬 **جاري التحليل الثلاثي السريع...**")
         
-        # 1. جلب التاريخ
-        print("\n--- دورة تحليل جديدة ---")
-        print("🗄️ جاري الاتصال بقاعدة البيانات لجلب التاريخ...")
-        history = "فارغ"
+        history = "جديد"
         try:
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             with conn.cursor() as cur:
@@ -89,30 +66,31 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rows = cur.fetchall()
                 if rows: history = ", ".join([r[0] for r in rows])
             conn.close()
-            print("✅ تم جلب التاريخ بنجاح.")
-        except Exception as e:
-            print(f"⚠️ فشل جلب التاريخ (القاعدة فارغة أو غير متصلة): {e}")
+        except: pass
 
-        prompt = f"التاريخ: {history}\nبونص: {text}, ورقة: {context.user_data['suit']}, يد: {context.user_data['hand']}. توقع (ثور/راعي) وثقة %"
+        # البرومبت الآن يركز فقط على البونص والنوع المكشوف
+        prompt = f"التاريخ: {history}\nبونص الحالي: {text}, الورقة المكشوفة: {context.user_data['suit']}. توقع (ثور/راعي) وثقة %"
 
-        # 2. تشغيل النماذج (باستخدام Executor لتفادي تعليق البوت)
         loop = asyncio.get_event_loop()
+        tasks = [
+            loop.run_in_executor(None, ask_ai, "google/gemini-2.0-flash-001", KEY_1, prompt),
+            loop.run_in_executor(None, ask_ai, "nvidia/llama-3.1-nemotron-70b-instruct", KEY_2, prompt),
+            loop.run_in_executor(None, ask_ai, "anthropic/claude-3-haiku", KEY_3, prompt)
+        ]
         
-        # نطلب من جيميناي
-        g_task = loop.run_in_executor(None, ask_ai, "google/gemini-2.0-flash-001", API_KEY_PRIMARY, prompt)
-        g_res = await g_task
-        
-        # نطلب من انفيديا
-        n_task = loop.run_in_executor(None, ask_ai, "nvidia/llama-3.1-nemotron-70b-instruct", API_KEY_NVIDIA, prompt)
-        n_res = await n_task
+        r1, r2, r3 = await asyncio.gather(*tasks)
 
-        print("🎉 انتهى التحليل، جاري إرسال الرد للمستخدم.")
-        report = f"🎯 **نتائج التحليل:**\n\n🧠 Gemini: {g_res}\n🤖 Nvidia: {n_res}"
-        kb = [[InlineKeyboardButton("🐂 ثور", callback_data="save_ثور"), InlineKeyboardButton("🐑 راعي", callback_data="save_راعي")]]
+        report = (f"🎯 **نتائج التحليل:**\n━━━━━━━━━━━━\n"
+                  f"🧠 **Gemini:** {r1}\n"
+                  f"🤖 **Nvidia:** {r2}\n"
+                  f"🔍 **Claude:** {r3}\n━━━━━━━━━━━━\n"
+                  f"✅ سجل النتيجة الفعلية:")
+        
+        kb = [[InlineKeyboardButton("🐂 ثور", callback_data="save_ثور"), InlineKeyboardButton("🐑 راعي", callback_data="save_راعي")],
+              [InlineKeyboardButton("⚪ تعادل", callback_data="save_تعادل")]]
         await msg.edit_text(report, reply_markup=InlineKeyboardMarkup(kb))
 
 if __name__ == "__main__":
-    print("🚀 بدء تشغيل البوت V64.0...")
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(callback_handler))
