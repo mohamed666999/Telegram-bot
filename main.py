@@ -9,10 +9,10 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler, CommandHandler, ContextTypes
 
 # --- جلب الإعدادات من Variables (Railway) ---
-TOKEN = os.getenv("TOKEN")
-API_KEY_PRIMARY = os.getenv("API_KEY_PRIMARY")
-API_KEY_NVIDIA = os.getenv("API_KEY_NVIDIA")
-DATABASE_URL = os.getenv("DATABASE_URL")
+TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
+API_KEY_PRIMARY = "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"
+API_KEY_NVIDIA = "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"
+DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 
 MODEL_GEMINI = "google/gemini-2.0-flash-001"
 MODEL_NVIDIA = "nvidia/llama-3.1-nemotron-70b-instruct"
