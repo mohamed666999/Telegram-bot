@@ -7,16 +7,23 @@ import psycopg2
 from psycopg2.extras import DictCursor
 from collections import Counter
 
-# --- المتغيرات البيئية ---
-TOKEN = os.environ["TOKEN"]
-API_KEY_PRIMARY = os.environ["API_KEY_PRIMARY"]
-API_KEY_NVIDIA = os.environ["API_KEY_NVIDIA"]
-DATABASE_URL = os.environ["DATABASE_URL"]   # يجب أن يكون موجودًا في Railway Variables
+# ==================== المتغيرات البيئية ====================
+# تم وضع التوكن والمفاتيح مباشرة هنا (بناءً على طلبك)
+TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
+API_KEY_PRIMARY = "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"  # Gemini
+API_KEY_NVIDIA = "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"  # Nvidia
 
+# DATABASE_URL يجب أن يكون موجودًا في متغيرات Railway (يُضاف تلقائيًا مع PostgreSQL)
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    print("❌ خطأ: DATABASE_URL غير موجود. تأكد من إضافة PostgreSQL في Railway")
+    sys.exit(1)
+
+# ==================== إعدادات النماذج ====================
 MODEL_GEMINI = "google/gemini-2.0-flash-001"
 MODEL_NVIDIA = "nvidia/llama-3.1-nemotron-70b-instruct"
 
-# --- مكتبات التليجرام ---
+# ==================== مكتبات التليجرام ====================
 try:
     from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
     from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler, CommandHandler, ContextTypes
@@ -24,9 +31,10 @@ except ImportError:
     print("❌ نقص مكتبات! نفذ: pip install python-telegram-bot requests psycopg2-binary")
     sys.exit(1)
 
-# ==================== دوال PostgreSQL ====================
+# ==================== دوال قاعدة البيانات PostgreSQL ====================
 def get_db_connection():
-    return psycop2.connect(DATABASE_URL, sslmode='require')
+    """إنشاء اتصال بقاعدة PostgreSQL"""
+    return psycopg2.connect(DATABASE_URL, sslmode='require')
 
 def init_database():
     """إنشاء الجداول إذا لم تكن موجودة"""
@@ -91,19 +99,21 @@ def init_database():
             conn.commit()
 
 def db_fetch_all(query, params=()):
-    """تنفيذ SELECT وإرجاع جميع النتائج"""
+    """تنفيذ استعلام SELECT وإرجاع جميع النتائج كقائمة من القواميس"""
     with get_db_connection() as conn:
         with conn.cursor(cursor_factory=DictCursor) as cur:
             cur.execute(query, params)
             return cur.fetchall()
 
 def db_fetch_one(query, params=()):
+    """تنفيذ استعلام SELECT وإرجاع نتيجة واحدة (أو None)"""
     with get_db_connection() as conn:
         with conn.cursor(cursor_factory=DictCursor) as cur:
             cur.execute(query, params)
             return cur.fetchone()
 
 def db_execute(query, params=()):
+    """تنفيذ استعلام INSERT/UPDATE/DELETE"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(query, params)
@@ -111,6 +121,7 @@ def db_execute(query, params=()):
 
 # ==================== دوال أداء النماذج (المراقب) ====================
 def update_model_performance(model_name, hand_type, suit_type, bonus, was_correct):
+    """تحديث سجل أداء نموذج معين في سياق معين (نوع اليد، نوع الورقة، نمط البونص)"""
     bonus_pattern = bonus[-3:] if bonus and len(bonus) >= 3 else "000"
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -140,6 +151,7 @@ def update_model_performance(model_name, hand_type, suit_type, bonus, was_correc
             conn.commit()
 
 def get_best_model_for_current(hand_type, suit_type, bonus):
+    """المراقب: يوصي بأفضل نموذج بناءً على الأداء السابق في نفس السياق"""
     bonus_pattern = bonus[-3:] if bonus and len(bonus) >= 3 else "000"
     row = db_fetch_one("""
         SELECT model_name, accuracy, total_predictions
@@ -148,11 +160,12 @@ def get_best_model_for_current(hand_type, suit_type, bonus):
         ORDER BY accuracy DESC, total_predictions DESC
         LIMIT 1
     """, (hand_type, suit_type, bonus_pattern))
-    if row and row['total_predictions'] >= 5:
+    if row and row['total_predictions'] >= 5:   # نحتاج 5 توقعات على الأقل
         return row['model_name'], row['accuracy']
     return None, 0
 
 def save_prediction_result(b_num, suit, hand, actual_winner, gemini_pred, nvidia_pred, correct_model):
+    """حفظ نتيجة الجولة في سجل التوقعات وفي ذاكرة كل نموذج"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -171,29 +184,36 @@ def save_prediction_result(b_num, suit, hand, actual_winner, gemini_pred, nvidia
             """, (b_num, suit, hand, actual_winner, datetime.datetime.now()))
             conn.commit()
 
+# ==================== دوال قراءة البيانات من PostgreSQL ====================
 def read_public_history(limit=150):
+    """قراءة آخر limit جولة من جدول history وتحويلها إلى نص"""
     rows = db_fetch_all("SELECT b_num, suit, hand, winner FROM history ORDER BY id DESC LIMIT %s", (limit,))
     if not rows:
         return "لا توجد بيانات كافية."
     text = f"قاعدة البيانات العامة (آخر {len(rows)} جولة):\n" + "="*50 + "\n"
     for i, r in enumerate(rows, 1):
-        text += f"جولة {i}: بونص={r['b_num']}, اليد={r['hand']}, الورقة={r['suit']}, النتيجة={r['winner']}\n"
+        # استبدال الرموز في النص المعروض (اختياري)
+        winner_display = r['winner'].replace("الثور 🔵", "🔵").replace("الراعي 🔴", "🔴")
+        text += f"جولة {i}: بونص={r['b_num']}, اليد={r['hand']}, الورقة={r['suit']}, النتيجة={winner_display}\n"
     text += "="*50
     return text
 
 def read_model_memory(model_name, limit=50):
+    """قراءة آخر limit جولة من ذاكرة نموذج معين (Gemini أو Nvidia)"""
     table = "gemini_memory" if model_name == "Gemini" else "nvidia_memory"
     rows = db_fetch_all(f"SELECT b_num, suit, hand, winner FROM {table} ORDER BY id DESC LIMIT %s", (limit,))
     if not rows:
         return f"لا توجد ذاكرة سابقة لـ {model_name}."
     text = f"ذاكرة {model_name} (آخر {len(rows)} جولة):\n" + "="*40 + "\n"
     for i, r in enumerate(rows, 1):
-        text += f"جولة {i}: بونص={r['b_num']}, الورقة={r['suit']}, اليد={r['hand']}, النتيجة={r['winner']}\n"
+        winner_display = r['winner'].replace("الثور 🔵", "🔵").replace("الراعي 🔴", "🔴")
+        text += f"جولة {i}: بونص={r['b_num']}, الورقة={r['suit']}, اليد={r['hand']}, النتيجة={winner_display}\n"
     text += "="*40
     return text
 
 # ==================== دوال التوقع عبر OpenRouter ====================
 async def get_nvidia_prediction(bonus, suit, hand):
+    """إرسال البيانات إلى Nvidia والحصول على التوقع"""
     public = read_public_history(100)
     memory = read_model_memory("Nvidia", 50)
     prompt = f"""أنت خبير في تحليل البوكر. إليك البيانات:
@@ -214,10 +234,12 @@ async def get_nvidia_prediction(bonus, suit, hand):
 الثقة: (رقم 0-100)
 """
     try:
-        resp = requests.post("https://openrouter.ai/api/v1/chat/completions",
+        resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
             headers={"Authorization": f"Bearer {API_KEY_NVIDIA}", "Content-Type": "application/json"},
             json={"model": MODEL_NVIDIA, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3},
-            timeout=15)
+            timeout=15
+        )
         if resp.status_code == 200:
             content = resp.json()['choices'][0]['message']['content']
             lines = content.lower().split('\n')
@@ -225,7 +247,10 @@ async def get_nvidia_prediction(bonus, suit, hand):
             conf = 50
             for line in lines:
                 if 'النتيجة:' in line:
-                    result = "ثور" if 'ثور' in line else "راعي"
+                    if 'ثور' in line:
+                        result = "ثور"
+                    else:
+                        result = "راعي"
                 elif 'الثقة:' in line:
                     try:
                         conf = int(''.join(filter(str.isdigit, line)))
@@ -237,6 +262,7 @@ async def get_nvidia_prediction(bonus, suit, hand):
     return "راعي", 50
 
 async def get_gemini_prediction(bonus, suit, hand):
+    """إرسال البيانات إلى Gemini (مع حجب الورقة المكشوفة حسب طلبك)"""
     public = read_public_history(100)
     memory = read_model_memory("Gemini", 50)
     prompt = f"""أنت خبير ذكاء اصطناعي أول في البوكر. إليك البيانات:
@@ -257,10 +283,12 @@ async def get_gemini_prediction(bonus, suit, hand):
 الثقة: (رقم 0-100)
 """
     try:
-        resp = requests.post("https://openrouter.ai/api/v1/chat/completions",
+        resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
             headers={"Authorization": f"Bearer {API_KEY_PRIMARY}", "Content-Type": "application/json"},
             json={"model": MODEL_GEMINI, "messages": [{"role": "user", "content": prompt}], "temperature": 0.2},
-            timeout=15)
+            timeout=15
+        )
         if resp.status_code == 200:
             content = resp.json()['choices'][0]['message']['content']
             lines = content.lower().split('\n')
@@ -268,7 +296,10 @@ async def get_gemini_prediction(bonus, suit, hand):
             conf = 50
             for line in lines:
                 if 'النتيجة:' in line:
-                    result = "ثور" if 'ثور' in line else "راعي"
+                    if 'ثور' in line:
+                        result = "ثور"
+                    else:
+                        result = "راعي"
                 elif 'الثقة:' in line:
                     try:
                         conf = int(''.join(filter(str.isdigit, line)))
@@ -280,25 +311,32 @@ async def get_gemini_prediction(bonus, suit, hand):
     return "راعي", 50
 
 def get_observer_recommendation(hand, suit, bonus, gemini_conf, nvidia_conf):
+    """المراقب يقارن أداء النموذجين ويوصي بأحدهما"""
     best_model, acc = get_best_model_for_current(hand, suit, bonus)
     if best_model:
         return best_model, f"🔍 المراقب يوصي باستخدام **{best_model}** (دقة {acc:.1f}% في هذا النوع)"
     if gemini_conf > nvidia_conf + 10:
-        return "Gemini", f"🔍 المراقب يوصي باستخدام **Gemini** (ثقة {gemini_conf}%)"
+        return "Gemini", f"🔍 المراقب يوصي باستخدام **Gemini** (ثقة أعلى {gemini_conf}%)"
     if nvidia_conf > gemini_conf + 10:
-        return "Nvidia", f"🔍 المراقب يوصي باستخدام **Nvidia** (ثقة {nvidia_conf}%)"
+        return "Nvidia", f"🔍 المراقب يوصي باستخدام **Nvidia** (ثقة أعلى {nvidia_conf}%)"
     return None, "🔍 المراقب: لا توجد توصية واضحة."
 
 async def analyze(bonus, suit, hand):
+    """تشغيل كلا النموذجين بالتوازي وجمع النتائج مع توصية المراقب"""
     nvidia_task = get_nvidia_prediction(bonus, suit, hand)
     gemini_task = get_gemini_prediction(bonus, suit, hand)
     (nvidia_res, nvidia_conf), (gemini_res, gemini_conf) = await asyncio.gather(nvidia_task, gemini_task)
     rec_model, rec_text = get_observer_recommendation(hand, suit, bonus, gemini_conf, nvidia_conf)
+    
+    # تحويل النتائج إلى رموز ملونة
+    gemini_display = "🔵" if gemini_res == "ثور" else "🔴"
+    nvidia_display = "🔵" if nvidia_res == "ثور" else "🔴"
+    
     report = (
         f"📊 **تحليل النماذج:**\n"
         f"━━━━━━━━━━━━\n"
-        f"🧠 **Gemini**: {gemini_res} (ثقة {gemini_conf}%)\n"
-        f"🤖 **Nvidia**: {nvidia_res} (ثقة {nvidia_conf}%)\n"
+        f"🧠 **Gemini**: {gemini_display} (ثقة {gemini_conf}%)\n"
+        f"🤖 **Nvidia**: {nvidia_display} (ثقة {nvidia_conf}%)\n"
         f"━━━━━━━━━━━━\n"
         f"{rec_text}\n"
         f"━━━━━━━━━━━━\n"
@@ -380,9 +418,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             actual, gemini_pred, nvidia_pred, correct
         )
 
+        # عرض النتيجة مع الرموز
+        gemini_icon = "✅" if gemini_correct else "❌"
+        nvidia_icon = "✅" if nvidia_correct else "❌"
+        actual_icon = "🔵" if actual == "ثور" else "🔴" if actual == "راعي" else "⚪"
+
         await query.edit_message_text(
-            f"{query.message.text}\n\n✅ تم الحفظ. النتيجة الفعلية: {actual}\n"
-            f"🧠 Gemini: {'✅' if gemini_correct else '❌'} | 🤖 Nvidia: {'✅' if nvidia_correct else '❌'}",
+            f"{query.message.text}\n\n✅ تم الحفظ. النتيجة الفعلية: {actual_icon}\n"
+            f"🧠 Gemini: {gemini_icon} | 🤖 Nvidia: {nvidia_icon}",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🆕 جولة جديدة", callback_data="new")]])
         )
 
@@ -403,9 +446,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'hand': "متنوع",
             'recommended_model': rec_model
         })
+        # أزرار النتيجة بالرموز المطلوبة
         kb = [
-            [InlineKeyboardButton("🐂 ثور", callback_data="result_bull")],
-            [InlineKeyboardButton("🐑 راعي", callback_data="result_bear")],
+            [InlineKeyboardButton("🔵 ثور", callback_data="result_bull")],
+            [InlineKeyboardButton("🔴 راعي", callback_data="result_bear")],
             [InlineKeyboardButton("⚪ تعادل", callback_data="result_tie")],
             [InlineKeyboardButton("🆕 جديد", callback_data="new")]
         ]
@@ -414,14 +458,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ البونص يجب أن يكون 7-8 أرقام.")
 
 if __name__ == "__main__":
-    # التحقق من المتغيرات البيئية
-    required_vars = ["TOKEN", "API_KEY_PRIMARY", "API_KEY_NVIDIA", "DATABASE_URL"]
-    missing = [v for v in required_vars if v not in os.environ]
-    if missing:
-        print("❌ المفاتيح التالية غير موجودة:", missing)
-        sys.exit(1)
-
+    # تهيئة قاعدة البيانات
     init_database()
+    
+    # تشغيل البوت
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
