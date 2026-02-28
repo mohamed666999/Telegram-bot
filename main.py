@@ -2,47 +2,51 @@ import os, sys, datetime, asyncio, psycopg2, requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler, CommandHandler, ContextTypes
 
-# --- الإعدادات السيادية (Canopy Wave - Mini-Ma 2.1) ---
-# هذا المفتاح والنموذج سيتجاوزان مشكلة 429 التي تظهر في صورك
-CANOPY_TOKEN = "01BzATbVHNygmd7NSxLNt5uljKR4lUofTQ0pvyraMio"
-MODEL_NAME = "minima-2.1-instruct" 
+# --- الإعدادات السيادية (Gemini 1.5 Flash API) ---
+# ضع مفتاح Gemini الخاص بك هنا (الذي يدعم النصوص والوسائط)
+GEMINI_API_KEY = "ضغ_مفتاح_جيمناي_هنا" 
+MODEL_NAME = "gemini-1.5-flash"
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={GEMINI_API_KEY}"
 
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 
-def ask_canopy_minima(prompt):
-    """محرك الاستدلال السريع لتجنب توقف الخدمة"""
-    url = "https://api.canopywave.io/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {CANOPY_TOKEN}",
-        "Content-Type": "application/json"
-    }
+def ask_gemini_sovereign(prompt):
+    """استدعاء محرك Gemini لتحليل الأنماط الرقمية والفجوات الزمنية"""
+    headers = {'Content-Type': 'application/json'}
     payload = {
-        "model": MODEL_NAME,
-        "messages": [
-            {"role": "system", "content": "أنت محلل خوارزميات محترف. وظيفتك استخراج الأنماط من بونص الجولات وفجوات الوقت بدقة متناهية."},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.1
+        "contents": [{
+            "parts": [{
+                "text": f"أنت محلل خوارزميات سيادي. حلل فجوات الوقت (Gaps) والأرقام التالية بدقة لاستنتاج النتيجة القادمة: {prompt}"
+            }]
+        }],
+        "generationConfig": {
+            "temperature": 0.1,  # دقة رياضية عالية
+            "topP": 0.95,
+            "maxOutputTokens": 600,
+        }
     }
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=12)
+        resp = requests.post(GEMINI_URL, headers=headers, json=payload, timeout=15)
         if resp.status_code == 200:
-            return f"⚡ [Mini-Ma 2.1 Activated]\n{resp.json()['choices'][0]['message']['content'].strip()}"
-        return f"⚠️ استجابة المحرك: {resp.status_code}"
-    except:
-        return "❌ فشل المحرك الأساسي. جاري محاولة إعادة الاتصال..."
+            result = resp.json()
+            # استخراج النص من استجابة Gemini
+            return f"💎 [Gemini 1.5 Flash]\n{result['candidates'][0]['content']['parts'][0]['text'].strip()}"
+        else:
+            return f"⚠️ استجابة Gemini غير طبيعية (كود {resp.status_code})"
+    except Exception as e:
+        return f"❌ خطأ في الاتصال بمصفوفة Gemini: {str(e)}"
 
-# ==================== المعالجات الفنية ====================
+# ==================== نظام معالجة البيانات اللحظي ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # مسح بيانات المستخدم القديمة لضمان بداية نظيفة
     context.user_data.clear()
     kb = [[InlineKeyboardButton("♦️", callback_data="s_♦️"), InlineKeyboardButton("♥️", callback_data="s_♥️")],
           [InlineKeyboardButton("♠️", callback_data="s_♠️"), InlineKeyboardButton("♣️", callback_data="s_♣️")]]
     await update.message.reply_text(
-        "🏛️ **الكيان السيادي V82.0**\nتم الانتقال لمحرك Canopy (Mini-Ma 2.1) لتجاوز قيود OpenAI.\n\n"
-        "الآن النظام مستقر ويعمل 24/7. اختر النوع:",
+        "🏛️ **الكيان السيادي V85.0 (Gemini Edition)**\n"
+        "تم دمج المحرك متعدد الوسائط لتحليل النصوص والفجوات 24/7.\n"
+        "اختر النوع لبدء الرصد:",
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
@@ -50,7 +54,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); data = query.data
     if data.startswith("s_"):
         context.user_data['suit'] = data[2:]
-        await query.edit_message_text(f"✅ تم تفعيل رادار {data[2:]}\n📥 أرسل رقم البونص المكون من 7-8 أرقام:")
+        await query.edit_message_text(f"✅ رادار {data[2:]} نشط.\n📥 أرسل بونص الجولة الآن:")
     elif data.startswith("save_"):
         winner = data.split("_")[1]
         try:
@@ -60,42 +64,42 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                            (context.user_data.get('bonus'), context.user_data.get('suit'), winner, datetime.datetime.now()))
                 conn.commit()
             conn.close()
-            await query.edit_message_text(f"✅ تم حفظ: {winner}. النمط الآن أكثر ذكاءً.")
+            await query.edit_message_text(f"✅ تم حفظ الفوز لـ ({winner}). مصفوفة البيانات تتحدث.")
         except: pass
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text.isdigit() and len(text) >= 7:
         if 'suit' not in context.user_data:
-            await update.message.reply_text("⚠️ يرجى استخدام /start أولاً واختيار النوع.") ; return
+            await update.message.reply_text("⚠️ اختر النوع أولاً.") ; return
 
         context.user_data['bonus'] = text
-        msg = await update.message.reply_text("🔎 **جاري استنتاج الخوارزمية عبر Mini-Ma 2.1...**")
+        msg = await update.message.reply_text("🧬 **جاري المعالجة عبر Gemini 1.5 Flash...**")
         
         now = datetime.datetime.now()
         time_str = now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         
-        # سحب وتحليل آخر 25 جولة (توازن مثالي للسرعة والدقة)
+        # تحليل سجل الفجوات (آخر 30 جولة لضمان دقة Gemini)
         gap_report = ""
         try:
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             with conn.cursor() as cur:
-                cur.execute("SELECT b_num, winner, timestamp FROM history ORDER BY id DESC LIMIT 25")
+                cur.execute("SELECT b_num, winner, timestamp FROM history ORDER BY id DESC LIMIT 30")
                 rows = cur.fetchall()
                 for i in range(len(rows)-1):
                     gap = (rows[i][2] - rows[i+1][2]).total_seconds()
-                    gap_report += f"ب:{rows[i][0]}|ف:{rows[i][1]}|ج:{gap}s\n"
+                    gap_report += f"بونص:{rows[i][0]}|فوز:{rows[i][1]}|فجوة:{gap}ث\n"
             conn.close()
-        except: gap_report = "السجل الأولي قيد البناء."
+        except: gap_report = "السجل الأولي فارغ."
 
-        prompt = f"Analyze time gaps and numbers:\n{gap_report}\nCurrent: Bonus {text}, Suit {context.user_data['suit']}, Time {time_str}\nPredict Bull/Bear and write the math rule."
+        prompt = f"""تحليل أنماط:\n{gap_report}\nالحالي: بونص {text}، نوع {context.user_data['suit']}، توقيت {time_str}.\nالتوقع: (ثور/راعي) مع ذكر المعادلة الرياضية للفجوات المستخدمة."""
         
         loop = asyncio.get_event_loop()
-        analysis = await loop.run_in_executor(None, ask_canopy_minima, prompt)
+        analysis = await loop.run_in_executor(None, ask_gemini_sovereign, prompt)
 
         report = (f"⏰ **التوقيت:** `{time_str}`\n━━━━━━━━━━━━\n"
-                  f"🧠 **تحليل Mini-Ma الاستراتيجي:**\n{analysis}\n━━━━━━━━━━━━\n"
-                  f"📂 تم أرشفة القانون في سجل مستقل.")
+                  f"🧠 **تحليل Gemini السيادي:**\n{analysis}\n━━━━━━━━━━━━\n"
+                  f"📂 تم أرشفة القانون وتحديث المصفوفة.")
         
         kb = [[InlineKeyboardButton("🔴 راعي", callback_data="save_راعي"), InlineKeyboardButton("🔵 ثور", callback_data="save_ثور")],
               [InlineKeyboardButton("⚪ تعادل", callback_data="save_تعادل")]]
