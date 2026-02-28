@@ -2,7 +2,7 @@ import os, sys, datetime, asyncio, psycopg2, requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler, CommandHandler, ContextTypes
 
-# --- الإعدادات الفنية (تم التحديث للمفتاح الجديد فقط) ---
+# --- الإعدادات الفنية ---
 GROQ_KEY = "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"
 
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
@@ -10,11 +10,15 @@ DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.pr
 
 def ask_ai(model_name, api_key, prompt):
     try:
-        # تم تعديل الرابط ليتوافق مع Groq API الرسمي
         resp = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"model": model_name, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3, "max_tokens": 120},
+            json={
+                "model": model_name, 
+                "messages": [{"role": "user", "content": prompt}], 
+                "temperature": 0.0, # تم خفض الحرارة للصفر لزيادة الدقة الرياضية ومنع الهلوسة
+                "max_tokens": 200    # زيادة التوكنز ليتسع للتحليل العميق
+            },
             timeout=15
         )
         return resp.json()['choices'][0]['message']['content'].strip() if resp.status_code == 200 else f"خطأ {resp.status_code}"
@@ -23,7 +27,7 @@ def ask_ai(model_name, api_key, prompt):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton("♦️", callback_data="s_♦️"), InlineKeyboardButton("♥️", callback_data="s_♥️")],
           [InlineKeyboardButton("♠️", callback_data="s_♠️"), InlineKeyboardButton("♣️", callback_data="s_♣️")]]
-    await update.message.reply_text("🏛️ **الكيان V70.0 (المحرك الرياضي المبتكر)**\nاختر نوع الورقة:", reply_markup=InlineKeyboardMarkup(kb))
+    await update.message.reply_text("🏛️ **الكيان V70.1 (المحرك الرياضي العميق)**\nاختر نوع الورقة:", reply_markup=InlineKeyboardMarkup(kb))
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); data = query.data
@@ -47,7 +51,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.isdigit() and len(text) in [7, 8]:
         if 'suit' not in context.user_data: return
         context.user_data['bonus'] = text
-        msg = await update.message.reply_text("🔬 **جاري استنباط القواعد الرياضية من الذاكرة الزمنية...**")
+        msg = await update.message.reply_text("🔬 **جاري إجراء تحليل رياضي عميق (نمط OpenRouter)...**")
         
         now = datetime.datetime.now()
         current_time_str = now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
@@ -64,33 +68,37 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.close()
         except: raw_data = "لا توجد بيانات سابقة كافية."
 
-        prompt = f"""أنت محرك رياضي فائق الذكاء. مهمتك ابتكار قاعدة رياضية (Formula) تربط بين رقم البونص، نوع الورقة، والوقت بدقة الأجزاء من الثانية.
-البيانات الخام الحالية:
+        # تم تحديث البرومبت ليكون "تحليلياً" وليس مجرد توقع سريع
+        prompt = f"""حلل هذه البيانات كخبير رياضيات واحصاء.
+البيانات السابقة:
 {raw_data}
 
-الوقت الحالي للجولة: {current_time_str}
-المعطيات الجديدة: بونص {text}، ورقة {context.user_data['suit']}
+المعطيات الحالية: بونص {text}، ورقة {context.user_data['suit']}، وقت الطلب {current_time_str}
 
-حلل الفجوات الزمنية وابتكر قانوناً يفسر النتيجة القادمة.
-المطلوب (تنسيق إلزامي):
+مهمتك:
+1. ابحث عن علاقة رقمية بين آخر رقمين في البونص وبين وقت الملي ثانية.
+2. استنبط النمط المتكرر في النتائج السابقة بناءً على "فجوة الوقت".
+3. قدم توقعاً مبنياً على معادلة رياضية واضحة.
+
+التنسيق:
 التوقع: 🔵 ثور (أو 🔴 راعي)
 الثقة: %
-القاعدة المبتكرة: (اشرح القانون الرياضي الذي استنبطته في 10 كلمات)"""
+القاعدة المبتكرة: (اكتب المعادلة الرياضية التي استنتجتها بدقة)"""
 
-        # تشغيل النماذج الثلاثة باستخدام مفتاح Groq واحد وموديلات مختلفة
         loop = asyncio.get_event_loop()
+        # استخدام الموديلات الأقوى في Groq لمحاكاة دقة OpenRouter
         tasks = [
             loop.run_in_executor(None, ask_ai, "llama-3.3-70b-versatile", GROQ_KEY, prompt),
-            loop.run_in_executor(None, ask_ai, "llama-3.1-8b-instant", GROQ_KEY, prompt),
-            loop.run_in_executor(None, ask_ai, "mixtral-8x7b-32768", GROQ_KEY, prompt)
+            loop.run_in_executor(None, ask_ai, "mixtral-8x7b-32768", GROQ_KEY, prompt),
+            loop.run_in_executor(None, ask_ai, "llama-3.1-8b-instant", GROQ_KEY, prompt)
         ]
         r1, r2, r3 = await asyncio.gather(*tasks)
 
-        report = (f"⏰ **توقيت الطلب:** `{current_time_str}`\n━━━━━━━━━━━━\n"
-                  f"🧠 **Llama 70B:**\n{r1}\n\n"
-                  f"🤖 **Llama 8B:**\n{r2}\n\n"
-                  f"🔍 **Mixtral:**\n{r3}\n━━━━━━━━━━━━\n"
-                  f"✅ سجل النتيجة الفعلية لتطوير القاعدة:")
+        report = (f"⏰ **التوقيت:** `{current_time_str}`\n━━━━━━━━━━━━\n"
+                  f"🧠 **التحليل العميق (1):**\n{r1}\n\n"
+                  f"🤖 **التحليل المنطقي (2):**\n{r2}\n\n"
+                  f"🔍 **مقارنة الأنماط (3):**\n{r3}\n━━━━━━━━━━━━\n"
+                  f"✅ سجل النتيجة الفعلية لتغذية النظام:")
         
         kb = [[InlineKeyboardButton("🔴 راعي", callback_data="save_راعي"), InlineKeyboardButton("🔵 ثور", callback_data="save_ثور")],
               [InlineKeyboardButton("⚪ تعادل", callback_data="save_تعادل")]]
