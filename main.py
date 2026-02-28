@@ -4,7 +4,6 @@ from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQu
 
 # --- الإعدادات الفنية ---
 GROQ_KEY = "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"
-
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 
@@ -16,18 +15,21 @@ def ask_ai(model_name, api_key, prompt):
             json={
                 "model": model_name, 
                 "messages": [{"role": "user", "content": prompt}], 
-                "temperature": 0.0, # تم خفض الحرارة للصفر لزيادة الدقة الرياضية ومنع الهلوسة
-                "max_tokens": 200    # زيادة التوكنز ليتسع للتحليل العميق
+                "temperature": 0.0, 
+                "max_tokens": 400 # تم زيادته لمنع انقطاع التحليل
             },
-            timeout=15
+            timeout=20
         )
-        return resp.json()['choices'][0]['message']['content'].strip() if resp.status_code == 200 else f"خطأ {resp.status_code}"
-    except: return "فشل الاتصال"
+        if resp.status_code == 200:
+            return resp.json()['choices'][0]['message']['content'].strip()
+        else:
+            return f"⚠️ تنبيه: المحرك واجه استجابة غير مكتملة ({resp.status_code})"
+    except: return "❌ فشل في معالجة البيانات"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton("♦️", callback_data="s_♦️"), InlineKeyboardButton("♥️", callback_data="s_♥️")],
           [InlineKeyboardButton("♠️", callback_data="s_♠️"), InlineKeyboardButton("♣️", callback_data="s_♣️")]]
-    await update.message.reply_text("🏛️ **الكيان V70.1 (المحرك الرياضي العميق)**\nاختر نوع الورقة:", reply_markup=InlineKeyboardMarkup(kb))
+    await update.message.reply_text("🏛️ **الكيان V70.2 (المعالج الرياضي المستقر)**\nاختر نوع الورقة:", reply_markup=InlineKeyboardMarkup(kb))
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); data = query.data
@@ -43,7 +45,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                            (context.user_data['bonus'], context.user_data['suit'], winner, datetime.datetime.now()))
                 conn.commit()
             conn.close()
-            await query.edit_message_text(f"✅ تم حفظ النتيجة: {winner}")
+            await query.edit_message_text(f"✅ تم الحفظ. الجولة القادمة ستكون أدق.")
         except: pass
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -51,7 +53,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.isdigit() and len(text) in [7, 8]:
         if 'suit' not in context.user_data: return
         context.user_data['bonus'] = text
-        msg = await update.message.reply_text("🔬 **جاري إجراء تحليل رياضي عميق (نمط OpenRouter)...**")
+        msg = await update.message.reply_text("🔄 **جاري تشغيل خوارزمية التحليل الرقمي...**")
         
         now = datetime.datetime.now()
         current_time_str = now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
@@ -64,41 +66,37 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rows = cur.fetchall()
                 for r in rows:
                     t_str = r[3].strftime("%H:%M:%S.%f")[:-3]
-                    raw_data += f"[{t_str}] Bonus:{r[0]}, Suit:{r[1]} -> Win:{r[2]}\n"
+                    # تنسيق البيانات بشكل أنظف لتجنب خطأ 400
+                    raw_data += f"Data: {r[0]} | {r[1]} | {r[2]} | Time: {t_str}\n"
             conn.close()
-        except: raw_data = "لا توجد بيانات سابقة كافية."
+        except: raw_data = "بيانات غير كافية."
 
-        # تم تحديث البرومبت ليكون "تحليلياً" وليس مجرد توقع سريع
-        prompt = f"""حلل هذه البيانات كخبير رياضيات واحصاء.
-البيانات السابقة:
+        prompt = f"""حلل الأنماط الرياضية التالية بدقة متناهية:
 {raw_data}
 
-المعطيات الحالية: بونص {text}، ورقة {context.user_data['suit']}، وقت الطلب {current_time_str}
+المعطيات الجديدة للتنبؤ:
+البونص: {text} | الورقة: {context.user_data['suit']} | التوقيت: {current_time_str}
 
-مهمتك:
-1. ابحث عن علاقة رقمية بين آخر رقمين في البونص وبين وقت الملي ثانية.
-2. استنبط النمط المتكرر في النتائج السابقة بناءً على "فجوة الوقت".
-3. قدم توقعاً مبنياً على معادلة رياضية واضحة.
-
-التنسيق:
-التوقع: 🔵 ثور (أو 🔴 راعي)
+المطلوب:
+1. استخراج علاقة بين (آخر رقمين من البونص + أرقام الملي ثانية).
+2. تحديد ما إذا كانت النتيجة تميل لـ (راعي) أو (ثور) بناءً على التكرار الإحصائي.
+3. التنسيق الإلزامي:
+التوقع: (🔵 ثور أو 🔴 راعي)
 الثقة: %
-القاعدة المبتكرة: (اكتب المعادلة الرياضية التي استنتجتها بدقة)"""
+القاعدة: (معادلة رياضية مختصرة جداً)"""
 
         loop = asyncio.get_event_loop()
-        # استخدام الموديلات الأقوى في Groq لمحاكاة دقة OpenRouter
         tasks = [
             loop.run_in_executor(None, ask_ai, "llama-3.3-70b-versatile", GROQ_KEY, prompt),
-            loop.run_in_executor(None, ask_ai, "mixtral-8x7b-32768", GROQ_KEY, prompt),
-            loop.run_in_executor(None, ask_ai, "llama-3.1-8b-instant", GROQ_KEY, prompt)
+            loop.run_in_executor(None, ask_ai, "mixtral-8x7b-32768", GROQ_KEY, prompt)
         ]
-        r1, r2, r3 = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks)
+        r1, r2 = results
 
         report = (f"⏰ **التوقيت:** `{current_time_str}`\n━━━━━━━━━━━━\n"
-                  f"🧠 **التحليل العميق (1):**\n{r1}\n\n"
-                  f"🤖 **التحليل المنطقي (2):**\n{r2}\n\n"
-                  f"🔍 **مقارنة الأنماط (3):**\n{r3}\n━━━━━━━━━━━━\n"
-                  f"✅ سجل النتيجة الفعلية لتغذية النظام:")
+                  f"🧠 **التحليل العميق:**\n{r1}\n\n"
+                  f"🤖 **التدقيق المنطقي:**\n{r2}\n━━━━━━━━━━━━\n"
+                  f"✅ سجل النتيجة الفعلية:")
         
         kb = [[InlineKeyboardButton("🔴 راعي", callback_data="save_راعي"), InlineKeyboardButton("🔵 ثور", callback_data="save_ثور")],
               [InlineKeyboardButton("⚪ تعادل", callback_data="save_تعادل")]]
