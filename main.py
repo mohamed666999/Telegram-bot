@@ -1,4 +1,4 @@
-import os, sys, datetime, asyncio, psycopg2, requests, json
+import os, sys, datetime, asyncio, psycopg2, requests, pandas as pd
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler, CommandHandler, ContextTypes
 
@@ -7,63 +7,57 @@ from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQu
 GROQ_API_KEY = "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" 
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
-MODEL_NAME = "llama-3.3-70b-versatile"
 
-# ==================== وظيفة تحميل السجل (جديد) ====================
+# ==================== ميزة تحميل البيانات بصيغة Excel ====================
 
 async def download_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """استخراج بيانات جدول التاريخ وإرسالها كملف"""
-    msg = await update.message.reply_text("📂 جاري استخراج السجل السيادي...")
+    """تحويل جدول التاريخ إلى ملف Excel وإرساله"""
+    status_msg = await update.message.reply_text("📊 جاري استخراج البيانات وتحويلها إلى Excel...")
     try:
+        # الاتصال وجلب البيانات باستخدام Pandas
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM history ORDER BY id ASC")
-            rows = cur.fetchall()
-            
-            # صناعة محتوى الملف
-            content = "ID | Bonus Num | Suit | Winner | Timestamp\n"
-            content += "-" * 50 + "\n"
-            for row in rows:
-                content += f"{row[0]} | {row[1]} | {row[2]} | {row[3]} | {row[4]}\n"
+        query = "SELECT * FROM history ORDER BY id DESC"
+        df = pd.read_sql(query, conn)
         conn.close()
 
-        # حفظ الملف مؤقتاً
-        filename = f"history_backup_{datetime.date.today()}.txt"
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(content)
+        if df.empty:
+            await status_msg.edit_text("⚠️ السجل فارغ حالياً، لا توجد بيانات للتصدير.")
+            return
 
-        # إرسال الملف للمستخدم
+        # حفظ الملف بصيغة Excel
+        filename = f"Sovereign_Log_{datetime.date.today()}.xlsx"
+        df.to_excel(filename, index=False)
+
+        # إرسال الملف
         with open(filename, "rb") as f:
-            await update.message.reply_document(document=f, filename=filename, caption="📊 سجل الجولات المكتمل.")
+            await update.message.reply_document(
+                document=f, 
+                filename=filename, 
+                caption=f"✅ تم استخراج {len(df)} جولة بنجاح."
+            )
         
-        # حذف الملف من السيرفر بعد الإرسال
-        os.remove(filename)
-        await msg.delete()
+        os.remove(filename) # تنظيف السيرفر
+        await status_msg.delete()
 
     except Exception as e:
-        await update.message.reply_text(f"❌ فشل استخراج البيانات: {str(e)}")
+        await status_msg.edit_text(f"❌ فشل الاستخراج: {str(e)}")
 
-# ==================== المحرك والوظائف المعتادة ====================
-
-def ask_groq_sovereign(prompt):
-    headers = {'Authorization': f'Bearer {GROQ_API_KEY}', 'Content-Type': 'application/json'}
-    payload = {"model": MODEL_NAME, "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}
-    try:
-        resp = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=15)
-        return f"⚡ [Groq Analysis]\n{resp.json()['choices'][0]['message']['content'].strip()}"
-    except: return "⚠️ خطأ في المحرك."
+# ==================== المحرك والوظائف الأساسية ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton("♦️", callback_data="s_♦️"), InlineKeyboardButton("♥️", callback_data="s_♥️")],
           [InlineKeyboardButton("♠️", callback_data="s_♠️"), InlineKeyboardButton("♣️", callback_data="s_♣️")]]
-    await update.message.reply_text("🏛️ **الكيان السيادي V96.0**\nاستخدم /download لتحميل سجل الجولات.", reply_markup=InlineKeyboardMarkup(kb))
+    await update.message.reply_text(
+        "🏛️ **الكيان السيادي V97.0**\nاستخدم الأمر /download للحصول على سجل الجولات بصيغة Excel.",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
 
-# (أضف دوال callback_handler و message_handler من النسخة السابقة هنا)
+# ... (أضف دوال callback_handler و message_handler و ask_groq_sovereign من النسخ السابقة)
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("download", download_database)) # تفعيل أمر التحميل
+    app.add_handler(CommandHandler("download", download_database)) # تفعيل الأمر
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.run_polling()
