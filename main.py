@@ -2,42 +2,41 @@ import os, sys, datetime, asyncio, psycopg2, requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler, CommandHandler, ContextTypes
 
-# --- الإعدادات الفنية (Together AI) ---
-TOGETHER_API_KEY = "key_CYa1BLzmDLis7WPWsEMSP"
+# --- الإعدادات الفنية (Hugging Face / Gemini) ---
+HF_TOKEN = "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"
 
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 
-def ask_ai(model_name, prompt):
+def ask_gemini(prompt):
+    # استخدام نموذج Gemini 1.5 Flash المجاني عبر Hugging Face Inference API
+    API_URL = "https://api-inference.huggingface.co/models/google/gemma-2-9b-it"
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    
     try:
-        # الرابط الرسمي لمنصة Together AI
-        url = "https://api.together.xyz/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {TOGETHER_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        # صياغة البرومبت ليكون صارماً رياضياً
         payload = {
-            "model": model_name,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.0, # دقة حسابية قصوى
-            "max_tokens": 400
+            "inputs": f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n",
+            "parameters": {"max_new_tokens": 250, "temperature": 0.1}
         }
-        
-        resp = requests.post(url, headers=headers, json=payload, timeout=20)
+        resp = requests.post(API_URL, headers=headers, json=payload, timeout=15)
         
         if resp.status_code == 200:
-            return resp.json()['choices'][0]['message']['content'].strip()
+            result = resp.json()
+            # تنظيف الرد من علامات الـ Markdown الخاصة بالموديل
+            text = result[0]['generated_text'].split("model\n")[-1].strip()
+            return text
         else:
-            return f"⚠️ خطأ في المنصة: {resp.status_code}"
-    except Exception as e:
-        return f"❌ فشل الاتصال: {str(e)}"
+            return f"⚠️ عذراً، المحرك مشغول حالياً ({resp.status_code})"
+    except:
+        return "❌ فشل الاتصال بالذكاء الاصطناعي"
 
 # ==================== المعالجات الأساسية ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton("♦️", callback_data="s_♦️"), InlineKeyboardButton("♥️", callback_data="s_♥️")],
           [InlineKeyboardButton("♠️", callback_data="s_♠️"), InlineKeyboardButton("♣️", callback_data="s_♣️")]]
-    await update.message.reply_text("🏛️ **الكيان V71.0 (Together AI Core)**\nالنظام نشط بالمفتاح الجديد. اختر النوع:", reply_markup=InlineKeyboardMarkup(kb))
+    await update.message.reply_text("🏛️ **الكيان V73.0 (Gemini Flash Engine)**\nالمحرك المجاني نشط. اختر النوع لبدء الاستنباط:", reply_markup=InlineKeyboardMarkup(kb))
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); data = query.data
@@ -49,12 +48,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             with conn.cursor() as cur:
-                # إضافة سجل جديد فقط (لا يوجد حذف)
+                # حفظ الجولة (Data Persistence)
                 cur.execute("INSERT INTO history (b_num, suit, winner, timestamp) VALUES (%s, %s, %s, %s)",
                            (context.user_data['bonus'], context.user_data['suit'], winner, datetime.datetime.now()))
                 conn.commit()
             conn.close()
-            await query.edit_message_text(f"✅ تم حفظ النتيجة ({winner}) في السجل التاريخي.")
+            await query.edit_message_text(f"✅ تم حفظ النتيجة: {winner}. تم تحديث الذاكرة.")
         except: pass
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -62,12 +61,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.isdigit() and len(text) in [7, 8]:
         if 'suit' not in context.user_data: return
         context.user_data['bonus'] = text
-        msg = await update.message.reply_text("🧬 **جاري استدعاء النماذج العميقة للتحليل الرقمي...**")
+        msg = await update.message.reply_text("🔭 **جاري قراءة الأنماط الزمنية عبر Gemini...**")
         
         now = datetime.datetime.now()
         current_time_str = now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         
-        # قراءة السجل للتحليل (SELECT)
+        # سحب آخر 15 جولة للتحليل (قراءة فقط - لا حذف)
         raw_data = ""
         try:
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
@@ -75,34 +74,28 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cur.execute("SELECT b_num, suit, winner, timestamp FROM history ORDER BY id DESC LIMIT 15")
                 rows = cur.fetchall()
                 for r in rows:
-                    raw_data += f"[{r[3].strftime('%M:%S')}] B:{r[0]} S:{r[1]} -> {r[2]}\n"
+                    raw_data += f"• {r[0]} | {r[1]} | {r[2]} | {r[3].strftime('%M:%S.%f')[:-3]}\n"
             conn.close()
-        except: raw_data = "السجل التاريخي فارغ."
+        except: raw_data = "لا توجد بيانات سابقة."
 
-        prompt = f"""حلل الأنماط التالية كخبير رياضيات:
+        prompt = f"""أنت خبير رياضيات وإحصاء. حلل هذه البيانات التاريخية واستنبط القاعدة القادمة:
 {raw_data}
 
-المعطيات: بونص {text}، ورقة {context.user_data['suit']}، وقت {current_time_str}
-المطلوب: اكتشاف العلاقة بين آخر رقمين في البونص والملي ثانية.
+المعطيات الجديدة:
+البونص: {text} | النوع: {context.user_data['suit']} | التوقيت: {current_time_str}
 
-التنسيق:
-التوقع: 🔵 ثور أو 🔴 راعي
-الثقة: %
-القاعدة: (معادلة رياضية)"""
+المطلوب بدقة:
+1. ابحث عن نمط يربط بين آخر رقمين في البونص وبين أجزاء الثانية (Milliseconds).
+2. التوقع: (🔵 ثور أو 🔴 راعي)
+3. الثقة: %
+4. القاعدة المبتكرة: (اشرح المعادلة الرياضية باختصار)"""
 
-        # استخدام أقوى نماذج Together AI (Llama 3.3 و Qwen 2.5)
         loop = asyncio.get_event_loop()
-        tasks = [
-            loop.run_in_executor(None, ask_ai, "meta-llama/Llama-3.3-70B-Instruct-Turbo", prompt),
-            loop.run_in_executor(None, ask_ai, "Qwen/Qwen2.5-72B-Instruct-Turbo", prompt)
-        ]
-        results = await asyncio.gather(*tasks)
-        r1, r2 = results
+        prediction = await loop.run_in_executor(None, ask_gemini, prompt)
 
         report = (f"⏰ **التوقيت:** `{current_time_str}`\n━━━━━━━━━━━━\n"
-                  f"🧠 **Llama-3.3 التحليل:**\n{r1}\n\n"
-                  f"🤖 **Qwen-2.5 التدقيق:**\n{r2}\n━━━━━━━━━━━━\n"
-                  f"✅ سجل النتيجة الفعلية:")
+                  f"🧠 **تحليل Gemini:**\n{prediction}\n━━━━━━━━━━━━\n"
+                  f"✅ سجل النتيجة الفعلية لتطوير الخوارزمية:")
         
         kb = [[InlineKeyboardButton("🔴 راعي", callback_data="save_راعي"), InlineKeyboardButton("🔵 ثور", callback_data="save_ثور")],
               [InlineKeyboardButton("⚪ تعادل", callback_data="save_تعادل")]]
