@@ -1,40 +1,49 @@
-import os, sys, datetime, asyncio, psycopg2, requests, json
-import pandas as pd
+import os, datetime, psycopg2, pandas as pd
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler, CommandHandler, ContextTypes
 
 # ==================== 1. الإعدادات السيادية ====================
-GROQ_API_KEY = "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"
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
-MODEL_NAME = "llama-3.3-70b-versatile"
 
-# ==================== 2. محرك الاستدلال (Groq) ====================
-def ask_groq_sovereign(prompt):
-    headers = {
-        'Authorization': f'Bearer {GROQ_API_KEY}',
-        'Content-Type': 'application/json; charset=utf-8'
-    }
-    payload = {
-        "model": MODEL_NAME,
-        "messages": [
-            {"role": "system", "content": "أنت محلل بيانات رياضي خبير. حلل الأنماط بدقة."},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.1
-    }
-    try:
-        json_payload = json.dumps(payload, ensure_ascii=False).encode('utf-8')
-        resp = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, data=json_payload, timeout=15)
-        if resp.status_code == 200:
-            return f"⚡ [Groq Analysis]\n{resp.json()['choices'][0]['message']['content'].strip()}"
-        return f"⚠️ خطأ في المحرك (كود {resp.status_code})"
-    except Exception as e:
-        return f"❌ عطل تقني: {str(e)}"
+# ==================== 2. المحرك الرياضي القطعي ====================
+def sovereign_math_engine(b_num, suit, last_timestamp, current_timestamp):
+    """محرك حساب القانون السيادي بدون تدخل الذكاء الاصطناعي"""
+    
+    # 1. حساب عامل البونص (B): مجموع آخر 3 أرقام
+    last_3 = b_num[-3:] if len(b_num) >= 3 else b_num
+    B = sum(int(digit) for digit in last_3 if digit.isdigit())
+    
+    # 2. حساب عامل البذلة (S)
+    S = 1 if suit in ['♦️', '♥️'] else 2
+    
+    # 3. حساب الفجوة الزمنية (ΔT) بالثواني
+    if last_timestamp:
+        delta_t = int((current_timestamp - last_timestamp).total_seconds())
+    else:
+        delta_t = 0 # في حال كانت هذه أول جولة في السجل
+        
+    # 4. المعادلة السيادية: R = (B * S) + ΔT
+    R = (B * S) + delta_t
+    
+    # 5. الاستنتاج
+    is_even = (R % 2 == 0)
+    prediction = "ثور 🔵" if is_even else "راعي 🔴"
+    
+    report = (
+        f"🧮 **المحرك الرياضي النشط**\n"
+        f"━━━━━━━━━━━━\n"
+        f"▪️ البونص ($B$): مجموع {last_3} = {B}\n"
+        f"▪️ البذلة ($S$): {suit} = {S}\n"
+        f"▪️ الفجوة الزمنية ($\Delta T$): {delta_t} ثانية\n"
+        f"▪️ الحسبة ($R$): ({B} × {S}) + {delta_t} = {R}\n"
+        f"━━━━━━━━━━━━\n"
+        f"🎯 **التوقع:** {prediction} (لأن {R} رقم {'زوجي' if is_even else 'فردي'})"
+    )
+    return report
 
-# ==================== 3. معالجات الأوامر (Handlers) ====================
+# ==================== 3. معالجات التليجرام (Handlers) ====================
 
-# تم تعريف callback_handler هنا قبل استدعائها في الأسفل
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -42,17 +51,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if data.startswith("s_"):
         context.user_data['suit'] = data[2:]
-        await query.edit_message_text(f"✅ رادار {data[2:]} نشط.\n📥 أرسل بونص الجولة (7-8 أرقام):")
+        await query.edit_message_text(f"✅ رادار {data[2:]} نشط.\n📥 أرسل بونص الجولة:")
+        
     elif data.startswith("save_"):
         winner = data.split("_")[1]
+        timestamp = context.user_data.get('current_time', datetime.datetime.now())
         try:
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             with conn.cursor() as cur:
                 cur.execute("INSERT INTO history (b_num, suit, winner, timestamp) VALUES (%s, %s, %s, %s)",
-                           (context.user_data.get('bonus'), context.user_data.get('suit'), winner, datetime.datetime.now()))
+                           (context.user_data.get('bonus'), context.user_data.get('suit'), winner, timestamp))
                 conn.commit()
             conn.close()
-            await query.edit_message_text(f"✅ تم حفظ النتيجة: {winner}.")
+            await query.edit_message_text(f"✅ تم أرشفة الجولة ({winner}) في السجل بنجاح.\nالمراقب يسجل البيانات...")
         except Exception as e:
             await query.edit_message_text(f"❌ خطأ في الحفظ: {str(e)}")
 
@@ -61,23 +72,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton("♦️", callback_data="s_♦️"), InlineKeyboardButton("♥️", callback_data="s_♥️")],
           [InlineKeyboardButton("♠️", callback_data="s_♠️"), InlineKeyboardButton("♣️", callback_data="s_♣️")]]
     await update.message.reply_text(
-        "🏛️ **الكيان السيادي V98.0**\nأهلاً بك يا مهندس. النظام جاهز.\n"
-        "استخدم /download لسحب السجل بصيغة Excel.",
-        reply_markup=InlineKeyboardMarkup(kb)
+        "🏛️ **الكيان السيادي V99.0 (الوضع الرياضي)**\n"
+        "تم إيقاف المحرك اللفظي، والاعتماد الآن على خوارزمية الفجوات الزمنية.\n"
+        "اختر النوع للبدء:", reply_markup=InlineKeyboardMarkup(kb)
     )
 
 async def download_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status_msg = await update.message.reply_text("📊 جاري تصدير البيانات...")
+    status_msg = await update.message.reply_text("📊 جاري تصدير السجل السيادي للمراقبة...")
     try:
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-        df = pd.read_sql("SELECT * FROM history ORDER BY id DESC", conn)
+        df = pd.read_sql("SELECT * FROM history ORDER BY id ASC", conn)
         conn.close()
         
-        filename = f"History_{datetime.date.today()}.xlsx"
+        filename = f"Observer_Log_{datetime.date.today()}.xlsx"
         df.to_excel(filename, index=False)
         
         with open(filename, "rb") as f:
-            await update.message.reply_document(document=f, filename=filename, caption="📊 سجل الجولات المكتمل.")
+            await update.message.reply_document(document=f, filename=filename, caption=f"📊 السجل يحتوي على {len(df)} جولة.")
         os.remove(filename)
         await status_msg.delete()
     except Exception as e:
@@ -87,45 +98,44 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text.isdigit() and len(text) >= 7:
         if 'suit' not in context.user_data:
-            await update.message.reply_text("⚠️ اختر النوع أولاً.")
+            await update.message.reply_text("⚠️ اختر البذلة أولاً.")
             return
 
         context.user_data['bonus'] = text
-        msg = await update.message.reply_text("🔎 **جاري استنتاج النمط عبر مصفوفة Groq...**")
+        current_timestamp = datetime.datetime.now()
+        context.user_data['current_time'] = current_timestamp # لحفظها لاحقاً
         
-        now = datetime.datetime.now()
-        time_str = now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        
-        gap_report = ""
+        # جلب توقيت آخر جولة مسجلة لحساب الفجوة
+        last_timestamp = None
         try:
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             with conn.cursor() as cur:
-                cur.execute("SELECT b_num, winner, timestamp FROM history ORDER BY id DESC LIMIT 20")
-                rows = cur.fetchall()
-                for i in range(len(rows)-1):
-                    gap = (rows[i][2] - rows[i+1][2]).total_seconds()
-                    gap_report += f"B:{rows[i][0]}|W:{rows[i][1]}|G:{gap}s\n"
+                cur.execute("SELECT timestamp FROM history ORDER BY id DESC LIMIT 1")
+                row = cur.fetchone()
+                if row:
+                    last_timestamp = row[0]
             conn.close()
-        except: gap_report = "السجل قيد المزامنة."
+        except Exception as e:
+            print(f"Database read error: {e}")
 
-        prompt = f"Analyze:\n{gap_report}\nCurrent: Bonus {text}, Time {time_str}\nPredict Bull/Bear:"
+        # تطبيق القانون الرياضي اللحظي
+        analysis_report = sovereign_math_engine(text, context.user_data['suit'], last_timestamp, current_timestamp)
+
+        time_str = current_timestamp.strftime("%H:%M:%S")
+        final_message = f"⏰ **توقيت الإدخال:** `{time_str}`\n\n{analysis_report}"
         
-        loop = asyncio.get_event_loop()
-        analysis = await loop.run_in_executor(None, ask_groq_sovereign, prompt)
-
-        kb = [[InlineKeyboardButton("🔴 راعي", callback_data="save_راعي"), InlineKeyboardButton("🔵 ثور", callback_data="save_ثور")],
+        kb = [[InlineKeyboardButton("🔴 فاز الراعي", callback_data="save_راعي"), InlineKeyboardButton("🔵 فاز الثور", callback_data="save_ثور")],
               [InlineKeyboardButton("⚪ تعادل", callback_data="save_تعادل")]]
-        await msg.edit_text(f"⏰ `{time_str}`\n\n{analysis}", reply_markup=InlineKeyboardMarkup(kb))
+        
+        await update.message.reply_text(final_message, reply_markup=InlineKeyboardMarkup(kb))
 
-# ==================== 4. تشغيل التطبيق (Application) ====================
+# ==================== 4. التشغيل ====================
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
-    
-    # إضافة المعالجات بالترتيب الصحيح
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("download", download_database))
-    app.add_handler(CallbackQueryHandler(callback_handler)) # تم حل مشكلة الـ NameError
+    app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    print("🚀 البوت يعمل الآن بنجاح على Railway...")
+    print("🚀 البوت يعمل الآن بنظام المحرك الرياضي (V99.0)...")
     app.run_polling()
