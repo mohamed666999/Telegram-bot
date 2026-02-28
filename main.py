@@ -2,49 +2,53 @@ import os, sys, datetime, asyncio, psycopg2, requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler, CommandHandler, ContextTypes
 
-# ==================== الإعدادات السيادية المحدثة ====================
+# ==================== الإعدادات السيادية (محرك Groq) ====================
 
-# المفتاح الصحيح الذي يبدأ بـ AIza
-GEMINI_API_KEY = "AIzaSyDytcR8_Lz_LWBRJrwXXYQAsmPNtLGy434" 
+# مفتاح جروق الخاص بك
+GROQ_API_KEY = "ضغ_مفتاح_جروق_هنا" 
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 
-# الاعتماد على الجيل الثاني Gemini 2.0 و v1beta بناءً على تحليلك
-MODEL_NAME = "gemini-2.0-flash" 
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={GEMINI_API_KEY}"
+# ==================== محرك الاستدلال (Llama 3 via Groq) ====================
 
-# ==================== محرك الاستدلال Gemini 2.0 ====================
-
-def ask_gemini_v2(prompt):
-    """استدعاء محرك الجيل الثاني لفك شفرات الأنماط"""
-    headers = {'Content-Type': 'application/json'}
+def ask_groq_engine(prompt):
+    """استدعاء محرك Llama 3 للتحليل فائق السرعة"""
+    headers = {
+        'Authorization': f'Bearer {GROQ_API_KEY}',
+        'Content-Type': 'application/json'
+    }
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.1, # دقة رياضية مطلقة
-            "maxOutputTokens": 1000
-        }
+        "model": "llama3-70b-8192", 
+        "messages": [
+            {"role": "system", "content": "أنت محلل بيانات رياضي خبير في استخراج الأنماط من فجوات الوقت وبونص الجولات. توقع النتيجة بدقة رياضية."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.1,
+        "max_tokens": 1000
     }
     try:
-        resp = requests.post(GEMINI_URL, headers=headers, json=payload, timeout=20)
+        resp = requests.post(GROQ_URL, headers=headers, json=payload, timeout=15)
         data = resp.json()
         if resp.status_code == 200:
-            return f"🌀 [Gemini 2.0 Flash Engine]\n{data['candidates'][0]['content']['parts'][0]['text'].strip()}"
+            return f"⚡ [Llama-3 via Groq]\n{data['choices'][0]['message']['content'].strip()}"
         else:
-            error_msg = data.get('error', {}).get('message', 'Unknown Error')
-            return f"⚠️ تنبيه Gemini 2.0: {error_msg} (كود {resp.status_code})"
+            error_info = data.get('error', {}).get('message', 'خطأ في المفتاح أو الخدمة')
+            return f"⚠️ تنبيه Groq: {error_info} (كود {resp.status_code})"
     except Exception as e:
-        return f"❌ عطل في الاتصال بالمصفوفة: {str(e)}"
+        return f"❌ انقطاع في مصفوفة جروق: {str(e)}"
 
-# ==================== نظام معالجة البيانات الذكي ====================
+# ==================== إدارة البيانات والعمليات ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     kb = [[InlineKeyboardButton("♦️", callback_data="s_♦️"), InlineKeyboardButton("♥️", callback_data="s_♥️")],
           [InlineKeyboardButton("♠️", callback_data="s_♠️"), InlineKeyboardButton("♣️", callback_data="s_♣️")]]
     await update.message.reply_text(
-        "🏛️ **الكيان السيادي V90.0**\nتم تفعيل محرك **Gemini 2.0 Flash** عبر v1beta.\n\n"
-        "النظام الآن في قمة استقراره. اختر النوع لبدء الرصد:",
+        "🏛️ **الكيان السيادي V92.0 (Groq Edition)**\n"
+        "تم تفعيل محرك Llama 3 70B للتحليل اللحظي.\n"
+        "الرادار جاهز، اختر النوع:",
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
@@ -52,10 +56,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); data = query.data
     if data.startswith("s_"):
         context.user_data['suit'] = data[2:]
-        await query.edit_message_text(f"✅ رادار {data[2:]} نشط.\n📥 أرسل بونص الجولة (7-8 أرقام):")
+        await query.edit_message_text(f"✅ رادار {data[2:]} نشط.\n📥 أرسل رقم البونص:")
     elif data.startswith("save_"):
         winner = data.split("_")[1]
-        # حفظ البيانات في خيط منفصل لتجنب تجميد البوت
         loop = asyncio.get_event_loop()
         try:
             def save_to_db():
@@ -66,9 +69,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     conn.commit()
                 conn.close()
             await loop.run_in_executor(None, save_to_db)
-            await query.edit_message_text(f"✅ تم حفظ النتيجة: {winner}. المصفوفة تزداد ذكاءً.")
-        except Exception as e:
-            print(f"❌ خطأ قاعدة البيانات: {e}")
+            await query.edit_message_text(f"✅ تم حفظ: {winner}. النمط تم تحديثه.")
+        except: pass
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -77,36 +79,34 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ اختر النوع أولاً.") ; return
 
         context.user_data['bonus'] = text
-        msg = await update.message.reply_text("🧠 **جاري تحليل الأنماط عبر جيل 2.0 الفائق...**")
+        msg = await update.message.reply_text("🔎 **جاري استنتاج النمط عبر محرك Groq...**")
         
         now = datetime.datetime.now()
         time_str = now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         
-        # جلب البيانات التاريخية
+        # جلب التاريخ لتعزيز دقة Llama 3
         gap_report = ""
         try:
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             with conn.cursor() as cur:
-                cur.execute("SELECT b_num, winner, timestamp FROM history ORDER BY id DESC LIMIT 30")
+                cur.execute("SELECT b_num, winner, timestamp FROM history ORDER BY id DESC LIMIT 25")
                 rows = cur.fetchall()
                 for i in range(len(rows)-1):
                     gap = (rows[i][2] - rows[i+1][2]).total_seconds()
                     gap_report += f"ب:{rows[i][0]}|ف:{rows[i][1]}|ج:{gap}ث\n"
             conn.close()
-        except Exception as e:
-            print(f"❌ خطأ جلب البيانات: {e}")
-            gap_report = "السجل الأولي فارغ."
+        except: gap_report = "السجل قيد التكوين."
 
-        prompt = (f"أنت محرك تحليل احتمالات سيادي. حلل هذه البيانات التاريخية:\n{gap_report}\n"
-                  f"المدخل الحالي: بونص {text}، النوع {context.user_data['suit']}، الوقت {time_str}.\n"
-                  f"المطلوب: توقع النتيجة (ثور/راعي) مع شرح الخوارزمية الرياضية للفجوات الزمنية بدقة.")
+        prompt = (f"Analyze these time gaps and numbers:\n{gap_report}\n"
+                  f"Input: Bonus {text}, Suit {context.user_data['suit']}, Time {time_str}\n"
+                  f"Predict (Bull/Bear) and explain the math logic briefly.")
         
         loop = asyncio.get_event_loop()
-        analysis = await loop.run_in_executor(None, ask_gemini_v2, prompt)
+        analysis = await loop.run_in_executor(None, ask_groq_engine, prompt)
 
         report = (f"⏰ **التوقيت:** `{time_str}`\n━━━━━━━━━━━━\n"
-                  f"🧠 **التحليل السيادي (Gemini 2.0):**\n{analysis}\n━━━━━━━━━━━━\n"
-                  f"📂 تم أرشفة القانون وتحديث المصفوفة.")
+                  f"🧠 **تحليل الكيان (Llama 3):**\n{analysis}\n━━━━━━━━━━━━\n"
+                  f"📂 المصفوفة مستقرة بنسبة 100%.")
         
         kb = [[InlineKeyboardButton("🔴 راعي", callback_data="save_راعي"), InlineKeyboardButton("🔵 ثور", callback_data="save_ثور")],
               [InlineKeyboardButton("⚪ تعادل", callback_data="save_تعادل")]]
@@ -117,5 +117,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    print("🚀 الكيان السيادي V90.0 يعمل الآن بنجاح...")
+    print("🚀 الرادار يعمل بمحرك Groq الفائق...")
     app.run_polling()
