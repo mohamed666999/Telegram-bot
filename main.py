@@ -1,141 +1,134 @@
-import os, datetime, psycopg2, pandas as pd
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler, CommandHandler, ContextTypes
+import joblib
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.preprocessing import StandardScaler
+from collections import deque
 
-# ==================== 1. الإعدادات السيادية ====================
-TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
-DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
+class HADES_Engine:
+    def __init__(self, db_conn):
+        self.conn = db_conn
+        self.digit_model = None
+        self.temporal_model = None
+        self.scaler = StandardScaler()
+        self.history_df = None
+        self.recent_accuracy = {'digit': 0.5, 'temporal': 0.5, 'sequential': 0.5, 'frequency': 0.5}
+        self.last_50_results = deque(maxlen=50)
+        self.last_50_predictions = {'digit': deque(maxlen=50), 'temporal': deque(maxlen=50), 
+                                    'sequential': deque(maxlen=50), 'frequency': deque(maxlen=50)}
+        self.load_data()
+        self.train_models()
 
-# ==================== 2. المحرك الرياضي القطعي ====================
-def sovereign_math_engine(b_num, suit, last_timestamp, current_timestamp):
-    """محرك حساب القانون السيادي بدون تدخل الذكاء الاصطناعي"""
-    
-    # 1. حساب عامل البونص (B): مجموع آخر 3 أرقام
-    last_3 = b_num[-3:] if len(b_num) >= 3 else b_num
-    B = sum(int(digit) for digit in last_3 if digit.isdigit())
-    
-    # 2. حساب عامل البذلة (S)
-    S = 1 if suit in ['♦️', '♥️'] else 2
-    
-    # 3. حساب الفجوة الزمنية (ΔT) بالثواني
-    if last_timestamp:
-        delta_t = int((current_timestamp - last_timestamp).total_seconds())
-    else:
-        delta_t = 0 # في حال كانت هذه أول جولة في السجل
-        
-    # 4. المعادلة السيادية: R = (B * S) + ΔT
-    R = (B * S) + delta_t
-    
-    # 5. الاستنتاج
-    is_even = (R % 2 == 0)
-    prediction = "ثور 🔵" if is_even else "راعي 🔴"
-    
-    report = (
-        f"🧮 **المحرك الرياضي النشط**\n"
-        f"━━━━━━━━━━━━\n"
-        f"▪️ البونص ($B$): مجموع {last_3} = {B}\n"
-        f"▪️ البذلة ($S$): {suit} = {S}\n"
-        f"▪️ الفجوة الزمنية ($\Delta T$): {delta_t} ثانية\n"
-        f"▪️ الحسبة ($R$): ({B} × {S}) + {delta_t} = {R}\n"
-        f"━━━━━━━━━━━━\n"
-        f"🎯 **التوقع:** {prediction} (لأن {R} رقم {'زوجي' if is_even else 'فردي'})"
-    )
-    return report
+    def load_data(self):
+        # تحميل جميع الجولات من قاعدة البيانات وتحويلها إلى DataFrame مع الميزات
+        query = "SELECT b_num, suit, winner, timestamp FROM history ORDER BY id ASC"
+        df = pd.read_sql(query, self.conn)
+        # فلترة البيانات الرقمية وتحويلها (كما في التحليل أعلاه)
+        # ... (نفس كود التحويل السابق)
+        self.history_df = processed_df
 
-# ==================== 3. معالجات التليجرام (Handlers) ====================
+    def train_models(self):
+        # تدريب نموذج الأرقام
+        X_digit = self.history_df[['len','sum_digits','last_digit','parity_sum','num_even_digits','mod_3','mod_5','suit_code']]
+        y = self.history_df['winner_code']
+        self.digit_model = RandomForestClassifier(n_estimators=100, max_depth=10)
+        self.digit_model.fit(X_digit, y)
 
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    
-    if data.startswith("s_"):
-        context.user_data['suit'] = data[2:]
-        await query.edit_message_text(f"✅ رادار {data[2:]} نشط.\n📥 أرسل بونص الجولة:")
-        
-    elif data.startswith("save_"):
-        winner = data.split("_")[1]
-        timestamp = context.user_data.get('current_time', datetime.datetime.now())
-        try:
-            conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-            with conn.cursor() as cur:
-                cur.execute("INSERT INTO history (b_num, suit, winner, timestamp) VALUES (%s, %s, %s, %s)",
-                           (context.user_data.get('bonus'), context.user_data.get('suit'), winner, timestamp))
-                conn.commit()
-            conn.close()
-            await query.edit_message_text(f"✅ تم أرشفة الجولة ({winner}) في السجل بنجاح.\nالمراقب يسجل البيانات...")
-        except Exception as e:
-            await query.edit_message_text(f"❌ خطأ في الحفظ: {str(e)}")
+        # تدريب نموذج الزمني
+        X_temp = self.history_df[['delta_t','hour','day_of_week']]
+        # تطبيع
+        X_temp_scaled = self.scaler.fit_transform(X_temp)
+        self.temporal_model = GradientBoostingClassifier(n_estimators=100, max_depth=5)
+        self.temporal_model.fit(X_temp_scaled, y)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    kb = [[InlineKeyboardButton("♦️", callback_data="s_♦️"), InlineKeyboardButton("♥️", callback_data="s_♥️")],
-          [InlineKeyboardButton("♠️", callback_data="s_♠️"), InlineKeyboardButton("♣️", callback_data="s_♣️")]]
-    await update.message.reply_text(
-        "🏛️ **الكيان السيادي V99.0 (الوضع الرياضي)**\n"
-        "تم إيقاف المحرك اللفظي، والاعتماد الآن على خوارزمية الفجوات الزمنية.\n"
-        "اختر النوع للبدء:", reply_markup=InlineKeyboardMarkup(kb)
-    )
+        # تجهيز سلاسل ماركوف للتسلسلي
+        self.build_markov_chain()
 
-async def download_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status_msg = await update.message.reply_text("📊 جاري تصدير السجل السيادي للمراقبة...")
-    try:
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-        df = pd.read_sql("SELECT * FROM history ORDER BY id ASC", conn)
-        conn.close()
-        
-        filename = f"Observer_Log_{datetime.date.today()}.xlsx"
-        df.to_excel(filename, index=False)
-        
-        with open(filename, "rb") as f:
-            await update.message.reply_document(document=f, filename=filename, caption=f"📊 السجل يحتوي على {len(df)} جولة.")
-        os.remove(filename)
-        await status_msg.delete()
-    except Exception as e:
-        await status_msg.edit_text(f"❌ فشل الاستخراج: {str(e)}")
+    def build_markov_chain(self):
+        # حساب احتمالات الانتقال من آخر نتيجتين
+        # نقوم ببناء قاموس transition[(prev2, prev1)] = [count0, count1, count2]
+        # يتم تحديثه لاحقًا مع كل جولة جديدة
+        self.transition_counts = {}
+        winners = self.history_df['winner_code'].values
+        for i in range(2, len(winners)):
+            key = (winners[i-2], winners[i-1])
+            if key not in self.transition_counts:
+                self.transition_counts[key] = [0,0,0]
+            self.transition_counts[key][winners[i]] += 1
 
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if text.isdigit() and len(text) >= 7:
-        if 'suit' not in context.user_data:
-            await update.message.reply_text("⚠️ اختر البذلة أولاً.")
-            return
+    def sequential_prediction(self, last_two_results):
+        # last_two_results = (prev_winner_code, prev_prev_winner_code) أو None
+        if last_two_results is None or last_two_results not in self.transition_counts:
+            return [1/3, 1/3, 1/3]  # احتمالات متساوية
+        counts = self.transition_counts[last_two_results]
+        total = sum(counts)
+        if total == 0:
+            return [1/3, 1/3, 1/3]
+        return [c/total for c in counts]
 
-        context.user_data['bonus'] = text
-        current_timestamp = datetime.datetime.now()
-        context.user_data['current_time'] = current_timestamp # لحفظها لاحقاً
-        
-        # جلب توقيت آخر جولة مسجلة لحساب الفجوة
-        last_timestamp = None
-        try:
-            conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-            with conn.cursor() as cur:
-                cur.execute("SELECT timestamp FROM history ORDER BY id DESC LIMIT 1")
-                row = cur.fetchone()
-                if row:
-                    last_timestamp = row[0]
-            conn.close()
-        except Exception as e:
-            print(f"Database read error: {e}")
+    def frequency_prediction(self, b_num_features, suit):
+        # البحث عن جولات مشابهة (نفس last_digit، نفس suit) في التاريخ
+        similar = self.history_df[(self.history_df['last_digit'] == b_num_features['last_digit']) & 
+                                  (self.history_df['suit_code'] == suit)]
+        if len(similar) == 0:
+            # توسيع البحث: نفس parity_last
+            similar = self.history_df[(self.history_df['parity_last'] == b_num_features['last_digit']%2) & 
+                                      (self.history_df['suit_code'] == suit)]
+        if len(similar) == 0:
+            return [1/3, 1/3, 1/3]
+        # وزن زمني: الجولات الأحدث لها وزن أكبر
+        weights = np.exp(-np.arange(len(similar))[::-1] / 50)  # توزيع أسي
+        winner_counts = np.bincount(similar['winner_code'].values, weights=weights, minlength=3)
+        return winner_counts / winner_counts.sum()
 
-        # تطبيق القانون الرياضي اللحظي
-        analysis_report = sovereign_math_engine(text, context.user_data['suit'], last_timestamp, current_timestamp)
+    def predict(self, b_num_str, suit, last_timestamp, current_timestamp, last_two_results):
+        # استخراج ميزات b_num
+        features = extract_features(b_num_str)  # دالة مساعدة
+        suit_code = 1 if suit in ['♦️','♥️'] else 2
 
-        time_str = current_timestamp.strftime("%H:%M:%S")
-        final_message = f"⏰ **توقيت الإدخال:** `{time_str}`\n\n{analysis_report}"
-        
-        kb = [[InlineKeyboardButton("🔴 فاز الراعي", callback_data="save_راعي"), InlineKeyboardButton("🔵 فاز الثور", callback_data="save_ثور")],
-              [InlineKeyboardButton("⚪ تعادل", callback_data="save_تعادل")]]
-        
-        await update.message.reply_text(final_message, reply_markup=InlineKeyboardMarkup(kb))
+        # ميزات رقمية
+        X_digit = np.array([[features['len'], features['sum_digits'], features['last_digit'],
+                              features['parity_sum'], features['num_even_digits'],
+                              features['mod_3'], features['mod_5'], suit_code]])
+        prob_digit = self.digit_model.predict_proba(X_digit)[0]
 
-# ==================== 4. التشغيل ====================
-if __name__ == "__main__":
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("download", download_database))
-    app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    
-    print("🚀 البوت يعمل الآن بنظام المحرك الرياضي (V99.0)...")
-    app.run_polling()
+        # ميزات زمنية
+        delta_t = (current_timestamp - last_timestamp).total_seconds() if last_timestamp else 0
+        hour = current_timestamp.hour
+        day = current_timestamp.weekday()
+        X_temp = np.array([[delta_t, hour, day]])
+        X_temp_scaled = self.scaler.transform(X_temp)
+        prob_temp = self.temporal_model.predict_proba(X_temp_scaled)[0]
+
+        # تسلسلي
+        prob_seq = self.sequential_prediction(last_two_results)
+
+        # تكراري
+        prob_freq = self.frequency_prediction(features, suit_code)
+
+        # الدمج بالأوزان الديناميكية
+        weights = np.array([self.recent_accuracy['digit'], self.recent_accuracy['temporal'],
+                            self.recent_accuracy['sequential'], self.recent_accuracy['frequency']])
+        weights = weights / weights.sum()
+        prob_final = (weights[0] * prob_digit + weights[1] * prob_temp +
+                      weights[2] * prob_seq + weights[3] * prob_freq)
+
+        prediction = np.argmax(prob_final)
+        confidence = prob_final[prediction]
+
+        # تخزين التنبؤات الحالية لتحديث الأوزان لاحقًا
+        self.last_50_predictions['digit'].append(np.argmax(prob_digit))
+        self.last_50_predictions['temporal'].append(np.argmax(prob_temp))
+        self.last_50_predictions['sequential'].append(np.argmax(prob_seq))
+        self.last_50_predictions['frequency'].append(np.argmax(prob_freq))
+        self.last_50_results.append(prediction)  # هذا مؤقت حتى نعرف النتيجة الحقيقية
+
+        return prediction, confidence, prob_final
+
+    def update_after_result(self, actual_winner):
+        # تحديث الأوزان بناءً على دقة كل مصنف في آخر 50 جولة
+        # يجب استدعاء هذه الدالة بعد معرفة النتيجة الحقيقية
+        # لدينا last_50_predictions لكل مصنف و last_50_results (التوقعات النهائية فقط، نحتاج الفعلية)
+        # هنا نفترض أننا نخزن النتائج الفعلية في قائمة actual_results
+        # سيتم تنفيذ هذا الجزء بشكل منفصل في البوت
+        pass
