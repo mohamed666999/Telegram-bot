@@ -6,6 +6,7 @@ from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQu
 KEY_1 = "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"
 KEY_2 = "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"
 KEY_3 = "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"
+KEY_4 = "xai-625BykGM1tRwraxJTXDnN8WEXyzQCGZbay8iA8JTPfqVzjaUQEVdD5oVcvSxoIXAuMC7rffEvAUUxTex"
 
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
