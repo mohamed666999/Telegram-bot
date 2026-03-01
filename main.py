@@ -12,7 +12,6 @@ TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 ADMIN_ID = 6033203084  # معرف المسؤول
 
-# خطط الاشتراك (بالأيام)
 PLANS = {
     'day': 1,
     'two_days': 2,
@@ -20,7 +19,6 @@ PLANS = {
     'month': 30
 }
 
-# خريطة تحويل أسماء الفائزين إلى أرقام
 WINNER_MAP = {
     'الراعي 🔴': 0, 'راعي': 0, 'الراعي': 0, '🔴': 0,
     'الثور 🔵': 1, 'ثور': 1, 'الثور': 1, '🔵': 1,
@@ -192,8 +190,36 @@ def bayesian_adjustment(prediction_code: int, current_hour: int, conn, min_sampl
         return prediction_code, None, None
 
 # ==================== 6. أوامر البوت ====================
-# (هنا نضع جميع async def مثل start، subscribe، generate_keys_command، message_handler، callback_handler، performance_command، model_status، my_subscription)
-# ... [كودك الكامل كما أرسلته]
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    subscribed, plan, remaining = is_user_subscribed(user_id)
+    
+    if not subscribed:
+        await update.message.reply_text(
+            "🔐 **مرحبًا بك في HADES V100.2**\n"
+            "للاستخدام، يجب عليك إدخال مفتاح اشتراك صالح.\n"
+            "أرسل المفتاح الآن، أو تواصل مع المسؤول للحصول على مفتاح."
+        )
+        return
+    
+    context.user_data.clear()
+    kb = [
+        [InlineKeyboardButton("♦️ ديناري (أحمر)", callback_data="s_♦️"), 
+         InlineKeyboardButton("♥️ قلب (أحمر)", callback_data="s_♥️")],
+        [InlineKeyboardButton("♠️ سبايد (أسود)", callback_data="s_♠️"), 
+         InlineKeyboardButton("♣️ كلبة (أسود)", callback_data="s_♣️")]
+    ]
+    remaining_text = f"اشتراكك ({plan}) متبقي {remaining} يوم." if remaining > 0 else ""
+    await update.message.reply_text(
+        f"🏛️ **الكيان السيادي HADES V100.2**\n"
+        f"محرك تنبؤي بايزي متطور مع تحليل زمني.\n"
+        f"{remaining_text}\n\n"
+        "🎴 اختر نوع البذلة:",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode='Markdown'
+    )
+
+# باقي الدوال async مثل subscribe, generate_keys_command, my_subscription, performance_command, model_status, message_handler, callback_handler ...
 
 # ==================== 8. التشغيل الرئيسي ====================
 if __name__ == "__main__":
@@ -202,7 +228,7 @@ if __name__ == "__main__":
     
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # ← هذه الإضافة صحيحة وكاملة الآن:
+    # إضافة المعالجات بعد تعريف كل الدوال
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("performance", performance_command))
     app.add_handler(CommandHandler("status", model_status))
