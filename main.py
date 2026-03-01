@@ -257,18 +257,19 @@ def sovereign_math_engine(b_num: str, suit: str, last_timestamp, current_timesta
     prediction_text = WINNER_NAMES[prediction_code]
     return prediction_text, prediction_code, R, delta_t, B, S
 
-# ==================== 6. دالة تحليل بايزي المحسّنة (باستخدام كل البيانات) ====================
+# ==================== 6. دالة تحليل بايزي المحسّنة (مع استبعاد البيانات غير الرقمية) ====================
 def bayesian_analysis(conn, current_hour: int, min_samples: int = 30):
     """
-    تحليل بايزي كامل باستخدام جميع البيانات التاريخية لحساب الاحتمالات الشرطية حسب الفترة الزمنية.
+    تحليل بايزي كامل باستخدام البيانات التاريخية ذات b_num الرقمية فقط لحساب الاحتمالات الشرطية حسب الفترة الزمنية.
     تُرجع قاموساً يحتوي على احتمالات كل فائز في كل فترة.
     """
     try:
-        # جلب كل البيانات (بدون حد) - قد يكون ثقيلاً لكنه دقيق
+        # جلب البيانات مع استبعاد الجولات غير الرقمية (b_num غير رقمي)
         df = pd.read_sql("""
             SELECT winner, timestamp 
             FROM history 
-            WHERE winner IS NOT NULL
+            WHERE winner IS NOT NULL 
+              AND b_num ~ '^[0-9]+$'   -- فقط b_num الرقمية
         """, conn)
         
         if len(df) < min_samples:
@@ -902,7 +903,7 @@ if __name__ == "__main__":
     # معالج الأزرار
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    print("🚀 HADES V100.2 يعمل... (نظام هجين: معادلة + بايزي)")
+    print("🚀 HADES V100.2 يعمل... (نظام هجين: معادلة + بايزي مع استبعاد البيانات غير الرقمية)")
     print("🏛️ محرك تنبؤي متكيف مع تحليل كامل للبيانات")
     print("📥 أمر التحميل /download متاح للمسؤول فقط")
     app.run_polling()
