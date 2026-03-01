@@ -590,7 +590,49 @@ async def model_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ: {e}")
 
-# ==================== 8. المعالجات الأساسية ====================
+# ==================== 8. أوامر جديدة ====================
+
+async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """حذف آخر إدخال للمستخدم (إذا كان خاطئاً)"""
+    user_id = update.effective_user.id
+    
+    # التحقق من الاشتراك أو كونه أدمن
+    subscribed, _, _ = is_user_subscribed(user_id)
+    if not subscribed and user_id != ADMIN_ID:
+        await update.message.reply_text("🔐 يجب أن يكون لديك اشتراك صالح لاستخدام هذا الأمر.")
+        return
+    
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    cur = conn.cursor()
+    
+    if user_id == ADMIN_ID:
+        # الأدمن: يحذف آخر إدخال بشكل عام (يمكن تعديله حسب الرغبة)
+        cur.execute("SELECT id FROM history ORDER BY id DESC LIMIT 1")
+        row = cur.fetchone()
+        if row:
+            cur.execute("DELETE FROM history WHERE id = %s", (row[0],))
+            conn.commit()
+            await update.message.reply_text("🗑️ تم حذف آخر إدخال في السجل.")
+        else:
+            await update.message.reply_text("⚠️ لا توجد إدخالات للحذف.")
+    else:
+        # مستخدم عادي: يحذف آخر إدخال خاص به فقط
+        cur.execute("""
+            SELECT id FROM history 
+            WHERE user_id = %s 
+            ORDER BY id DESC LIMIT 1
+        """, (user_id,))
+        row = cur.fetchone()
+        if row:
+            cur.execute("DELETE FROM history WHERE id = %s", (row[0],))
+            conn.commit()
+            await update.message.reply_text("🗑️ تم حذف آخر إدخال لك.")
+        else:
+            await update.message.reply_text("⚠️ لا توجد إدخالات سابقة لك.")
+    
+    conn.close()
+
+# ==================== 9. المعالجات الأساسية ====================
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """معالج إدخال رقم البونص مع Bayesian Adjustment وقيود التباعد"""
@@ -749,6 +791,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     context.user_data['correct_streak'] = 0
             
+            # إنشاء زر لبدء جولة جديدة
+            keyboard = [[InlineKeyboardButton("🔄 بدء جولة جديدة", callback_data="new_round")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
             await query.edit_message_text(
                 f"{is_correct} **تم التسجيل**\n\n"
                 f"🎯 توقعنا: {pred_winner}\n"
@@ -757,12 +803,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"/performance - التحليل\n"
                 f"/status - حالة النموذج\n"
                 f"/mysub - اشتراكي",
-                parse_mode='Markdown'
+                parse_mode='Markdown',
+                reply_markup=reply_markup
             )
         except Exception as e:
             await query.edit_message_text(f"❌ خطأ في الحفظ: {e}")
 
-# ==================== 9. التشغيل الرئيسي ====================
+    elif query.data == "new_round":
+        # تنفيذ أمر /start
+        await start(update, context)
+
+# ==================== 10. التشغيل الرئيسي ====================
 if __name__ == "__main__":
     # تهيئة جدول الاشتراكات
     init_subscription_table()
@@ -784,6 +835,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("status", model_status))
     app.add_handler(CommandHandler("generate_keys", generate_keys_command))
     app.add_handler(CommandHandler("mysub", my_subscription))
+    app.add_handler(CommandHandler("delete", delete_command))  # الأمر الجديد
 
     # معالج النصوص (للبونص والمفاتيح)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
