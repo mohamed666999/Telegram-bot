@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 import secrets
 import random
+from collections import deque
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler, CommandHandler, ContextTypes
 
@@ -26,8 +27,6 @@ WINNER_MAP = {
     'تعادل ⚪': 2, 'تعادل': 2, '⚪': 2
 }
 WINNER_NAMES = {0: 'الراعي 🔴', 1: 'الثور 🔵', 2: 'تعادل ⚪'}
-
-CONFIDENCE_THRESHOLD = 0.65
 
 # ==================== 2. دوال تحليل الوقت ====================
 def get_time_period(hour):
@@ -162,15 +161,155 @@ def update_session_after_play(context):
 def inject_fake_prediction(pred_code):
     return 1 if pred_code == 0 else 0
 
-# ==================== 5. المحرك الرياضي الأساسي ====================
-def sovereign_math_engine(b_num, suit, last_timestamp, current_timestamp):
-    last_3 = b_num[-3:] if len(b_num) >= 3 else b_num
-    B = sum(int(d) for d in last_3 if d.isdigit())
-    S = 1 if suit in ['♦️', '♥️'] else 2
-    delta_t = int((current_timestamp - last_timestamp).total_seconds()) if last_timestamp else 0
-    R = (B * S) + delta_t
-    pred_code = 1 if (R % 2 == 0) else 0
-    return WINNER_NAMES[pred_code], pred_code, R, delta_t, B, S
+# ==================== 5. إدارة الأوزان والنموذج الخطي ====================
+def init_weights_table():
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS model_weights (
+            class INTEGER NOT NULL,
+            feature VARCHAR(50) NOT NULL,
+            weight FLOAT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (class, feature)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def load_weights(conn):
+    weights = [{}, {}, {}]  # 0=راعي, 1=ثور, 2=تعادل
+    cur = conn.cursor()
+    cur.execute("SELECT class, feature, weight FROM model_weights")
+    rows = cur.fetchall()
+    if rows:
+        for class_idx, feat, w in rows:
+            weights[class_idx][feat] = w
+    else:
+        # أوزان افتراضية (تميل للمعادلة الأصلية)
+        default_weights = [
+            {'sum_digits': 1.0, 'last_digit': 0.0, 'parity': 0.0, 'even_count': 0.0,
+             'mean_digit': 0.0, 'span_digit': 0.0, 'suit': 0.5, 'delta_t_log': 0.1,
+             'time_bucket': 0.0, 'last_winner': 0.0},
+            {'sum_digits': 1.0, 'last_digit': 0.0, 'parity': 0.0, 'even_count': 0.0,
+             'mean_digit': 0.0, 'span_digit': 0.0, 'suit': 0.5, 'delta_t_log': 0.1,
+             'time_bucket': 0.0, 'last_winner': 0.0},
+            {'sum_digits': 0.0, 'last_digit': 0.0, 'parity': 0.0, 'even_count': 0.0,
+             'mean_digit': 0.0, 'span_digit': 0.0, 'suit': 0.0, 'delta_t_log': 0.0,
+             'time_bucket': 0.0, 'last_winner': 0.0}
+        ]
+        for i in range(3):
+            for feat, w in default_weights[i].items():
+                weights[i][feat] = w
+    return weights
+
+def save_weights(conn, weights):
+    cur = conn.cursor()
+    # حذف القديم
+    cur.execute("DELETE FROM model_weights")
+    # إدراج الجديد
+    for class_idx, feat_dict in enumerate(weights):
+        for feat, w in feat_dict.items():
+            cur.execute(
+                "INSERT INTO model_weights (class, feature, weight) VALUES (%s, %s, %s)",
+                (class_idx, feat, w)
+            )
+    conn.commit()
+
+def extract_math_features(b_num: str, suit: str, delta_t: int, last_winner: int = None):
+    """
+    استخراج الميزات من الرقم والبذلة والفجوة الزمنية.
+    last_winner: 0,1,2 أو None.
+    """
+    digits = [int(d) for d in b_num if d.isdigit()]
+    if not digits:
+        return None
+    # ميزات أساسية
+    sum_digits = sum(digits[-3:])            # مجموع آخر 3 أرقام
+    last_digit = digits[-1]                   # آخر رقم
+    parity = last_digit % 2                    # 0 زوجي, 1 فردي
+    even_count = sum(1 for d in digits if d % 2 == 0)  # عدد الأرقام الزوجية
+    mean_digit = sum(digits) / len(digits)     # متوسط الأرقام
+    span_digit = max(digits) - min(digits)     # المدى
+    suit_code = 1 if suit in ['♦️', '♥️'] else 2  # لون البذلة
+    delta_t_log = np.log1p(delta_t)            # ln(ΔT+1)
+
+    # تقسيم الفجوة الزمنية إلى فئات (time bucket)
+    if delta_t < 30:
+        time_bucket = 0
+    elif delta_t < 300:
+        time_bucket = 1
+    elif delta_t < 1800:
+        time_bucket = 2
+    else:
+        time_bucket = 3
+
+    # تجميع الميزات (بدون تطبيع بعد)
+    raw = {
+        'sum_digits': sum_digits,
+        'last_digit': last_digit,
+        'parity': parity,
+        'even_count': even_count,
+        'mean_digit': mean_digit,
+        'span_digit': span_digit,
+        'suit': suit_code,
+        'delta_t_log': delta_t_log,
+        'time_bucket': time_bucket,
+    }
+    if last_winner is not None:
+        raw['last_winner'] = last_winner
+
+    # تطبيع الميزات (جعلها في نطاق 0-1 تقريباً)
+    normalized = {
+        'sum_digits': raw['sum_digits'] / 27.0,
+        'last_digit': raw['last_digit'] / 9.0,
+        'parity': float(raw['parity']),          # 0 أو 1
+        'even_count': raw['even_count'] / 6.0,
+        'mean_digit': raw['mean_digit'] / 9.0,
+        'span_digit': raw['span_digit'] / 9.0,
+        'suit': raw['suit'] / 2.0,
+        'delta_t_log': raw['delta_t_log'] / 10.0,
+        'time_bucket': raw['time_bucket'] / 3.0,
+    }
+    if last_winner is not None:
+        normalized['last_winner'] = raw['last_winner'] / 2.0
+
+    return normalized
+
+def predict_linear(features, weights):
+    """
+    حساب الدرجات لكل فئة باستخدام الأوزان الخطية.
+    تُرجع (الفئة المتوقعة, مصفوفة الاحتمالات).
+    """
+    scores = []
+    for i in range(3):
+        score = 0.0
+        for feat, val in features.items():
+            score += weights[i].get(feat, 0.0) * val
+        scores.append(score)
+    # تحويل إلى احتمالات عبر softmax
+    exp_scores = np.exp(scores - np.max(scores))  # للاستقرار العددي
+    probs = exp_scores / np.sum(exp_scores)
+    return int(np.argmax(probs)), probs
+
+def update_weights(weights, features, predicted_class, actual_class, lr=0.005, reg=0.0001):
+    """
+    تحديث الأوزان بطريقة perceptron مع L2 regularization.
+    """
+    if predicted_class == actual_class:
+        return weights  # لا تحديث إذا كان صحيحاً (اختياري، يمكنك دائماً التحديث بقوة أقل)
+
+    for key, val in features.items():
+        # زيادة وزن الفئة الصحيحة
+        weights[actual_class][key] += lr * val
+        # تقليل وزن الفئة المتوقعة الخاطئة
+        weights[predicted_class][key] -= lr * val
+
+        # تطبيق regularization (L2 بسيط)
+        weights[actual_class][key] *= (1 - reg)
+        weights[predicted_class][key] *= (1 - reg)
+
+    return weights
 
 # ==================== 6. التحليل البايزي (مع استبعاد غير الرقمي) ====================
 def bayesian_analysis(conn, current_hour, min_samples=30):
@@ -204,43 +343,51 @@ def bayesian_analysis(conn, current_hour, min_samples=30):
         print(f"Bayesian Error: {e}")
         return None
 
-# ==================== 7. القرار الهجين ====================
-def hybrid_prediction(b_num, suit, last_timestamp, current_timestamp, bayesian_probs):
-    math_text, math_code, R, gap, B, S = sovereign_math_engine(b_num, suit, last_timestamp, current_timestamp)
-    if bayesian_probs is None:
-        return math_text, math_code, R, gap, B, S, "معادلة فقط"
-    current_period = get_time_period(current_timestamp.hour)
-    period_probs = bayesian_probs.get(current_period)
-    if period_probs is None:
-        return math_text, math_code, R, gap, B, S, "معادلة فقط (لا بيانات كافية للفترة)"
-    p_rai, p_thawr, p_tie = period_probs
-    math_confidence = 0.7
-    probs = [p_rai, p_thawr, p_tie]
-    probs_sorted = sorted(probs, reverse=True)
-    bayes_confidence = probs_sorted[0] - probs_sorted[1]
-    if bayes_confidence > CONFIDENCE_THRESHOLD:
-        if probs_sorted[0] == p_rai:
-            final_code = 0
-        elif probs_sorted[0] == p_thawr:
-            final_code = 1
+# ==================== 7. دمج بايزي مع النموذج الخطي ====================
+def hybrid_prediction(b_num, suit, last_timestamp, current_timestamp, bayesian_probs, math_weights, last_winner=None):
+    delta_t = int((current_timestamp - last_timestamp).total_seconds()) if last_timestamp else 0
+    features = extract_math_features(b_num, suit, delta_t, last_winner)
+    if features is None:
+        return "تعادل ⚪", 2, 0, delta_t, 0, 0, "خطأ في استخراج الميزات"
+
+    # التنبؤ بالنموذج الخطي
+    linear_class, linear_probs = predict_linear(features, math_weights)
+    linear_confidence = max(linear_probs)
+
+    # التنبؤ البايزي
+    if bayesian_probs:
+        current_period = get_time_period(current_timestamp.hour)
+        period_probs = bayesian_probs.get(current_period)
+        if period_probs:
+            p_rai, p_thawr, p_tie = period_probs
+            bayes_probs = np.array([p_rai, p_thawr, p_tie])
+            bayes_class = int(np.argmax(bayes_probs))
+            bayes_confidence = max(bayes_probs)
         else:
-            final_code = 2
-        final_text = WINNER_NAMES[final_code]
-        return final_text, final_code, R, gap, B, S, f"بايزي (ثقة {bayes_confidence:.2f})"
-    elif math_confidence > CONFIDENCE_THRESHOLD:
-        return math_text, math_code, R, gap, B, S, "معادلة (ثقة افتراضية)"
+            bayes_class, bayes_probs, bayes_confidence = None, None, 0.0
     else:
-        weighted_rai = 0.7 * (1 if math_code == 0 else 0) + 0.3 * p_rai
-        weighted_thawr = 0.7 * (1 if math_code == 1 else 0) + 0.3 * p_thawr
-        weighted_tie = 0.7 * (1 if math_code == 2 else 0) + 0.3 * p_tie
-        if weighted_rai > weighted_thawr and weighted_rai > weighted_tie:
-            final_code = 0
-        elif weighted_thawr > weighted_rai and weighted_thawr > weighted_tie:
-            final_code = 1
+        bayes_class, bayes_probs, bayes_confidence = None, None, 0.0
+
+    # دمج القرارات (نظام تصويت مرجح)
+    if bayes_confidence > 0.6:
+        # بايزي واثق
+        final_class = bayes_class
+        reason = f"بايزي (ثقة {bayes_confidence:.2f})"
+    elif linear_confidence > 0.7:
+        # النموذج الخطي واثق
+        final_class = linear_class
+        reason = f"نموذج خطي (ثقة {linear_confidence:.2f})"
+    else:
+        # مزج بسيط
+        if bayes_probs is not None:
+            mixed_probs = 0.6 * linear_probs + 0.4 * bayes_probs
         else:
-            final_code = 2
-        final_text = WINNER_NAMES[final_code]
-        return final_text, final_code, R, gap, B, S, f"مزج: معادلة {math_text}, بايزي راعي {p_rai:.2f} ثور {p_thawr:.2f}"
+            mixed_probs = linear_probs
+        final_class = int(np.argmax(mixed_probs))
+        reason = "مزج (60% خطي + 40% بايزي)" if bayes_probs is not None else "نموذج خطي فقط"
+
+    final_text = WINNER_NAMES[final_class]
+    return final_text, final_class, delta_t, delta_t, 0, 0, reason
 
 # ==================== 8. أوامر البوت ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -263,8 +410,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     remaining_text = f"اشتراكك ({plan}) متبقي {remaining} يوم." if subscribed else ""
     await update.message.reply_text(
-        f"🏛️ **HADES V100.2**\n"
-        f"محرك هجين (معادلة + بايزي)\n"
+        f"🏛️ **HADES V101**\n"
+        f"محرك خطي متكيف + بايزي\n"
         f"{remaining_text}\n\n"
         "🎴 اختر نوع البذلة:",
         reply_markup=InlineKeyboardMarkup(kb),
@@ -397,9 +544,8 @@ async def model_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ: {e}")
 
-# ==================== 9. أمر الحذف للمستخدم العادي ====================
+# ==================== 9. أمر الحذف ====================
 async def delete_last_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """حذف آخر إدخال للمستخدم الحالي."""
     user_id = update.effective_user.id
     sub, _, _ = is_user_subscribed(user_id)
     if not sub and user_id != ADMIN_ID:
@@ -419,7 +565,7 @@ async def delete_last_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
     await update.message.reply_text("🗑️ تم حذف آخر إدخال لك.")
 
-# ==================== 10. أمر التحميل للأدمن فقط ====================
+# ==================== 10. أمر التحميل للأدمن ====================
 async def download_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ هذا الأمر للمسؤول فقط.")
@@ -442,33 +588,50 @@ async def download_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
-    # إذا كان المستخدم غير مشترك، نعتبر الرسالة محاولة اشتراك
     sub, _, _ = is_user_subscribed(user_id)
     if not sub and user_id != ADMIN_ID:
         await subscribe(update, context)
         return
-    # التحقق من التباعد الزمني للمستخدمين العاديين
+
     allowed, msg = can_user_play(user_id, context)
     if not allowed:
         await update.message.reply_text(msg)
         return
-    # معالجة البونص
+
     if text.isdigit() and len(text) >= 7:
         if 'suit' not in context.user_data:
             await update.message.reply_text("⚠️ اختر البذلة أولاً عبر /start.")
             return
+
         current_time = datetime.datetime.now()
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
+
+        # آخر توقيت
         cur.execute("SELECT timestamp FROM history ORDER BY id DESC LIMIT 1")
         row = cur.fetchone()
         last_time = row[0] if row else None
+
+        # آخر فائز لهذا المستخدم (للذاكرة القصيرة)
+        cur.execute("SELECT winner FROM history WHERE user_id = %s ORDER BY id DESC LIMIT 1", (user_id,))
+        row = cur.fetchone()
+        last_winner_code = WINNER_MAP.get(row[0]) if row and row[0] in WINNER_MAP else None
+
+        # تحميل الأوزان
+        math_weights = load_weights(conn)
+
+        # تحميل بايزي
         bayesian_probs = bayesian_analysis(conn, current_time.hour)
-        pred_text, pred_code, R, gap, B, S, reason = hybrid_prediction(
-            text, context.user_data['suit'], last_time, current_time, bayesian_probs
+
+        # التنبؤ الهجين
+        pred_text, pred_code, gap, _, _, _, reason = hybrid_prediction(
+            text, context.user_data['suit'], last_time, current_time,
+            bayesian_probs, math_weights, last_winner_code
         )
+
         cur.close()
         conn.close()
+
         # حقن خطأ إذا كان streak كبير
         if user_id != ADMIN_ID and context.user_data.get('correct_streak', 0) >= MAX_CORRECT_STREAK:
             pred_code = inject_fake_prediction(pred_code)
@@ -477,28 +640,30 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             fake_warning = "\n⚠️ تم تعديل التوقع مؤقتاً.\n"
         else:
             fake_warning = ""
-        # تخزين البيانات
+
         context.user_data['bonus'] = text
         context.user_data['prediction_code'] = pred_code
         context.user_data['current_time'] = current_time
-        # أزرار النتيجة
+
         kb = [
             [InlineKeyboardButton("🔴 فاز الراعي", callback_data="save_الراعي 🔴"),
              InlineKeyboardButton("🔵 فاز الثور", callback_data="save_الثور 🔵")],
             [InlineKeyboardButton("⚪ تعادل", callback_data="save_تعادل ⚪")]
         ]
+
         suit_color = "🔴" if context.user_data['suit'] in ['♦️', '♥️'] else "⚫"
         await update.message.reply_text(
             f"{fake_warning}"
             f"🎯 **التوقع:** {pred_text}\n"
             f"📊 **المنهج:** {reason}\n"
             f"🎴 البذلة: {context.user_data['suit']} {suit_color}\n"
-            f"🔢 B={B}×S={S}+ΔT={gap} → R={R}\n"
+            f"⏱️ الفجوة: {gap} ثانية\n"
             f"━━━━━━━━━━━━━━\n"
             f"اختر النتيجة الحقيقية:",
             reply_markup=InlineKeyboardMarkup(kb),
             parse_mode='Markdown'
         )
+
         update_session_after_play(context)
     else:
         await update.message.reply_text("❌ أرسل رقماً صحيحاً (7 أرقام على الأقل).")
@@ -514,14 +679,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"✅ تم اختيار {suit} ({color})\n📥 أرسل رقم البونص:")
 
     elif query.data.startswith("save_"):
-        winner_db = query.data[5:]  # النص الكامل مع الإيموجي
+        winner_db = query.data[5:]
         pred_code = context.user_data.get('prediction_code')
         if pred_code is None:
             await query.edit_message_text("❌ خطأ: لا يوجد توقع. ابدأ من جديد.")
             return
+
         try:
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             cur = conn.cursor()
+
+            # إدراج الجولة
             cur.execute("""
                 INSERT INTO history (b_num, suit, winner, timestamp, prediction, user_id)
                 VALUES (%s, %s, %s, %s, %s, %s)
@@ -534,9 +702,41 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 update.effective_user.id
             ))
             conn.commit()
+
+            # تحديث الأوزان
+            # نستخرج الميزات مرة أخرى (نحتاج last_winner للجولة الجديدة؟ لا، لأننا نستخدم ما قبلها)
+            # آخر فائز لهذا المستخدم (قبل هذه الجولة)
+            cur.execute("SELECT winner FROM history WHERE user_id = %s ORDER BY id DESC LIMIT 1 OFFSET 1", (update.effective_user.id,))
+            row = cur.fetchone()
+            last_winner_code = WINNER_MAP.get(row[0]) if row and row[0] in WINNER_MAP else None
+
+            # حساب delta_t
+            cur.execute("SELECT timestamp FROM history ORDER BY id DESC LIMIT 1 OFFSET 1")
+            row = cur.fetchone()
+            prev_time = row[0] if row else None
+            if prev_time:
+                delta_t = int((context.user_data['current_time'] - prev_time).total_seconds())
+            else:
+                delta_t = 0
+
+            features = extract_math_features(
+                context.user_data['bonus'],
+                context.user_data['suit'],
+                delta_t,
+                last_winner_code
+            )
+            if features is not None:
+                math_weights = load_weights(conn)
+                predicted_class = pred_code
+                actual_class = WINNER_MAP.get(winner_db, 2)  # 2 تعادل افتراضي
+                math_weights = update_weights(math_weights, features, predicted_class, actual_class)
+                save_weights(conn, math_weights)
+
             conn.close()
+
             pred_winner = WINNER_NAMES[pred_code]
             is_correct = "✅" if winner_db == pred_winner else "❌"
+
             # تحديث streak
             user_id = update.effective_user.id
             if user_id != ADMIN_ID:
@@ -544,12 +744,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     context.user_data['correct_streak'] = context.user_data.get('correct_streak', 0) + 1
                 else:
                     context.user_data['correct_streak'] = 0
-            # أزرار بعد الحفظ: بدء جولة جديدة + حذف آخر إدخال
+
             keyboard = [
                 [InlineKeyboardButton("🔄 بدء جولة جديدة", callback_data="new_round"),
                  InlineKeyboardButton("🗑️ حذف آخر إدخال", callback_data="delete_last")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
+
             await query.edit_message_text(
                 f"{is_correct} **تم التسجيل**\n\n"
                 f"🎯 توقعنا: {pred_winner}\n"
@@ -565,11 +766,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"❌ خطأ في الحفظ: {e}")
 
     elif query.data == "new_round":
-        # محاكاة الأمر /start للمستخدم نفسه
         await start(update, context)
 
     elif query.data == "delete_last":
-        # حذف آخر إدخال للمستخدم الحالي
         user_id = update.effective_user.id
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
@@ -586,6 +785,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== 12. التشغيل الرئيسي ====================
 if __name__ == "__main__":
     init_subscription_table()
+    init_weights_table()
     # التأكد من وجود عمود user_id
     try:
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
@@ -614,5 +814,5 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    print("🚀 HADES V100.2 يعمل... (مع زر حذف)")
+    print("🚀 HADES V101 يعمل... (نموذج خطي متكيف + بايزي)")
     app.run_polling()
