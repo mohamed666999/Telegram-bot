@@ -3,11 +3,13 @@ import datetime
 import psycopg2
 import pandas as pd
 import random
+import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler, CommandHandler, ContextTypes
+from collections import Counter
 
 # ==================== 1. الإعدادات والثوابت ====================
-TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
+TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"  # استبدل بالتوكن الخاص بك
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 ADMIN_ID = 6033203084
 
@@ -18,7 +20,191 @@ WINNER_MAP = {
 }
 WINNER_NAMES = {0: 'الراعي 🔴', 1: 'الثور 🔵', 2: 'تعادل ⚪'}
 
-# ==================== 2. دوال تحليل الوقت ====================
+# ==================== 2. معاملات نموذج الملف (تم استخراجها يدويًا) ====================
+file_model_coefficients = {
+    'BIN_LESS_THAN_769.0_id': -2163693.286151,
+    'BIN_FROM_769.0_TO_790.0_id': -2040258.406043,
+    'BIN_FROM_790.0_TO_814.0_id': -1865023.520384,
+    'BIN_FROM_814.0_TO_849.0_id': -1790573.101484,
+    'BIN_FROM_849.0_TO_874.0_id': -1703748.331043,
+    'BIN_MORE_THAN_1297.0_id': 1331928.867296,
+    'PAIR_id_&suit:BIN_FROM_1278.0_TO_1297.0&♠️': 1275643.664571,
+    'PAIR_id_&suit:BIN_FROM_1278.0_TO_1297.0&♣️': 1211579.435308,
+    'BIN_FROM_1146.0_TO_1251.0_id': 965549.82778,
+    'PAIR_id_&suit:BIN_FROM_1278.0_TO_1297.0&♥️': -923161.502105,
+    'BIN_FROM_1062.0_TO_1088.0_id': 870936.658853,
+    'BIN_FROM_1029.0_TO_1062.0_id': 827780.045487,
+    'BIN_FROM_1111.0_TO_1146.0_id': 807888.316629,
+    'timestamp (Hour of Day)-21': -801875.804421,
+    'BIN_FROM_1251.0_TO_1278.0_id': 794942.504084,
+    'timestamp (Hour of Day)-small_count': 690416.953323,
+    'timestamp (Hour of Day)-17': 677389.266817,
+    'timestamp (Hour of Day)-22': -668875.142086,
+    'timestamp (Hour of Day)-19': 664949.437912,
+    'BIN_FROM_1278.0_TO_1297.0_id': -640023.298445,
+    'timestamp (Hour of Day)-9': -591486.045223,
+    'PAIR_id_&suit:BIN_FROM_1278.0_TO_1297.0&♦️': -556069.959023,
+    'winner-راعي': 553091.24052,
+    'timestamp (Hour of Day)-8': -496931.102243,
+    'timestamp (Hour of Day)-6': 454133.939618,
+    'BIN_MORE_THAN_1772337496064.0_timestamp': -381267.613971,
+    'PAIR_id_&suit:BIN_FROM_1088.0_TO_1111.0&♥️': 377621.549866,
+    'BIN_FROM_1772320456704.0_TO_1772337496064.0_timestamp': -367883.211547,
+    'BIN_LESS_THAN_0.0_prediction': 342359.921685,
+    'winner-small_count': 326539.538948,
+    'PAIR_id_&suit:BIN_FROM_1062.0_TO_1088.0&♦️': 319855.02282,
+    'BIN_FROM_1772250464256.0_TO_1772313640960.0_timestamp': 314885.309995,
+    'winner-ثور': 296804.85369,
+    'suit-♠️': 293956.312022,
+    'timestamp (Hour of Day)-12': 261372.939805,
+    'timestamp (Hour of Day)-18': 260240.949148,
+    'timestamp (Hour of Day)-13': 241702.919932,
+    'PAIR_id_&suit:BIN_MORE_THAN_1297.0&♠️': -234532.420546,
+    'PAIR_id_&suit:BIN_FROM_1251.0_TO_1278.0&♥️': 220286.456117,
+    'BIN_FROM_1088.0_TO_1111.0_id': 219494.406077,
+    'winner-الثور 🔵': -207447.786846,
+    'PAIR_id_&suit:BIN_FROM_1251.0_TO_1278.0&♣️': 205185.860649,
+    'BIN_MORE_THAN_0.0_prediction-mi': -190191.488549,
+    'timestamp (Hour of Day)-15': 181955.283644,
+    'PAIR_id_&suit:BIN_MORE_THAN_1297.0&♥️': 176373.503312,
+    'PAIR_id_&suit:BIN_FROM_1251.0_TO_1278.0&♠️': -176282.433134,
+    'BIN_FROM_905.0_TO_932.0_id': 164905.076577,
+    'PAIR_id_&suit:BIN_FROM_1088.0_TO_1111.0&♣️': -153457.648209,
+    'PAIR_id_&suit:BIN_FROM_1062.0_TO_1088.0&♠️': -152383.540805,
+    'PAIR_id_&suit:BIN_FROM_1146.0_TO_1251.0&♦️': 142928.882814,
+    'BIN_FROM_874.0_TO_905.0_id': -132657.073033,
+    'PAIR_id_&suit:BIN_LESS_THAN_769.0&♣️': -131320.368119,
+    'PAIR_id_&suit:BIN_FROM_992.0_TO_1029.0&♣️': -131320.368119,
+    'PAIR_id_&suit:BIN_FROM_966.0_TO_992.0&♣️': -131320.368119,
+    'PAIR_id_&suit:BIN_FROM_932.0_TO_966.0&♣️': -131320.368119,
+    'PAIR_id_&suit:BIN_FROM_905.0_TO_932.0&♣️': -131320.368119,
+    'PAIR_id_&suit:BIN_FROM_874.0_TO_905.0&♣️': -131320.368119,
+    'PAIR_id_&suit:BIN_FROM_849.0_TO_874.0&♣️': -131320.368119,
+    'PAIR_id_&suit:BIN_FROM_814.0_TO_849.0&♣️': -131320.368119,
+    'PAIR_id_&suit:BIN_FROM_790.0_TO_814.0&♣️': -131320.368119,
+    'PAIR_id_&suit:BIN_FROM_769.0_TO_790.0&♣️': -131320.368119,
+    'PAIR_id_&suit:BIN_FROM_1029.0_TO_1062.0&♣️': -131320.368119,
+    'timestamp (Hour of Day)-23': -119487.828019,
+    'BIN_FROM_992.0_TO_1029.0_id': 115741.488466,
+    'BIN_FROM_1772313640960.0_TO_1772320456704.0_timestamp': -99099.98726,
+    'PAIR_id_&suit:BIN_FROM_1088.0_TO_1111.0&♦️': 93184.635051,
+    'PAIR_id_&suit:BIN_MORE_THAN_1297.0&♣️': -91747.250919,
+    'PAIR_id_&suit:BIN_FROM_1146.0_TO_1251.0&♠️': -90227.424276,
+    'PAIR_id_&suit:BIN_MORE_THAN_1297.0&♦️': 90003.678694,
+    'suit-♣️': 71197.862487,
+    'suit-♦️': -69370.587464,
+    'PAIR_id_&suit:BIN_FROM_1088.0_TO_1111.0&♠️': -62640.669669,
+    'BIN_FROM_966.0_TO_992.0_id': 56955.886049,
+    'PAIR_id_&suit:BIN_FROM_1029.0_TO_1062.0&♦️': 53124.591582,
+    'BIN_MORE_THAN_0.0_prediction': -45647.989558,
+    'timestamp (Hour of Day)-0': -45145.261403,
+    'PAIR_id_&suit:BIN_FROM_1111.0_TO_1146.0&♠️': -33472.987054,
+    'BIN_LESS_THAN_1772250464256.0_timestamp': 28062.115663,
+    'PAIR_id_&suit:BIN_FROM_1062.0_TO_1088.0&♥️': -27277.443991,
+    'PAIR_id_&suit:BIN_FROM_1146.0_TO_1251.0&♥️': 25973.226764,
+    'PAIR_id_&suit:BIN_FROM_1251.0_TO_1278.0&♦️': 24797.007843,
+    'winner-الراعي 🔴': -23049.267825,
+    'PAIR_id_&suit:BIN_LESS_THAN_769.0&♠️': -21094.265971,
+    'PAIR_id_&suit:BIN_FROM_992.0_TO_1029.0&♠️': -21094.265971,
+    'PAIR_id_&suit:BIN_FROM_966.0_TO_992.0&♠️': -21094.265971,
+    'PAIR_id_&suit:BIN_FROM_932.0_TO_966.0&♠️': -21094.265971,
+    'PAIR_id_&suit:BIN_FROM_905.0_TO_932.0&♠️': -21094.265971,
+    'PAIR_id_&suit:BIN_FROM_874.0_TO_905.0&♠️': -21094.265971,
+    'PAIR_id_&suit:BIN_FROM_849.0_TO_874.0&♠️': -21094.265971,
+    'PAIR_id_&suit:BIN_FROM_814.0_TO_849.0&♠️': -21094.265971,
+    'PAIR_id_&suit:BIN_FROM_790.0_TO_814.0&♠️': -21094.265971,
+    'PAIR_id_&suit:BIN_FROM_769.0_TO_790.0&♠️': -21094.265971,
+    'PAIR_id_&suit:BIN_FROM_1029.0_TO_1062.0&♠️': -21094.265971,
+    'PAIR_id_&suit:BIN_FROM_1146.0_TO_1251.0&♣️': -20814.233837,
+    'PAIR_id_&suit:BIN_FROM_1111.0_TO_1146.0&♥️': 18215.276089,
+    'PAIR_id_&suit:BIN_LESS_THAN_769.0&♥️': -16631.220497,
+    'PAIR_id_&suit:BIN_FROM_992.0_TO_1029.0&♥️': -16631.220497,
+    'PAIR_id_&suit:BIN_FROM_966.0_TO_992.0&♥️': -16631.220497,
+    'PAIR_id_&suit:BIN_FROM_932.0_TO_966.0&♥️': -16631.220497,
+    'PAIR_id_&suit:BIN_FROM_905.0_TO_932.0&♥️': -16631.220497,
+}
+
+# ==================== 3. نماذج التوقع ====================
+
+def gap_model(delta_t):
+    """نموذج الفجوة الزمنية"""
+    if delta_t > 60: # مثال: إذا كانت الفجوة كبيرة، توقع الثور
+        return 1
+    else: # وإلا توقع الراعي
+        return 0
+
+def math_model(b_num, suit):
+    """النموذج الرياضي"""
+    last_3 = b_num[-3:] if len(b_num) >= 3 else b_num
+    B = sum(int(d) for d in last_3 if d.isdigit())
+    S = 1 if suit in ['♦️', '♥️'] else 2
+    R = B * S
+    return 1 if (R % 2 == 0) else 0  # 1=ثور, 0=راعي
+
+def file_model(b_num, suit, hour):
+    """نموذج الملفات"""
+    score = 0
+    b_num_int = int(b_num)
+
+    for feature, coeff in file_model_coefficients.items():
+        # BIN_..._id features
+        bin_id_match = re.match(r'BIN_(LESS_THAN|FROM_(\d+\.?\d*)_TO_(\d+\.?\d*)|MORE_THAN)_(\d+\.?\d*)_id', feature)
+        if bin_id_match:
+            bin_type = bin_id_match.group(1)
+            if bin_type == 'LESS_THAN':
+                threshold = float(bin_id_match.group(4))
+                if b_num_int < threshold:
+                    score += coeff
+            elif bin_type == 'MORE_THAN':
+                threshold = float(bin_id_match.group(4))
+                if b_num_int >= threshold:
+                    score += coeff
+            elif bin_type.startswith('FROM_'):
+                lower = float(bin_id_match.group(2))
+                upper = float(bin_id_match.group(3))
+                if lower <= b_num_int < upper:
+                    score += coeff
+            continue
+
+        # PAIR_id_&suit:BIN_... features
+        pair_match = re.match(r'PAIR_id_&suit:BIN_(LESS_THAN|FROM_(\d+\.?\d*)_TO_(\d+\.?\d*)|MORE_THAN)_(\d+\.?\d*)&(.)', feature)
+        if pair_match:
+            pair_suit = pair_match.group(5)
+            if pair_suit == suit:
+                bin_type = pair_match.group(1)
+                if bin_type == 'LESS_THAN':
+                    threshold = float(pair_match.group(4))
+                    if b_num_int < threshold:
+                        score += coeff
+                elif bin_type == 'MORE_THAN':
+                    threshold = float(pair_match.group(4))
+                    if b_num_int >= threshold:
+                        score += coeff
+                elif bin_type.startswith('FROM_'):
+                    lower = float(pair_match.group(2))
+                    upper = float(pair_match.group(3))
+                    if lower <= b_num_int < upper:
+                        score += coeff
+            continue
+
+        # timestamp (Hour of Day)-... features
+        if feature == f'timestamp (Hour of Day)-{hour}':
+            score += coeff
+            continue
+
+        # suit-... features
+        if feature == f'suit-{suit}':
+            score += coeff
+            continue
+
+        # Other specific features (winner-*, prediction-*) - these are added unconditionally if present
+        if feature.startswith('winner-') or feature.startswith('BIN_') and 'prediction' in feature:
+            score += coeff
+            continue
+
+    return 1 if score > 0 else 0 # 1=ثور, 0=راعي
+
+# ==================== 4. دوال مساعدة ====================
 def get_time_period(hour):
     if 6 <= hour < 12: return "morning"
     elif 12 <= hour < 18: return "afternoon"
@@ -26,71 +212,36 @@ def get_time_period(hour):
     else: return "night"
 
 def period_translate(period):
-    return {"morning": "🌅 الصباح", "afternoon": "☀️ الظهر", "evening": "🌇 المساء", "night": "🌙 الليل"}.get(period, period)
+    return {
+        "morning": "🌅 الصباح", "afternoon": "☀️ الظهر", 
+        "evening": "🌇 المساء", "night": "🌙 الليل"
+    }.get(period, period)
 
-# ==================== 3. المحرك الرياضي الأساسي ====================
-def sovereign_math_engine(b_num: str, suit: str, last_timestamp, current_timestamp):
-    last_3 = b_num[-3:] if len(b_num) >= 3 else b_num
-    B = sum(int(d) for d in last_3 if d.isdigit())
-    S = 1 if suit in ['♦️', '♥️'] else 2
-    delta_t = int((current_timestamp - last_timestamp).total_seconds()) if last_timestamp else 0
-    R = (B * S) + delta_t
-    prediction_code = 1 if (R % 2 == 0) else 0  # 1=ثور, 0=راعي
-    prediction_text = WINNER_NAMES[prediction_code]
-    return prediction_text, prediction_code, delta_t
-
-# ==================== 4. دوال التأكد من وجود الأعمدة ====================
 def ensure_columns():
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cur = conn.cursor()
-    # إضافة عمود prediction إذا لم يكن موجوداً
-    cur.execute("""
-        DO $$
-        BEGIN
-            BEGIN
-                ALTER TABLE history ADD COLUMN prediction INTEGER;
-            EXCEPTION
-                WHEN duplicate_column THEN NULL;
-            END;
-        END $$;
-    """)
-    # إضافة عمود user_id إذا لم يكن موجوداً
-    cur.execute("""
-        DO $$
-        BEGIN
-            BEGIN
-                ALTER TABLE history ADD COLUMN user_id BIGINT;
-            EXCEPTION
-                WHEN duplicate_column THEN NULL;
-            END;
-        END $$;
-    """)
+    cur.execute("ALTER TABLE IF EXISTS history ADD COLUMN IF NOT EXISTS final_prediction INTEGER;")
+    cur.execute("ALTER TABLE IF EXISTS history ADD COLUMN IF NOT EXISTS user_id BIGINT;")
     conn.commit()
     conn.close()
 
 # ==================== 5. أوامر البوت ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
     context.user_data.clear()
     kb = [
-        [InlineKeyboardButton("♦️ ديناري (أحمر)", callback_data="s_♦️"),
-         InlineKeyboardButton("♥️ قلب (أحمر)", callback_data="s_♥️")],
-        [InlineKeyboardButton("♠️ سبايد (أسود)", callback_data="s_♠️"),
-         InlineKeyboardButton("♣️ كلبة (أسود)", callback_data="s_♣️")]
+        [InlineKeyboardButton("♦️", callback_data="s_♦️"), InlineKeyboardButton("♥️", callback_data="s_♥️")],
+        [InlineKeyboardButton("♠️", callback_data="s_♠️"), InlineKeyboardButton("♣️", callback_data="s_♣️")]
     ]
     await update.message.reply_text(
-        "🏛️ **HADES V100.0**\n"
-        "محرك تنبؤي رياضي مع تحليل زمني\n\n"
         "🎴 اختر نوع البذلة:",
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode='Markdown'
+        reply_markup=InlineKeyboardMarkup(kb)
     )
 
 async def performance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """تحليل أداء التوقعات حسب الفترات والساعات"""
     try:
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-        df = pd.read_sql("SELECT winner, prediction, timestamp FROM history WHERE prediction IS NOT NULL", conn)
+        df = pd.read_sql("SELECT winner, final_prediction, timestamp FROM history WHERE final_prediction IS NOT NULL", conn)
         conn.close()
 
         if len(df) < 10:
@@ -101,8 +252,8 @@ async def performance_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         df['hour'] = df['timestamp'].dt.hour
         df['period'] = df['hour'].apply(get_time_period)
         df['winner_code'] = df['winner'].map(WINNER_MAP)
-        df = df.dropna(subset=['winner_code', 'prediction'])
-        df['correct'] = (df['winner_code'] == df['prediction']).astype(int)
+        df = df.dropna(subset=['winner_code', 'final_prediction'])
+        df['correct'] = (df['winner_code'] == df['final_prediction']).astype(int)
 
         # الدقة حسب الفترات
         period_order = ["morning", "afternoon", "evening", "night"]
@@ -135,7 +286,7 @@ async def model_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """عرض حالة النموذج (آخر 50 و200 جولة)"""
     try:
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-        df = pd.read_sql("SELECT winner, prediction, timestamp FROM history WHERE prediction IS NOT NULL ORDER BY id DESC LIMIT 200", conn)
+        df = pd.read_sql("SELECT winner, final_prediction, timestamp FROM history WHERE final_prediction IS NOT NULL ORDER BY id DESC LIMIT 200", conn)
         conn.close()
 
         if len(df) < 10:
@@ -143,8 +294,8 @@ async def model_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         df['winner_code'] = df['winner'].map(WINNER_MAP)
-        df = df.dropna(subset=['winner_code', 'prediction'])
-        df['correct'] = (df['winner_code'] == df['prediction']).astype(int)
+        df = df.dropna(subset=['winner_code', 'final_prediction'])
+        df['correct'] = (df['winner_code'] == df['final_prediction']).astype(int)
 
         acc_50 = df.head(50)['correct'].mean() * 100 if len(df) >= 50 else None
         acc_200 = df['correct'].mean() * 100
@@ -215,31 +366,41 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
         cur.execute("SELECT timestamp FROM history ORDER BY id DESC LIMIT 1")
-        row = cur.fetchone()
-        last_time = row[0] if row else None
+        last_time = cur.fetchone()[0] if cur.rowcount > 0 else None
         conn.close()
 
-        pred_text, pred_code, gap = sovereign_math_engine(text, context.user_data['suit'], last_time, current_time)
+        delta_t = (current_time - last_time).total_seconds() if last_time else 0
+        suit = context.user_data['suit']
+        hour = current_time.hour
+
+        # الحصول على التوقعات من النماذج الثلاثة
+        pred1 = gap_model(delta_t)
+        pred2 = math_model(text, suit)
+        pred3 = file_model(text, suit, hour)
+
+        # التصويت
+        votes = [pred1, pred2, pred3]
+        final_prediction = Counter(votes).most_common(1)[0][0]
 
         context.user_data['bonus'] = text
-        context.user_data['prediction_code'] = pred_code
+        context.user_data['final_prediction'] = final_prediction
         context.user_data['current_time'] = current_time
 
         kb = [
-            [InlineKeyboardButton("🔴 فاز الراعي", callback_data="save_الراعي 🔴"),
-             InlineKeyboardButton("🔵 فاز الثور", callback_data="save_الثور 🔵")],
-            [InlineKeyboardButton("⚪ تعادل", callback_data="save_تعادل ⚪")]
+            [InlineKeyboardButton("🔴 فاز الراعي", callback_data="save_الراعي 🔴")],
+            [InlineKeyboardButton("🔵 فاز الثور", callback_data="save_الثور 🔵")]
         ]
         await update.message.reply_text(
-            f"🎯 **التوقع:** {pred_text}\n"
-            f"⏱️ الفجوة الزمنية: {gap} ثانية\n"
+            f"🎯 **التوقع النهائي:** {WINNER_NAMES[final_prediction]}\n"
+            f"🗳️ الأصوات: [فجوة: {WINNER_NAMES[pred1]}, رياضي: {WINNER_NAMES[pred2]}, ملف: {WINNER_NAMES[pred3]}]\n"
+            f"⏱️ الفجوة: {int(delta_t)} ثانية\n"
             f"━━━━━━━━━━━━━━\n"
             f"اختر النتيجة الحقيقية:",
             reply_markup=InlineKeyboardMarkup(kb),
             parse_mode='Markdown'
         )
     else:
-        await update.message.reply_text("❌ أرسل رقماً صحيحاً (7 أرقام على الأقل).")
+        await update.message.reply_text("❌ أرسل رقم بونص صحيح (7 أرقام على الأقل).")
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -248,34 +409,34 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data.startswith("s_"):
         suit = query.data[2:]
         context.user_data['suit'] = suit
-        color = "🔴 حمراء" if suit in ['♦️', '♥️'] else "⚫ سوداء"
-        await query.edit_message_text(f"✅ تم اختيار {suit} ({color})\n📥 أرسل رقم البونص:")
+        await query.edit_message_text(f"✅ تم اختيار {suit}. أرسل رقم البونص:")
 
     elif query.data.startswith("save_"):
         winner_db = query.data[5:]
-        pred_code = context.user_data.get('prediction_code')
-        if pred_code is None:
-            await query.edit_message_text("❌ خطأ: لا يوجد توقع. ابدأ من جديد.")
+        final_pred_code = context.user_data.get('final_prediction')
+
+        if final_pred_code is None:
+            await query.edit_message_text("❌ خطأ: لا يوجد توقع. ابدأ من جديد /start.")
             return
 
         try:
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO history (b_num, suit, winner, timestamp, prediction, user_id)
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (
-                context.user_data['bonus'],
-                context.user_data['suit'],
-                winner_db,
-                context.user_data['current_time'],
-                pred_code,
-                update.effective_user.id
-            ))
+            cur.execute(
+                "INSERT INTO history (b_num, suit, winner, timestamp, final_prediction, user_id) VALUES (%s, %s, %s, %s, %s, %s)",
+                (
+                    context.user_data['bonus'],
+                    context.user_data['suit'],
+                    winner_db,
+                    context.user_data['current_time'],
+                    final_pred_code,
+                    update.effective_user.id
+                )
+            )
             conn.commit()
             conn.close()
 
-            pred_winner = WINNER_NAMES[pred_code]
+            pred_winner = WINNER_NAMES[final_pred_code]
             is_correct = "✅" if winner_db == pred_winner else "❌"
 
             # أزرار بعد الحفظ
@@ -318,9 +479,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== 7. التشغيل الرئيسي ====================
 if __name__ == "__main__":
-    # التأكد من وجود الأعمدة المطلوبة
     ensure_columns()
-
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("performance", performance_command))
@@ -330,5 +489,5 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    print("🚀 HADES V100.0 يعمل... (إصدار مستقر)")
+    print("🚀 HADES V2.0 (Triple Model) is running...")
     app.run_polling()
