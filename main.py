@@ -674,7 +674,30 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     conn.close()
 
-# ==================== 10. المعالجات الأساسية ====================
+# ==================== 10. أمر التحميل (للأدمن فقط) ====================
+async def download_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ هذا الأمر متاح للمسؤول فقط.")
+        return
+
+    status_msg = await update.message.reply_text("📊 جاري تصدير السجل السيادي...")
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        df = pd.read_sql("SELECT * FROM history ORDER BY id ASC", conn)
+        conn.close()
+
+        filename = f"Observer_Log_{datetime.date.today()}.xlsx"
+        df.to_excel(filename, index=False)
+
+        with open(filename, "rb") as f:
+            await update.message.reply_document(document=f, filename=filename, caption=f"📊 السجل يحتوي على {len(df)} جولة.")
+        os.remove(filename)
+        await status_msg.delete()
+    except Exception as e:
+        await status_msg.edit_text(f"❌ فشل الاستخراج: {str(e)}")
+
+# ==================== 11. المعالجات الأساسية ====================
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """معالج إدخال رقم البونص مع النظام الهجين"""
@@ -838,7 +861,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # يجب محاكاة الأمر /start
         await start(update, context)
 
-# ==================== 11. التشغيل الرئيسي ====================
+# ==================== 12. التشغيل الرئيسي ====================
 if __name__ == "__main__":
     # تهيئة جدول الاشتراكات
     init_subscription_table()
@@ -871,6 +894,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("generate_keys", generate_keys_command))
     app.add_handler(CommandHandler("mysub", my_subscription))
     app.add_handler(CommandHandler("delete", delete_command))
+    app.add_handler(CommandHandler("download", download_database))  # الأمر الجديد
 
     # معالج النصوص (للبونص والمفاتيح)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
@@ -880,4 +904,5 @@ if __name__ == "__main__":
 
     print("🚀 HADES V100.2 يعمل... (نظام هجين: معادلة + بايزي)")
     print("🏛️ محرك تنبؤي متكيف مع تحليل كامل للبيانات")
+    print("📥 أمر التحميل /download متاح للمسؤول فقط")
     app.run_polling()
