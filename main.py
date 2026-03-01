@@ -401,14 +401,12 @@ async def model_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def delete_last_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """حذف آخر إدخال للمستخدم الحالي."""
     user_id = update.effective_user.id
-    # التحقق من الاشتراك (الأدمن غير مشمول)
     sub, _, _ = is_user_subscribed(user_id)
     if not sub and user_id != ADMIN_ID:
         await update.message.reply_text("🔐 تحتاج اشتراك.")
         return
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cur = conn.cursor()
-    # البحث عن آخر إدخال للمستخدم
     cur.execute("SELECT id FROM history WHERE user_id = %s ORDER BY id DESC LIMIT 1", (user_id,))
     row = cur.fetchone()
     if not row:
@@ -454,4 +452,167 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed:
         await update.message.reply_text(msg)
         return
-    # م
+    # معالجة البونص
+    if text.isdigit() and len(text) >= 7:
+        if 'suit' not in context.user_data:
+            await update.message.reply_text("⚠️ اختر البذلة أولاً عبر /start.")
+            return
+        current_time = datetime.datetime.now()
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        cur = conn.cursor()
+        cur.execute("SELECT timestamp FROM history ORDER BY id DESC LIMIT 1")
+        row = cur.fetchone()
+        last_time = row[0] if row else None
+        bayesian_probs = bayesian_analysis(conn, current_time.hour)
+        pred_text, pred_code, R, gap, B, S, reason = hybrid_prediction(
+            text, context.user_data['suit'], last_time, current_time, bayesian_probs
+        )
+        cur.close()
+        conn.close()
+        # حقن خطأ إذا كان streak كبير
+        if user_id != ADMIN_ID and context.user_data.get('correct_streak', 0) >= MAX_CORRECT_STREAK:
+            pred_code = inject_fake_prediction(pred_code)
+            pred_text = WINNER_NAMES[pred_code]
+            context.user_data['correct_streak'] = 0
+            fake_warning = "\n⚠️ تم تعديل التوقع مؤقتاً.\n"
+        else:
+            fake_warning = ""
+        # تخزين البيانات
+        context.user_data['bonus'] = text
+        context.user_data['prediction_code'] = pred_code
+        context.user_data['current_time'] = current_time
+        # أزرار النتيجة
+        kb = [
+            [InlineKeyboardButton("🔴 فاز الراعي", callback_data="save_الراعي 🔴"),
+             InlineKeyboardButton("🔵 فاز الثور", callback_data="save_الثور 🔵")],
+            [InlineKeyboardButton("⚪ تعادل", callback_data="save_تعادل ⚪")]
+        ]
+        suit_color = "🔴" if context.user_data['suit'] in ['♦️', '♥️'] else "⚫"
+        await update.message.reply_text(
+            f"{fake_warning}"
+            f"🎯 **التوقع:** {pred_text}\n"
+            f"📊 **المنهج:** {reason}\n"
+            f"🎴 البذلة: {context.user_data['suit']} {suit_color}\n"
+            f"🔢 B={B}×S={S}+ΔT={gap} → R={R}\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"اختر النتيجة الحقيقية:",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode='Markdown'
+        )
+        update_session_after_play(context)
+    else:
+        await update.message.reply_text("❌ أرسل رقماً صحيحاً (7 أرقام على الأقل).")
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data.startswith("s_"):
+        suit = query.data[2:]
+        context.user_data['suit'] = suit
+        color = "🔴 حمراء" if suit in ['♦️', '♥️'] else "⚫ سوداء"
+        await query.edit_message_text(f"✅ تم اختيار {suit} ({color})\n📥 أرسل رقم البونص:")
+
+    elif query.data.startswith("save_"):
+        winner_db = query.data[5:]  # النص الكامل مع الإيموجي
+        pred_code = context.user_data.get('prediction_code')
+        if pred_code is None:
+            await query.edit_message_text("❌ خطأ: لا يوجد توقع. ابدأ من جديد.")
+            return
+        try:
+            conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO history (b_num, suit, winner, timestamp, prediction, user_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (
+                context.user_data['bonus'],
+                context.user_data['suit'],
+                winner_db,
+                context.user_data['current_time'],
+                pred_code,
+                update.effective_user.id
+            ))
+            conn.commit()
+            conn.close()
+            pred_winner = WINNER_NAMES[pred_code]
+            is_correct = "✅" if winner_db == pred_winner else "❌"
+            # تحديث streak
+            user_id = update.effective_user.id
+            if user_id != ADMIN_ID:
+                if is_correct == "✅":
+                    context.user_data['correct_streak'] = context.user_data.get('correct_streak', 0) + 1
+                else:
+                    context.user_data['correct_streak'] = 0
+            # أزرار بعد الحفظ: بدء جولة جديدة + حذف آخر إدخال
+            keyboard = [
+                [InlineKeyboardButton("🔄 بدء جولة جديدة", callback_data="new_round"),
+                 InlineKeyboardButton("🗑️ حذف آخر إدخال", callback_data="delete_last")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                f"{is_correct} **تم التسجيل**\n\n"
+                f"🎯 توقعنا: {pred_winner}\n"
+                f"🏆 النتيجة: {winner_db}\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"/performance - تحليل\n"
+                f"/status - حالة النموذج\n"
+                f"/mysub - اشتراكي",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            await query.edit_message_text(f"❌ خطأ في الحفظ: {e}")
+
+    elif query.data == "new_round":
+        # محاكاة الأمر /start للمستخدم نفسه
+        await start(update, context)
+
+    elif query.data == "delete_last":
+        # حذف آخر إدخال للمستخدم الحالي
+        user_id = update.effective_user.id
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM history WHERE user_id = %s ORDER BY id DESC LIMIT 1", (user_id,))
+        row = cur.fetchone()
+        if row:
+            cur.execute("DELETE FROM history WHERE id = %s", (row[0],))
+            conn.commit()
+            await query.edit_message_text("🗑️ تم حذف آخر إدخال لك.\nأرسل /start لبدء جولة جديدة.")
+        else:
+            await query.edit_message_text("⚠️ لا يوجد إدخال سابق لك.")
+        conn.close()
+
+# ==================== 12. التشغيل الرئيسي ====================
+if __name__ == "__main__":
+    init_subscription_table()
+    # التأكد من وجود عمود user_id
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        cur = conn.cursor()
+        cur.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS user_id BIGINT")
+        conn.commit()
+        conn.close()
+    except:
+        pass
+    # توليد مفاتيح أولية إذا لم توجد
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM subscription_keys")
+    if cur.fetchone()[0] == 0:
+        generate_keys()
+    conn.close()
+
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("performance", performance_command))
+    app.add_handler(CommandHandler("status", model_status))
+    app.add_handler(CommandHandler("generate_keys", generate_keys_command))
+    app.add_handler(CommandHandler("mysub", my_subscription))
+    app.add_handler(CommandHandler("delete", delete_last_entry))
+    app.add_handler(CommandHandler("download", download_database))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    app.add_handler(CallbackQueryHandler(callback_handler))
+
+    print("🚀 HADES V100.2 يعمل... (مع زر حذف)")
+    app.run_polling()
