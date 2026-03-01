@@ -9,9 +9,10 @@ from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQu
 from collections import Counter
 
 # ==================== 1. الإعدادات والثوابت ====================
-TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"  # استبدل بالتوكن الخاص بك
+TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 ADMIN_ID = 6033203084
+EXCEL_PATH = "/home/ubuntu/upload/Observer_Log_2026-03-01(2).xlsx" # سيتم استخدامه لملء القاعدة في البداية فقط
 
 WINNER_MAP = {
     'الراعي 🔴': 0, 'راعي': 0, 'الراعي': 0, '🔴': 0,
@@ -20,7 +21,7 @@ WINNER_MAP = {
 }
 WINNER_NAMES = {0: 'الراعي 🔴', 1: 'الثور 🔵', 2: 'تعادل ⚪'}
 
-# ==================== 2. معاملات نموذج الملف (تم استخراجها يدويًا) ====================
+# ==================== 2. معاملات نموذج الملف ====================
 file_model_coefficients = {
     'BIN_LESS_THAN_769.0_id': -2163693.286151,
     'BIN_FROM_769.0_TO_790.0_id': -2040258.406043,
@@ -124,87 +125,7 @@ file_model_coefficients = {
     'PAIR_id_&suit:BIN_FROM_905.0_TO_932.0&♥️': -16631.220497,
 }
 
-# ==================== 3. نماذج التوقع ====================
-
-def gap_model(delta_t):
-    """نموذج الفجوة الزمنية"""
-    if delta_t > 60: # مثال: إذا كانت الفجوة كبيرة، توقع الثور
-        return 1
-    else: # وإلا توقع الراعي
-        return 0
-
-def math_model(b_num, suit):
-    """النموذج الرياضي"""
-    last_3 = b_num[-3:] if len(b_num) >= 3 else b_num
-    B = sum(int(d) for d in last_3 if d.isdigit())
-    S = 1 if suit in ['♦️', '♥️'] else 2
-    R = B * S
-    return 1 if (R % 2 == 0) else 0  # 1=ثور, 0=راعي
-
-def file_model(b_num, suit, hour):
-    """نموذج الملفات"""
-    score = 0
-    b_num_int = int(b_num)
-
-    for feature, coeff in file_model_coefficients.items():
-        # BIN_..._id features
-        bin_id_match = re.match(r'BIN_(LESS_THAN|FROM_(\d+\.?\d*)_TO_(\d+\.?\d*)|MORE_THAN)_(\d+\.?\d*)_id', feature)
-        if bin_id_match:
-            bin_type = bin_id_match.group(1)
-            if bin_type == 'LESS_THAN':
-                threshold = float(bin_id_match.group(4))
-                if b_num_int < threshold:
-                    score += coeff
-            elif bin_type == 'MORE_THAN':
-                threshold = float(bin_id_match.group(4))
-                if b_num_int >= threshold:
-                    score += coeff
-            elif bin_type.startswith('FROM_'):
-                lower = float(bin_id_match.group(2))
-                upper = float(bin_id_match.group(3))
-                if lower <= b_num_int < upper:
-                    score += coeff
-            continue
-
-        # PAIR_id_&suit:BIN_... features
-        pair_match = re.match(r'PAIR_id_&suit:BIN_(LESS_THAN|FROM_(\d+\.?\d*)_TO_(\d+\.?\d*)|MORE_THAN)_(\d+\.?\d*)&(.)', feature)
-        if pair_match:
-            pair_suit = pair_match.group(5)
-            if pair_suit == suit:
-                bin_type = pair_match.group(1)
-                if bin_type == 'LESS_THAN':
-                    threshold = float(pair_match.group(4))
-                    if b_num_int < threshold:
-                        score += coeff
-                elif bin_type == 'MORE_THAN':
-                    threshold = float(pair_match.group(4))
-                    if b_num_int >= threshold:
-                        score += coeff
-                elif bin_type.startswith('FROM_'):
-                    lower = float(pair_match.group(2))
-                    upper = float(pair_match.group(3))
-                    if lower <= b_num_int < upper:
-                        score += coeff
-            continue
-
-        # timestamp (Hour of Day)-... features
-        if feature == f'timestamp (Hour of Day)-{hour}':
-            score += coeff
-            continue
-
-        # suit-... features
-        if feature == f'suit-{suit}':
-            score += coeff
-            continue
-
-        # Other specific features (winner-*, prediction-*) - these are added unconditionally if present
-        if feature.startswith('winner-') or feature.startswith('BIN_') and 'prediction' in feature:
-            score += coeff
-            continue
-
-    return 1 if score > 0 else 0 # 1=ثور, 0=راعي
-
-# ==================== 4. دوال مساعدة ====================
+# ==================== 3. دوال مساعدة ====================
 def get_time_period(hour):
     if 6 <= hour < 12: return "morning"
     elif 12 <= hour < 18: return "afternoon"
@@ -220,22 +141,154 @@ def period_translate(period):
 def ensure_columns():
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS history (
+            id SERIAL PRIMARY KEY,
+            b_num TEXT,
+            suit TEXT,
+            winner TEXT,
+            timestamp TIMESTAMP,
+            prediction INTEGER,
+            user_id BIGINT,
+            final_prediction INTEGER
+        );
+    """)
     cur.execute("ALTER TABLE IF EXISTS history ADD COLUMN IF NOT EXISTS final_prediction INTEGER;")
     cur.execute("ALTER TABLE IF EXISTS history ADD COLUMN IF NOT EXISTS user_id BIGINT;")
     conn.commit()
     conn.close()
 
+def populate_db_from_excel():
+    """ملء قاعدة البيانات ببيانات Excel إذا كانت فارغة"""
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM history;")
+        if cur.fetchone()[0] == 0: # إذا كانت القاعدة فارغة
+            print("قاعدة البيانات فارغة، جاري ملؤها من ملف Excel...")
+            df = pd.read_excel(EXCEL_PATH)
+            for index, row in df.iterrows():
+                # التأكد من أن الأعمدة موجودة في Excel وأنواعها صحيحة
+                b_num = str(row['b_num']) if 'b_num' in row and pd.notna(row['b_num']) else None
+                suit = str(row['suit']) if 'suit' in row and pd.notna(row['suit']) else None
+                winner = str(row['winner']) if 'winner' in row and pd.notna(row['winner']) else None
+                timestamp = pd.to_datetime(row['timestamp']) if 'timestamp' in row and pd.notna(row['timestamp']) else datetime.datetime.now()
+                prediction = int(row['prediction']) if 'prediction' in row and pd.notna(row['prediction']) else None
+                user_id = int(row['user_id']) if 'user_id' in row and pd.notna(row['user_id']) else None
+                final_prediction = int(row['final_prediction']) if 'final_prediction' in row and pd.notna(row['final_prediction']) else None
+
+                cur.execute("INSERT INTO history (b_num, suit, winner, timestamp, prediction, user_id, final_prediction) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                            (b_num, suit, winner, timestamp, prediction, user_id, final_prediction))
+            conn.commit()
+            print("تم ملء قاعدة البيانات بنجاح من ملف Excel.")
+        conn.close()
+    except Exception as e:
+        print(f"خطأ في ملء قاعدة البيانات من Excel: {e}")
+
+# ==================== 4. نماذج التوقع المتقدمة ====================
+
+def file_model(b_num, suit, hour):
+    """نموذج الملفات المستخرج"""
+    score = 0
+    b_num_int = int(b_num)
+    for feature, coeff in file_model_coefficients.items():
+        bin_id_match = re.match(r'BIN_(LESS_THAN|FROM_(\d+\.?\d*)_TO_(\d+\.?\d*)|MORE_THAN)_(\d+\.?\d*)_id', feature)
+        if bin_id_match:
+            bin_type = bin_id_match.group(1)
+            if bin_type == 'LESS_THAN' and b_num_int < float(bin_id_match.group(4)): score += coeff
+            elif bin_type == 'MORE_THAN' and b_num_int >= float(bin_id_match.group(4)): score += coeff
+            elif bin_type.startswith('FROM_') and float(bin_id_match.group(2)) <= b_num_int < float(bin_id_match.group(3)): score += coeff
+            continue
+        pair_match = re.match(r'PAIR_id_&suit:BIN_(LESS_THAN|FROM_(\d+\.?\d*)_TO_(\d+\.?\d*)|MORE_THAN)_(\d+\.?\d*)&(.)', feature)
+        if pair_match and pair_match.group(5) == suit:
+            bin_type = pair_match.group(1)
+            if bin_type == 'LESS_THAN' and b_num_int < float(pair_match.group(4)): score += coeff
+            elif bin_type == 'MORE_THAN' and b_num_int >= float(pair_match.group(4)): score += coeff
+            elif bin_type.startswith('FROM_') and float(pair_match.group(2)) <= b_num_int < float(pair_match.group(3)): score += coeff
+            continue
+        if feature == f'timestamp (Hour of Day)-{hour}': score += coeff
+        if feature == f'suit-{suit}': score += coeff
+        if feature.startswith('winner-') or (feature.startswith('BIN_') and 'prediction' in feature): score += coeff
+    return 1 if score > 0 else 0
+
+def dynamic_historical_analyzer(b_num, suit):
+    """تحليل البيانات التاريخية ديناميكياً من قاعدة البيانات"""
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        df = pd.read_sql("SELECT b_num, suit, winner FROM history WHERE winner != 'تعادل ⚪'", conn)
+        conn.close()
+        
+        if df.empty:
+            return 0, 0, 0 # لا توجد بيانات كافية للتحليل
+
+        # 1. تحليل حسب البذلة
+        suit_stats = df[df['suit'] == suit]['winner'].value_counts(normalize=True)
+        suit_pred = 1 if not suit_stats.empty and ('الثور 🔵' in suit_stats.index and suit_stats['الثور 🔵'] > 0.5) else 0
+        if not suit_stats.empty and ('الراعي 🔴' in suit_stats.index and suit_stats['الراعي 🔴'] > 0.5): suit_pred = 0
+
+        # 2. تحليل حسب نطاق رقم البونص
+        b_num_int = int(b_num)
+        df['b_num_numeric'] = pd.to_numeric(df['b_num'], errors='coerce')
+        df_numeric = df.dropna(subset=['b_num_numeric'])
+
+        bin_pred = 0 # الافتراضي راعي
+        if not df_numeric.empty:
+            # إعادة حساب الفئات ديناميكياً
+            bins = pd.qcut(df_numeric['b_num_numeric'], q=5, duplicates='drop', retbins=True)[1]
+            # تحديد الفئة التي ينتمي إليها b_num_int
+            b_num_bin_label = pd.cut([b_num_int], bins=bins, labels=False, include_lowest=True)[0]
+            
+            if b_num_bin_label is not None:
+                # الحصول على الفئة الفعلية
+                actual_bin = pd.Interval(bins[b_num_bin_label], bins[b_num_bin_label+1], closed='right')
+                bin_data = df_numeric[df_numeric['b_num_numeric'].apply(lambda x: x in actual_bin)]
+                if not bin_data.empty:
+                    bin_winner_counts = bin_data['winner'].value_counts(normalize=True)
+                    if 'الثور 🔵' in bin_winner_counts.index and bin_winner_counts['الثور 🔵'] > 0.5: bin_pred = 1
+                    elif 'راعي' in bin_winner_counts.index and bin_winner_counts['راعي'] > 0.5: bin_pred = 0
+
+        return suit_pred, bin_pred, len(df)
+    except Exception as e:
+        print(f"Dynamic Analyzer Error: {e}")
+        return 0, 0, 0
+
+def coordinated_sovereign_engine(b_num: str, suit: str, current_time):
+    """المحرك المنسق النهائي (فجوة + ملف + قاعدة بيانات ديناميكية)"""
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        cur = conn.cursor()
+        cur.execute("SELECT timestamp FROM history WHERE winner != 'تعادل ⚪' ORDER BY id DESC LIMIT 1")
+        row = cur.fetchone()
+        last_time = row[0] if row else None
+        conn.close()
+        
+        delta_t = int((current_time - last_time).total_seconds()) if last_time else 0
+        
+        # التوقعات المختلفة
+        pred_file = file_model(b_num, suit, current_time.hour)
+        suit_pred, bin_pred, db_count = dynamic_historical_analyzer(b_num, suit)
+        
+        # منطق التصويت المنسق
+        votes = [pred_file, suit_pred, bin_pred]
+        
+        # إذا كانت الفجوة > 60 ثانية، نعطي وزناً أكبر لنموذج الملف
+        if delta_t > 60:
+            final_pred = pred_file
+        else:
+            # وإلا نعتمد على الأغلبية بين التحليل التاريخي والملف
+            final_pred = Counter(votes).most_common(1)[0][0]
+            
+        return final_pred, delta_t, db_count
+    except Exception as e:
+        print(f"Engine Error: {e}")
+        return file_model(b_num, suit, current_time.hour), 0, 0
+
 # ==================== 5. أوامر البوت ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    kb = [
-        [InlineKeyboardButton("♦️", callback_data="s_♦️"), InlineKeyboardButton("♥️", callback_data="s_♥️")],
-        [InlineKeyboardButton("♠️", callback_data="s_♠️"), InlineKeyboardButton("♣️", callback_data="s_♣️")]
-    ]
-    await update.message.reply_text(
-        "🎴 اختر نوع البذلة:",
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
+    kb = [[InlineKeyboardButton("♦️", callback_data="s_♦️"), InlineKeyboardButton("♥️", callback_data="s_♥️")],
+          [InlineKeyboardButton("♠️", callback_data="s_♠️"), InlineKeyboardButton("♣️", callback_data="s_♣️")]]
+    await update.message.reply_text("🏛️ **HADES V5.0 (Dynamic Intel)**\nاختر نوع البذلة:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
 async def performance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """تحليل أداء التوقعات حسب الفترات والساعات"""
@@ -354,132 +407,58 @@ async def download_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== 6. المعالجات الأساسية ====================
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
     text = update.message.text.strip()
-
     if text.isdigit() and len(text) >= 7:
         if 'suit' not in context.user_data:
-            await update.message.reply_text("⚠️ اختر البذلة أولاً عبر /start.")
+            await update.message.reply_text("⚠️ اختر البذلة أولاً.")
             return
-
+        
         current_time = datetime.datetime.now()
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-        cur = conn.cursor()
-        cur.execute("SELECT timestamp FROM history ORDER BY id DESC LIMIT 1")
-        last_time = cur.fetchone()[0] if cur.rowcount > 0 else None
-        conn.close()
-
-        delta_t = (current_time - last_time).total_seconds() if last_time else 0
         suit = context.user_data['suit']
-        hour = current_time.hour
-
-        # الحصول على التوقعات من النماذج الثلاثة
-        pred1 = gap_model(delta_t)
-        pred2 = math_model(text, suit)
-        pred3 = file_model(text, suit, hour)
-
-        # التصويت
-        votes = [pred1, pred2, pred3]
-        final_prediction = Counter(votes).most_common(1)[0][0]
-
-        context.user_data['bonus'] = text
-        context.user_data['final_prediction'] = final_prediction
-        context.user_data['current_time'] = current_time
-
-        kb = [
-            [InlineKeyboardButton("🔴 فاز الراعي", callback_data="save_الراعي 🔴")],
-            [InlineKeyboardButton("🔵 فاز الثور", callback_data="save_الثور 🔵")]
-        ]
+        
+        # تشغيل المحرك المنسق
+        final_pred, gap, db_count = coordinated_sovereign_engine(text, suit, current_time)
+        
+        context.user_data.update({'bonus': text, 'final_prediction': final_pred, 'current_time': current_time})
+        
+        kb = [[InlineKeyboardButton("🔴 فاز الراعي", callback_data="save_الراعي 🔴")],
+              [InlineKeyboardButton("🔵 فاز الثور", callback_data="save_الثور 🔵")]]
+        
         await update.message.reply_text(
-            f"🎯 **التوقع النهائي:** {WINNER_NAMES[final_prediction]}\n"
-            f"🗳️ الأصوات: [فجوة: {WINNER_NAMES[pred1]}, رياضي: {WINNER_NAMES[pred2]}, ملف: {WINNER_NAMES[pred3]}]\n"
-            f"⏱️ الفجوة: {int(delta_t)} ثانية\n"
+            f"🎯 **التوقع النهائي:** {WINNER_NAMES[final_pred]}\n"
+            f"⏱️ الفجوة: {gap} ثانية\n"
+            f"📊 جولات القاعدة: {db_count} جولة\n"
             f"━━━━━━━━━━━━━━\n"
             f"اختر النتيجة الحقيقية:",
-            reply_markup=InlineKeyboardMarkup(kb),
-            parse_mode='Markdown'
+            reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
         )
     else:
-        await update.message.reply_text("❌ أرسل رقم بونص صحيح (7 أرقام على الأقل).")
+        await update.message.reply_text("❌ أرسل رقم بونص صحيح.")
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     if query.data.startswith("s_"):
-        suit = query.data[2:]
-        context.user_data['suit'] = suit
-        await query.edit_message_text(f"✅ تم اختيار {suit}. أرسل رقم البونص:")
-
+        context.user_data['suit'] = query.data[2:]
+        await query.edit_message_text(f"✅ تم اختيار {context.user_data['suit']}. أرسل رقم البونص:")
     elif query.data.startswith("save_"):
         winner_db = query.data[5:]
-        final_pred_code = context.user_data.get('final_prediction')
-
-        if final_pred_code is None:
-            await query.edit_message_text("❌ خطأ: لا يوجد توقع. ابدأ من جديد /start.")
-            return
-
         try:
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             cur = conn.cursor()
-            cur.execute(
-                "INSERT INTO history (b_num, suit, winner, timestamp, final_prediction, user_id) VALUES (%s, %s, %s, %s, %s, %s)",
-                (
-                    context.user_data['bonus'],
-                    context.user_data['suit'],
-                    winner_db,
-                    context.user_data['current_time'],
-                    final_pred_code,
-                    update.effective_user.id
-                )
-            )
+            cur.execute("INSERT INTO history (b_num, suit, winner, timestamp, final_prediction, user_id) VALUES (%s, %s, %s, %s, %s, %s)",
+                       (context.user_data['bonus'], context.user_data['suit'], winner_db, context.user_data['current_time'], context.user_data['final_prediction'], update.effective_user.id))
             conn.commit()
             conn.close()
-
-            pred_winner = WINNER_NAMES[final_pred_code]
-            is_correct = "✅" if winner_db == pred_winner else "❌"
-
-            # أزرار بعد الحفظ
-            keyboard = [
-                [InlineKeyboardButton("🔄 بدء جولة جديدة", callback_data="new_round"),
-                 InlineKeyboardButton("🗑️ حذف آخر إدخال", callback_data="delete_last")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-
-            await query.edit_message_text(
-                f"{is_correct} **تم التسجيل**\n\n"
-                f"🎯 توقعنا: {pred_winner}\n"
-                f"🏆 النتيجة: {winner_db}\n"
-                f"━━━━━━━━━━━━━━\n"
-                f"/performance - تحليل\n"
-                f"/status - حالة النموذج\n"
-                f"/delete - حذف آخر إدخال",
-                parse_mode='Markdown',
-                reply_markup=reply_markup
-            )
+            is_correct = "✅" if winner_db == WINNER_NAMES[context.user_data['final_prediction']] else "❌"
+            await query.edit_message_text(f"{is_correct} تم التسجيل بنجاح.\nأرسل /start لجولة جديدة.")
         except Exception as e:
             await query.edit_message_text(f"❌ خطأ في الحفظ: {e}")
-
-    elif query.data == "new_round":
-        await start(update, context)
-
-    elif query.data == "delete_last":
-        user_id = update.effective_user.id
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-        cur = conn.cursor()
-        cur.execute("SELECT id FROM history WHERE user_id = %s ORDER BY id DESC LIMIT 1", (user_id,))
-        row = cur.fetchone()
-        if row:
-            cur.execute("DELETE FROM history WHERE id = %s", (row[0],))
-            conn.commit()
-            await query.edit_message_text("🗑️ تم حذف آخر إدخال لك.\nأرسل /start لبدء جولة جديدة.")
-        else:
-            await query.edit_message_text("⚠️ لا يوجد إدخال سابق لك.")
-        conn.close()
 
 # ==================== 7. التشغيل الرئيسي ====================
 if __name__ == "__main__":
     ensure_columns()
+    populate_db_from_excel() # ملء القاعدة من Excel عند التشغيل الأول
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("performance", performance_command))
@@ -488,6 +467,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("download", download_database))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))
-
-    print("🚀 HADES V2.0 (Triple Model) is running...")
+    print("🚀 HADES V5.0 (Dynamic Intel) is running...")
     app.run_polling()
