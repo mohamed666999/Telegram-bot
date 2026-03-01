@@ -39,6 +39,9 @@ WINNER_MAP = {
 # أسماء الفائزين بالعربية مع الرموز (للعرض)
 WINNER_NAMES = {0: 'الراعي 🔴', 1: 'الثور 🔵', 2: 'تعادل ⚪'}
 
+# عتبات الثقة للنماذج
+CONFIDENCE_THRESHOLD = 0.65  # إذا تجاوزت ثقة أحد النموذجين هذه القيمة، يتم اعتماده
+
 # ==================== 2. دوال تحليل الوقت ====================
 def get_time_period(hour: int) -> str:
     """تحديد الفترة الزمنية بناءً على الساعة"""
@@ -239,7 +242,7 @@ def inject_fake_prediction(pred_code: int) -> int:
     """
     return 1 if pred_code == 0 else 0
 
-# ==================== 5. المحرك الرياضي الأساسي ====================
+# ==================== 5. المحرك الرياضي الأساسي (المعادلة القديمة) ====================
 def sovereign_math_engine(b_num: str, suit: str, last_timestamp, current_timestamp):
     """
     المعادلة الرياضية السيادية:
@@ -254,79 +257,119 @@ def sovereign_math_engine(b_num: str, suit: str, last_timestamp, current_timesta
     prediction_text = WINNER_NAMES[prediction_code]
     return prediction_text, prediction_code, R, delta_t, B, S
 
-# ==================== 6. Bayesian Adaptive Layer (مُحسّن) ====================
-def bayesian_adjustment(prediction_code: int, current_hour: int, conn, min_samples: int = 15):
+# ==================== 6. دالة تحليل بايزي المحسّنة (باستخدام كل البيانات) ====================
+def bayesian_analysis(conn, current_hour: int, min_samples: int = 30):
     """
-    تعديل التوقع باستخدام Bayes Theorem مع الاحتمالات الشرطية للفترة الزمنية
+    تحليل بايزي كامل باستخدام جميع البيانات التاريخية لحساب الاحتمالات الشرطية حسب الفترة الزمنية.
+    تُرجع قاموساً يحتوي على احتمالات كل فائز في كل فترة.
     """
     try:
-        period = get_time_period(current_hour)
-        
-        # جلب البيانات التاريخية للفترة الحالية فقط (أحدث 200 جولة)
+        # جلب كل البيانات (بدون حد) - قد يكون ثقيلاً لكنه دقيق
         df = pd.read_sql("""
-            SELECT winner, prediction, timestamp 
+            SELECT winner, timestamp 
             FROM history 
-            WHERE prediction IS NOT NULL 
-            ORDER BY id DESC 
-            LIMIT 200
+            WHERE winner IS NOT NULL
         """, conn)
         
         if len(df) < min_samples:
-            return prediction_code, None, None  # بيانات غير كافية
+            return None
         
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df['hour'] = df['timestamp'].dt.hour
         df['period'] = df['hour'].apply(get_time_period)
+        df['winner_code'] = df['winner'].map(WINNER_MAP)
+        df = df.dropna(subset=['winner_code'])
         
-        # فلترة الفترة الحالية
-        period_data = df[df['period'] == period]
-        if len(period_data) < min_samples:
-            return prediction_code, None, None
+        # حساب الاحتمالات لكل فترة
+        periods = ['morning', 'afternoon', 'evening', 'night']
+        bayesian_probs = {}
         
-        # تحويل النصوص إلى أكواد رقمية للمقارنة الصحيحة
-        period_data['winner_code'] = period_data['winner'].map(WINNER_MAP)
-        period_data = period_data.dropna(subset=['winner_code'])
+        for period in periods:
+            period_data = df[df['period'] == period]
+            if len(period_data) >= min_samples:
+                total = len(period_data)
+                p_rai = (period_data['winner_code'] == 0).sum() / total
+                p_thawr = (period_data['winner_code'] == 1).sum() / total
+                p_tie = (period_data['winner_code'] == 2).sum() / total
+                bayesian_probs[period] = (p_rai, p_thawr, p_tie)
+            else:
+                bayesian_probs[period] = None
         
-        if len(period_data) < min_samples:
-            return prediction_code, None, None
-        
-        # حساب الاحتمالات الشرطية P(Winner|Period)
-        total = len(period_data)
-        p_rai = (period_data['winner_code'] == 0).sum() / total
-        p_thawr = (period_data['winner_code'] == 1).sum() / total
-        p_tie = (period_data['winner_code'] == 2).sum() / total
-        
-        # Prior probabilities (من المعادلة الرياضية)
-        # نعطي 0.85 للفئة المختارة و0.15 للأخرى (ثقة عالية في المعادلة)
-        if prediction_code == 0:  # راعي
-            prior_rai, prior_thawr = 0.85, 0.15
-        else:  # ثور
-            prior_rai, prior_thawr = 0.15, 0.85
-        
-        # Bayesian Update: Posterior ∝ Prior × Likelihood
-        # Normalization
-        norm_rai = prior_rai * p_rai
-        norm_thawr = prior_thawr * p_thawr
-        
-        if (norm_rai + norm_thawr) == 0:
-            return prediction_code, None, None
-        
-        posterior_rai = norm_rai / (norm_rai + norm_thawr)
-        posterior_thawr = norm_thawr / (norm_rai + norm_thawr)
-        
-        # القرار النهائي
-        adjusted_code = 0 if posterior_rai > posterior_thawr else 1
-        
-        # حساب "قوة التعديل" (confidence في التعديل)
-        confidence_diff = abs(posterior_rai - posterior_thawr)
-        
-        return adjusted_code, (posterior_rai, posterior_thawr), confidence_diff
+        return bayesian_probs
         
     except Exception as e:
-        print(f"Bayesian Error: {e}")
-        return prediction_code, None, None
+        print(f"Bayesian Analysis Error: {e}")
+        return None
 
-# ==================== 7. أوامر البوت ====================
+# ==================== 7. دالة اتخاذ القرار النهائي (دمج المعادلة مع بايزي) ====================
+def hybrid_prediction(b_num: str, suit: str, last_timestamp, current_timestamp, bayesian_probs):
+    """
+    تجمع بين توقع المعادلة الرياضية وتوقع بايزي (إذا توفر) وتعطي الأولوية للأكثر ثقة.
+    """
+    # 1. الحصول على توقع المعادلة
+    math_pred_text, math_pred_code, R, gap, B, S = sovereign_math_engine(
+        b_num, suit, last_timestamp, current_timestamp
+    )
+    
+    # 2. إذا لم تكن بيانات بايزي متوفرة، نرجع توقع المعادلة فقط
+    if bayesian_probs is None:
+        return math_pred_text, math_pred_code, R, gap, B, S, "المعادلة فقط (لا توجد بيانات كافية)"
+    
+    # 3. تحديد الفترة الحالية
+    current_period = get_time_period(current_timestamp.hour)
+    period_probs = bayesian_probs.get(current_period)
+    
+    if period_probs is None:
+        return math_pred_text, math_pred_code, R, gap, B, S, "المعادلة فقط (بيانات غير كافية للفترة)"
+    
+    p_rai, p_thawr, p_tie = period_probs
+    
+    # 4. حساب "ثقة" كل نموذج
+    # ثقة المعادلة: نستخدم قيمة R (كلما كبرت R زادت الثقة؟) ولكن هنا نعتمد على معامل بسيط
+    # يمكن استخدام delta_t أو B*S، لكن سنفترض ثقة المعادلة = 0.7 افتراضياً (قابلة للتعديل)
+    math_confidence = 0.7  # يمكن تطويرها لاحقاً
+    
+    # ثقة بايزي: الفرق بين أعلى احتمال والثاني (كلما زاد الفرق زادت الثقة)
+    probs = [p_rai, p_thawr, p_tie]
+    probs_sorted = sorted(probs, reverse=True)
+    bayes_confidence = probs_sorted[0] - probs_sorted[1]  # كلما زاد الفرق زادت الثقة
+    
+    # 5. اتخاذ القرار بناءً على الثقة
+    if bayes_confidence > CONFIDENCE_THRESHOLD:
+        # بايزي أكثر ثقة
+        if probs_sorted[0] == p_rai:
+            final_code = 0
+        elif probs_sorted[0] == p_thawr:
+            final_code = 1
+        else:
+            final_code = 2
+        final_text = WINNER_NAMES[final_code]
+        reason = f"بايزي (ثقة {bayes_confidence:.2f})"
+    elif math_confidence > CONFIDENCE_THRESHOLD:
+        # المعادلة أكثر ثقة (أو افتراضياً)
+        final_code = math_pred_code
+        final_text = math_pred_text
+        reason = "المعادلة (ثقة افتراضية)"
+    else:
+        # مزج: المتوسط المرجح (نختار الأغلبية)
+        # نعطي المعادلة وزن 0.7 وبايزي وزن 0.3 (يمكن تعديله)
+        weighted_rai = 0.7 * (1 if math_pred_code == 0 else 0) + 0.3 * p_rai
+        weighted_thawr = 0.7 * (1 if math_pred_code == 1 else 0) + 0.3 * p_thawr
+        weighted_tie = 0.7 * (1 if math_pred_code == 2 else 0) + 0.3 * p_tie
+        
+        if weighted_rai > weighted_thawr and weighted_rai > weighted_tie:
+            final_code = 0
+        elif weighted_thawr > weighted_rai and weighted_thawr > weighted_tie:
+            final_code = 1
+        else:
+            final_code = 2
+        
+        final_text = WINNER_NAMES[final_code]
+        reason = f"مزج (معادلة+بايزي) - معادلة: {math_pred_text}, بايزي: راعي {p_rai:.2f}, ثور {p_thawr:.2f}, تعادل {p_tie:.2f}"
+    
+    return final_text, final_code, R, gap, B, S, reason
+
+# ==================== 8. أوامر البوت ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """بدء التفاعل مع التحقق من الاشتراك"""
@@ -335,7 +378,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # التحقق من الاشتراك
     subscribed, plan, remaining = is_user_subscribed(user_id)
     
-    if not subscribed and user_id != ADMIN_ID:  # حتى الأدمن يحتاج اشتراك؟ لا، الأدمن مستثنى، لكن نسمح له بالدخول بدون اشتراك؟
+    if not subscribed and user_id != ADMIN_ID:
         # إذا لم يكن مشتركًا وليس أدمن، نطلب إدخال مفتاح
         await update.message.reply_text(
             "🔐 **مرحبًا بك في HADES V100.2**\n"
@@ -357,7 +400,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remaining_text = f"اشتراكك ({plan}) متبقي {remaining} يوم." if subscribed else ""
     await update.message.reply_text(
         f"🏛️ **الكيان السيادي HADES V100.2**\n"
-        f"محرك تنبؤي بايزي متطور مع تحليل زمني.\n"
+        f"محرك تنبؤي هجين (معادلة + بايزي) مع تحليل زمني.\n"
         f"{remaining_text}\n\n"
         "🎴 اختر نوع البذلة:",
         reply_markup=InlineKeyboardMarkup(kb),
@@ -590,8 +633,7 @@ async def model_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ: {e}")
 
-# ==================== 8. أوامر جديدة ====================
-
+# ==================== 9. أمر الحذف ====================
 async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """حذف آخر إدخال للمستخدم (إذا كان خاطئاً)"""
     user_id = update.effective_user.id
@@ -606,7 +648,7 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur = conn.cursor()
     
     if user_id == ADMIN_ID:
-        # الأدمن: يحذف آخر إدخال بشكل عام (يمكن تعديله حسب الرغبة)
+        # الأدمن: يحذف آخر إدخال بشكل عام
         cur.execute("SELECT id FROM history ORDER BY id DESC LIMIT 1")
         row = cur.fetchone()
         if row:
@@ -632,10 +674,10 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     conn.close()
 
-# ==================== 9. المعالجات الأساسية ====================
+# ==================== 10. المعالجات الأساسية ====================
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج إدخال رقم البونص مع Bayesian Adjustment وقيود التباعد"""
+    """معالج إدخال رقم البونص مع النظام الهجين"""
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
@@ -667,49 +709,27 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         row = cur.fetchone()
         last_time = row[0] if row else None
 
-        # التنبؤ الأصلي
-        pred_text, pred_code, R, gap, B, S = sovereign_math_engine(
-            text, context.user_data['suit'], last_time, current_time
+        # تحميل بيانات بايزي (كل التاريخ)
+        bayesian_probs = bayesian_analysis(conn, current_time.hour)
+        
+        # التنبؤ الهجين
+        pred_text, pred_code, R, gap, B, S, reason = hybrid_prediction(
+            text, context.user_data['suit'], last_time, current_time, bayesian_probs
         )
 
-        # Bayesian Adjustment
-        adjusted_code, posteriors, confidence = bayesian_adjustment(
-            pred_code, current_time.hour, conn
-        )
-        
         cur.close()
         conn.close()
 
         # إذا وصل streak إلى 10، نقوم بإدخال جولة خاطئة (للمستخدمين العاديين فقط)
         if user_id != ADMIN_ID and context.user_data.get('correct_streak', 0) >= MAX_CORRECT_STREAK:
             # قلب التوقع
-            adjusted_code = inject_fake_prediction(adjusted_code if adjusted_code is not None else pred_code)
-            pred_text = WINNER_NAMES[adjusted_code]
+            pred_code = inject_fake_prediction(pred_code)
+            pred_text = WINNER_NAMES[pred_code]
             # إعادة تعيين streak
             context.user_data['correct_streak'] = 0
             fake_warning = "\n⚠️ **تنبيه:** بناءً على تحليل الأرباح، تم تعديل التوقع بشكل مؤقت.\n\n"
         else:
             fake_warning = ""
-
-        # بناء رسالة التوقع
-        warning_text = ""
-        if adjusted_code is not None and adjusted_code != pred_code and posteriors is not None:
-            pred_code = adjusted_code
-            pred_text = WINNER_NAMES[pred_code]
-            p_rai, p_thawr = posteriors
-            warning_text = (
-                f"⚠️ **تعديل بايزي:**\n"
-                f"المعادلة: {WINNER_NAMES[1 if (R % 2 == 0) else 0]} | "
-                f"البيانات: راعي {p_rai*100:.0f}% vs ثور {p_thawr*100:.0f}%\n"
-                f"→ التوقع المعدل: {pred_text}\n\n"
-            )
-        elif posteriors is not None:
-            p_rai, p_thawr = posteriors
-            warning_text = (
-                f"ℹ️ **دعم بايزي:** "
-                f"التاريخ يفضل {WINNER_NAMES[0] if p_rai > p_thawr else WINNER_NAMES[1]} "
-                f"({max(p_rai, p_thawr)*100:.0f}%)\n\n"
-            )
 
         # تخزين البيانات
         context.user_data['bonus'] = text
@@ -726,8 +746,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         suit_color = "🔴" if context.user_data['suit'] in ['♦️', '♥️'] else "⚫"
         
         await update.message.reply_text(
-            f"{fake_warning}{warning_text}"
+            f"{fake_warning}"
             f"🎯 **التوقع النهائي:** {pred_text}\n"
+            f"📊 **المنهج:** {reason}\n"
             f"🎴 البذلة: {context.user_data['suit']} {suit_color}\n"
             f"🔢 المعادلة: B={B} × S={S} + ΔT={gap} → R={R}\n"
             f"━━━━━━━━━━━━━━\n"
@@ -767,15 +788,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             cur = conn.cursor()
+            # لاحظ: نحتاج إلى إضافة user_id إلى جدول history، لكن الجدول الحالي لا يحتويه.
+            # يجب إضافة عمود user_id إلى الجدول. سنضيفه هنا بشكل آمن.
             cur.execute("""
-                INSERT INTO history (b_num, suit, winner, timestamp, prediction) 
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO history (b_num, suit, winner, timestamp, prediction, user_id) 
+                VALUES (%s, %s, %s, %s, %s, %s)
             """, (
                 context.user_data['bonus'],
                 context.user_data['suit'],
                 winner_db,
                 context.user_data['current_time'],
-                pred_code
+                pred_code,
+                update.effective_user.id
             ))
             conn.commit()
             conn.close()
@@ -811,12 +835,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "new_round":
         # تنفيذ أمر /start
+        # يجب محاكاة الأمر /start
         await start(update, context)
 
-# ==================== 10. التشغيل الرئيسي ====================
+# ==================== 11. التشغيل الرئيسي ====================
 if __name__ == "__main__":
     # تهيئة جدول الاشتراكات
     init_subscription_table()
+    
+    # التأكد من وجود عمود user_id في جدول history (إذا لم يكن موجوداً)
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        cur = conn.cursor()
+        cur.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS user_id BIGINT")
+        conn.commit()
+        conn.close()
+    except:
+        pass  # تجاهل الأخطاء إذا كان العمود موجوداً مسبقاً
     
     # التحقق من وجود أي مفاتيح، إذا لم يكن هناك أي مفاتيح، قم بتوليد مفاتيح أولية
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
@@ -835,7 +870,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("status", model_status))
     app.add_handler(CommandHandler("generate_keys", generate_keys_command))
     app.add_handler(CommandHandler("mysub", my_subscription))
-    app.add_handler(CommandHandler("delete", delete_command))  # الأمر الجديد
+    app.add_handler(CommandHandler("delete", delete_command))
 
     # معالج النصوص (للبونص والمفاتيح)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
@@ -843,6 +878,6 @@ if __name__ == "__main__":
     # معالج الأزرار
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    print("🚀 HADES V100.2 يعمل... (مع نظام اشتراك وتباعد زمني)")
-    print("🏛️ محرك بايزي تكيفي")
+    print("🚀 HADES V100.2 يعمل... (نظام هجين: معادلة + بايزي)")
+    print("🏛️ محرك تنبؤي متكيف مع تحليل كامل للبيانات")
     app.run_polling()
