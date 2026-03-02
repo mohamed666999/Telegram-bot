@@ -1,7 +1,7 @@
 """
 HADES V101.5 - Anti-Bias Self-Optimizing AI Prediction Bot
 جميع المفاتيح مضمنة، يعمل فوراً على Railway مع PostgreSQL.
-تم إصلاح مشكلة الانحياز للأحمر عبر تعديل معاملات البذلة وإضافة عشوائية طفيفة.
+تم تعديل المعادلة الرياضية لإزالة الانحياز الناتج عن delta_t.
 """
 
 import os
@@ -58,12 +58,12 @@ WINNER_NAMES = {0: 'الراعي 🔴', 1: 'الثور 🔵', 2: 'تعادل ⚪
 # الإعدادات الديناميكية (سيتم تحميلها من قاعدة البيانات)
 DYNAMIC_CONFIG = {
     'CONFIDENCE_THRESHOLD': 0.65,
-    'MATH_WEIGHT': 0.7,
-    'BAYES_WEIGHT': 0.3,
+    'MATH_WEIGHT': 0.55,          # تم تعديله لتحقيق توازن أفضل
+    'BAYES_WEIGHT': 0.45,          # تم تعديله لتحقيق توازن أفضل
     'MATH_CONFIDENCE': 0.7,
     'S_RED': 1,
-    'S_BLACK': 1,          # تم تعديله ليكون 1 لمنع الانحياز
-    'RANDOM_NOISE': 0.02,   # إضافة عشوائية صغيرة لكسر الانحياز
+    'S_BLACK': 1,                  # تم تعديله ليكون 1 لمنع الانحياز
+    'RANDOM_NOISE': 0.02,           # إضافة عشوائية صغيرة لكسر الانحياز
 }
 
 # حالات المحادثة
@@ -151,8 +151,8 @@ def load_dynamic_config():
                 DYNAMIC_CONFIG[name] = value
 
     CONFIDENCE_THRESHOLD = DYNAMIC_CONFIG.get('CONFIDENCE_THRESHOLD', 0.65)
-    MATH_WEIGHT = DYNAMIC_CONFIG.get('MATH_WEIGHT', 0.7)
-    BAYES_WEIGHT = DYNAMIC_CONFIG.get('BAYES_WEIGHT', 0.3)
+    MATH_WEIGHT = DYNAMIC_CONFIG.get('MATH_WEIGHT', 0.55)
+    BAYES_WEIGHT = DYNAMIC_CONFIG.get('BAYES_WEIGHT', 0.45)
     MATH_CONFIDENCE = DYNAMIC_CONFIG.get('MATH_CONFIDENCE', 0.7)
     S_RED = DYNAMIC_CONFIG.get('S_RED', 1)
     S_BLACK = DYNAMIC_CONFIG.get('S_BLACK', 1)
@@ -287,14 +287,16 @@ def update_session_after_play(context: ContextTypes.DEFAULT_TYPE):
 def inject_fake_prediction(pred_code: int) -> int:
     return 1 if pred_code == 0 else 0
 
-# ==================== المحرك الرياضي الأساسي ====================
+# ==================== المحرك الرياضي الأساسي (معدل بالكامل) ====================
 def sovereign_math_engine(b_num: str, suit: str, last_timestamp, current_timestamp):
-    last_3 = b_num[-3:] if len(b_num) >= 3 else b_num
-    B = sum(int(d) for d in last_3 if d.isdigit()) % 10
-    S = S_RED if suit in ['♦️', '♥️'] else S_BLACK
+    last3 = b_num[-3:]
+    B = sum(int(d) for d in last3 if d.isdigit())          # مجموع آخر 3 أرقام
+    last_digit = int(b_num[-1])                            # آخر رقم من البونص
+    S = S_RED if suit in ['♦️', '♥️'] else S_BLACK        # معامل البذلة
     delta_t = int((current_timestamp - last_timestamp).total_seconds()) if last_timestamp else 0
-    R = (B * S) + delta_t
-    prediction_code = 1 if (R % 2 == 0) else 0
+    # معادلة جديدة: R = (B * S) + (delta_t % 7) + (last_digit * 3)
+    R = (B * S) + (delta_t % 7) + (last_digit * 3)
+    prediction_code = R % 2                                # 0 للراعي، 1 للثور
     prediction_text = WINNER_NAMES[prediction_code]
     return prediction_text, prediction_code, R, delta_t, B, S
 
@@ -425,9 +427,9 @@ S_BLACK={S_BLACK}
 MATH_CONFIDENCE={MATH_CONFIDENCE}
 RANDOM_NOISE={RANDOM_NOISE}
 
-المعادلة:
-R = (B × S) + ΔT
-حيث B = مجموع آخر 3 أرقام (mod 10)، S = معامل البذلة، ΔT = الفرق الزمني
+المعادلة الجديدة:
+R = (B * S) + (delta_t % 7) + (last_digit * 3)
+prediction_code = R % 2
 
 المطلوب: تحسين القيم التالية لرفع الدقة:
 CONFIDENCE_THRESHOLD, MATH_WEIGHT, BAYES_WEIGHT, S_RED, S_BLACK, MATH_CONFIDENCE, RANDOM_NOISE
