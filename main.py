@@ -1,6 +1,6 @@
 """
-بوت HADES V100.2 المُطوَّر مع تكامل NVIDIA AI وكيل ذكي لتحليل البيانات وتحديث القوانين تلقائيًا
-جميع الإعدادات مضمنة، جاهز للنسخ واللصق والتشغيل على Railway مع PostgreSQL.
+HADES V101 - Self-Optimizing AI Prediction Bot
+جميع الإعدادات مضمنة، يعمل تلقائياً دون تدخل بشري.
 """
 
 import os
@@ -14,6 +14,7 @@ import random
 import asyncio
 import io
 import json
+import re
 from typing import Dict, Any, Tuple, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -57,12 +58,12 @@ WINNER_NAMES = {0: 'الراعي 🔴', 1: 'الثور 🔵', 2: 'تعادل ⚪
 
 # الإعدادات الديناميكية (سيتم تحميلها من قاعدة البيانات)
 DYNAMIC_CONFIG = {
-    'CONFIDENCE_THRESHOLD': 0.65,      # عتبة الثقة للنماذج
-    'MATH_WEIGHT': 0.7,                # وزن المعادلة في المزج
-    'BAYES_WEIGHT': 0.3,                # وزن بايزي في المزج
-    'MATH_CONFIDENCE': 0.7,             # ثقة المعادلة الافتراضية
-    'S_RED': 1,                          # معامل S للبذلة الحمراء
-    'S_BLACK': 2,                         # معامل S للبذلة السوداء
+    'CONFIDENCE_THRESHOLD': 0.65,
+    'MATH_WEIGHT': 0.7,
+    'BAYES_WEIGHT': 0.3,
+    'MATH_CONFIDENCE': 0.7,
+    'S_RED': 1,
+    'S_BLACK': 2,
 }
 
 # حالات المحادثة
@@ -107,7 +108,7 @@ def init_database():
         )
     """)
 
-    # جدول الإعدادات الديناميكية (AI settings)
+    # جدول الإعدادات الديناميكية (ai_settings)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS ai_settings (
             id SERIAL PRIMARY KEY,
@@ -131,13 +132,11 @@ def load_dynamic_config():
 
     for name, value in rows:
         if name in DYNAMIC_CONFIG:
-            # نفترض أن القيمة مخزنة كـ JSON
             try:
                 DYNAMIC_CONFIG[name] = json.loads(value)
             except:
                 DYNAMIC_CONFIG[name] = value
 
-    # تحديث المتغيرات العامة
     CONFIDENCE_THRESHOLD = DYNAMIC_CONFIG.get('CONFIDENCE_THRESHOLD', 0.65)
     MATH_WEIGHT = DYNAMIC_CONFIG.get('MATH_WEIGHT', 0.7)
     BAYES_WEIGHT = DYNAMIC_CONFIG.get('BAYES_WEIGHT', 0.3)
@@ -160,8 +159,7 @@ def save_dynamic_config(config_updates: Dict[str, Any]):
         DYNAMIC_CONFIG[name] = value
     conn.commit()
     conn.close()
-    # إعادة تحميل الإعدادات لتحديث المتغيرات العامة
-    load_dynamic_config()
+    load_dynamic_config()  # إعادة تحميل
 
 # ==================== 4. دوال إدارة الاشتراكات ====================
 def generate_keys():
@@ -278,7 +276,6 @@ def inject_fake_prediction(pred_code: int) -> int:
 def sovereign_math_engine(b_num: str, suit: str, last_timestamp, current_timestamp):
     last_3 = b_num[-3:] if len(b_num) >= 3 else b_num
     B = sum(int(d) for d in last_3 if d.isdigit())
-    # استخدام المعاملات الديناميكية S_RED و S_BLACK
     S = S_RED if suit in ['♦️', '♥️'] else S_BLACK
     delta_t = int((current_timestamp - last_timestamp).total_seconds()) if last_timestamp else 0
     R = (B * S) + delta_t
@@ -286,7 +283,7 @@ def sovereign_math_engine(b_num: str, suit: str, last_timestamp, current_timesta
     prediction_text = WINNER_NAMES[prediction_code]
     return prediction_text, prediction_code, R, delta_t, B, S
 
-# ==================== 7. تحليل بايزي (محدث لاستخدام الإعدادات الديناميكية) ====================
+# ==================== 7. تحليل بايزي ====================
 def bayesian_analysis(conn, current_hour: int, min_samples: int = 30):
     try:
         df = pd.read_sql("""
@@ -330,7 +327,6 @@ def hybrid_prediction(b_num: str, suit: str, last_timestamp, current_timestamp, 
         return math_pred_text, math_pred_code, R, gap, B, S, "المعادلة فقط (بيانات غير كافية للفترة)"
     p_rai, p_thawr, p_tie = period_probs
 
-    # استخدام الأوزان الديناميكية
     math_confidence = MATH_CONFIDENCE
     probs = [p_rai, p_thawr, p_tie]
     probs_sorted = sorted(probs, reverse=True)
@@ -350,7 +346,6 @@ def hybrid_prediction(b_num: str, suit: str, last_timestamp, current_timestamp, 
         final_text = math_pred_text
         reason = "المعادلة (ثقة افتراضية)"
     else:
-        # مزج باستخدام الأوزان الديناميكية
         weighted_rai = MATH_WEIGHT * (1 if math_pred_code == 0 else 0) + BAYES_WEIGHT * p_rai
         weighted_thawr = MATH_WEIGHT * (1 if math_pred_code == 1 else 0) + BAYES_WEIGHT * p_thawr
         weighted_tie = MATH_WEIGHT * (1 if math_pred_code == 2 else 0) + BAYES_WEIGHT * p_tie
@@ -364,8 +359,8 @@ def hybrid_prediction(b_num: str, suit: str, last_timestamp, current_timestamp, 
         reason = f"مزج (معادلة+بايزي) - معادلة: {math_pred_text}, بايزي: راعي {p_rai:.2f}, ثور {p_thawr:.2f}, تعادل {p_tie:.2f}"
     return final_text, final_code, R, gap, B, S, reason
 
-# ==================== 8. وكيل الذكاء الاصطناعي المتقدم ====================
-class AIAgent:
+# ==================== 8. AI ENGINEER AGENT (HADES V101) ====================
+class HADESAIEngineer:
     def __init__(self):
         self.client = OpenAI(
             base_url=NVIDIA_BASE_URL,
@@ -373,126 +368,102 @@ class AIAgent:
         )
         self.model = NVIDIA_MODEL
 
-    def analyze_and_suggest(self) -> Dict[str, Any]:
-        """تحليل قاعدة البيانات بالكامل وتقديم توصيات لتحديث القوانين."""
+    def load_rounds(self):
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-        # جلب كل البيانات
-        df = pd.read_sql("SELECT * FROM history ORDER BY id", conn)
+        df = pd.read_sql("""
+        SELECT *
+        FROM history
+        ORDER BY id
+        """, conn)
         conn.close()
+        if len(df) < 800:
+            return None
+        # تجاهل أول 700 جولة
+        df = df.iloc[700:]
+        return df
 
-        if len(df) < 50:
-            return {}  # بيانات غير كافية
-
-        # تحويل الأعمدة
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df['hour'] = df['timestamp'].dt.hour
-        df['period'] = df['hour'].apply(get_time_period)
+    def compute_metrics(self, df):
         df['winner_code'] = df['winner'].map(WINNER_MAP)
-        df['prediction_code'] = df['prediction']  # افتراض أن prediction هو الرقم
-        df['correct'] = (df['winner_code'] == df['prediction_code']).astype(int)
+        df = df.dropna(subset=['winner_code', 'prediction'])
+        if len(df) < 50:
+            return None
+        df['correct'] = (df['winner_code'] == df['prediction']).astype(int)
+        metrics = {}
+        metrics["total_accuracy"] = float(df['correct'].mean())
+        metrics["last50"] = float(df.tail(50)['correct'].mean())
+        metrics["last100"] = float(df.tail(100)['correct'].mean())
+        metrics["last300"] = float(df.tail(300)['correct'].mean())
+        metrics["rounds"] = len(df)
+        return metrics
 
-        # حساب إحصائيات شاملة
-        total_accuracy = df['correct'].mean()
-        period_accuracy = df.groupby('period')['correct'].mean().to_dict()
-        hour_accuracy = df.groupby('hour')['correct'].mean().to_dict()
-        suit_accuracy = df.groupby('suit')['correct'].mean().to_dict()
-        recent_accuracy = df.tail(100)['correct'].mean() if len(df) >= 100 else total_accuracy
-
-        # تحليل أداء المعادلة وبايزي (إذا توفر prediction)
-        # نقارن prediction_code مع winner_code لمعرفة دقة كل نموذج على حدة؟ ليس لدينا تفصيل، ولكن يمكننا استخدام سبب التنبؤ المخزن؟ لا يوجد.
-        # لذلك سنعتمد على الإحصائيات العامة.
-
-        # بناء برومبت للذكاء الاصطناعي
+    def ai_optimize(self, metrics):
         prompt = f"""
-        أنت خبير في تحليل البيانات وتحسين أنظمة التنبؤ. لديك قاعدة بيانات تحتوي على {len(df)} جولة من لعبة تنبؤ.
+أنت مهندس ذكاء اصطناعي مسؤول عن تحسين نظام تنبؤ.
 
-        الإحصائيات الحالية:
-        - الدقة الإجمالية: {total_accuracy:.2%}
-        - دقة آخر 100 جولة: {recent_accuracy:.2%}
-        - الدقة حسب الفترة: {period_accuracy}
-        - الدقة حسب الساعة: {hour_accuracy}
-        - الدقة حسب نوع البذلة: {suit_accuracy}
+بيانات النظام:
+عدد الجولات: {metrics['rounds']}
+الدقة العامة: {metrics['total_accuracy']}
+آخر 50 جولة: {metrics['last50']}
+آخر 100 جولة: {metrics['last100']}
+آخر 300 جولة: {metrics['last300']}
 
-        النظام الحالي يستخدم:
-        - معادلة رياضية: R = (B × S) + ΔT، حيث B = مجموع آخر 3 أرقام من رقم البونص، S معامل للبذلة (أحمر=1، أسود=2 حاليًا)، ΔT الفرق الزمني بالثواني.
-        - تحليل بايزي يعطي احتمالات لكل فترة زمنية.
-        - ثم يتم المزج باستخدام أوزان: وزن المعادلة = {MATH_WEIGHT}, وزن بايزي = {BAYES_WEIGHT}.
-        - عتبة الثقة {CONFIDENCE_THRESHOLD}، إذا تجاوزت ثقة أحد النموذجين هذه العتبة يتم اعتماد توقعه.
+الإعدادات الحالية:
+CONFIDENCE_THRESHOLD={CONFIDENCE_THRESHOLD}
+MATH_WEIGHT={MATH_WEIGHT}
+BAYES_WEIGHT={BAYES_WEIGHT}
+S_RED={S_RED}
+S_BLACK={S_BLACK}
+MATH_CONFIDENCE={MATH_CONFIDENCE}
 
-        المطلوب: تقديم توصيات لتعديل المعاملات التالية لتحسين الدقة:
-        1. CONFIDENCE_THRESHOLD (عتبة الثقة) – قيمة بين 0 و1.
-        2. MATH_WEIGHT (وزن المعادلة في المزج) – قيمة بين 0 و1.
-        3. BAYES_WEIGHT (وزن بايزي) – يجب أن يكون MATH_WEIGHT + BAYES_WEIGHT = 1.
-        4. S_RED (معامل البذلة الحمراء) – رقم موجب.
-        5. S_BLACK (معامل البذلة السوداء) – رقم موجب.
-        6. MATH_CONFIDENCE (ثقة المعادلة الافتراضية) – قيمة بين 0 و1.
-        7. PLAY_SESSION_MINUTES (مدة جلسة اللعب بالدقائق)
-        8. COOL_DOWN_1_MIN (فترة التبريد الأولى بالدقائق – يمكن أن تكون مدى)
-        9. COOL_DOWN_2_MIN (فترة التبريد الثانية)
-        10. MAX_CORRECT_STREAK (عدد الجولات الصحيحة المتتالية قبل إجبار خطأ)
+المعادلة:
+R = (B × S) + ΔT
+حيث B = مجموع آخر 3 أرقام، S = معامل البذلة، ΔT = الفرق الزمني
 
-        قم بتحليل البيانات واقترح قيماً جديدة لهذه المتغيرات مع ذكر السبب.
-        أعد الاقتراحات بصيغة JSON فقط، مثل:
-        {{
-            "CONFIDENCE_THRESHOLD": 0.7,
-            "MATH_WEIGHT": 0.65,
-            "BAYES_WEIGHT": 0.35,
-            "S_RED": 1.2,
-            "S_BLACK": 1.8,
-            "MATH_CONFIDENCE": 0.75,
-            "PLAY_SESSION_MINUTES": 25,
-            "COOL_DOWN_1_MIN": [6, 12],
-            "COOL_DOWN_2_MIN": 20,
-            "MAX_CORRECT_STREAK": 12
-        }}
-        """
+المطلوب: تحسين القيم التالية لرفع الدقة:
+CONFIDENCE_THRESHOLD, MATH_WEIGHT, BAYES_WEIGHT, S_RED, S_BLACK, MATH_CONFIDENCE
 
+أعد فقط JSON.
+"""
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.5,
-                max_tokens=1000,
-                stream=False
+                temperature=0.4,
+                max_tokens=800
             )
             content = response.choices[0].message.content
-            # استخراج JSON من الرد
-            import re
-            json_match = re.search(r'\{.*\}', content, re.DOTALL)
-            if json_match:
-                suggestions = json.loads(json_match.group())
-                return suggestions
-            else:
-                return {}
+            match = re.search(r'\{.*\}', content, re.DOTALL)
+            if match:
+                data = json.loads(match.group())
+                return data
         except Exception as e:
-            print(f"AI Agent error: {e}")
-            return {}
+            print("AI OPT ERROR:", e)
+        return None
 
-    def apply_suggestions(self, suggestions: Dict[str, Any]):
-        """تطبيق التوصيات على قاعدة البيانات وإعادة تحميل الإعدادات."""
-        if not suggestions:
-            return
-        save_dynamic_config(suggestions)
-        print("✅ تم تحديث الإعدادات بناءً على توصيات الذكاء الاصطناعي.")
+    def run_cycle(self):
+        try:
+            df = self.load_rounds()
+            if df is None:
+                print("AI waiting for more rounds...")
+                return
+            metrics = self.compute_metrics(df)
+            if metrics is None:
+                return
+            print("AI METRICS:", metrics)
+            # كشف انهيار الأداء
+            if metrics["last100"] < 0.55 or metrics["last50"] < 0.50:
+                print("AI detected performance drop")
+                suggestions = self.ai_optimize(metrics)
+                if suggestions:
+                    save_dynamic_config(suggestions)
+                    print("AI updated configuration:", suggestions)
+        except Exception as e:
+            print("AI ENGINE ERROR:", e)
 
 # إنشاء كائن الوكيل
-ai_agent = AIAgent()
+ai_engineer = HADESAIEngineer()
 
-async def analyze_and_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """أمر للأدمن لتشغيل التحليل الذكي وتحديث القوانين."""
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ هذا الأمر للمسؤول فقط.")
-        return
-
-    await update.message.reply_text("🔍 جاري تحليل قاعدة البيانات بواسطة الذكاء الاصطناعي...")
-    suggestions = ai_agent.analyze_and_suggest()
-    if suggestions:
-        ai_agent.apply_suggestions(suggestions)
-        await update.message.reply_text(f"✅ تم تحديث الإعدادات بناءً على توصيات AI:\n{json.dumps(suggestions, indent=2)}")
-    else:
-        await update.message.reply_text("⚠️ لم يتمكن الذكاء الاصطناعي من تقديم توصيات (بيانات غير كافية أو خطأ).")
-
-# ==================== 9. خدمة الذكاء الاصطناعي للمحادثة (كما كانت) ====================
+# ==================== 9. خدمة الذكاء الاصطناعي للمحادثة (NVIDIA) ====================
 class NVIDIAService:
     def __init__(self):
         self.client = OpenAI(
@@ -517,7 +488,7 @@ class NVIDIAService:
 
 nvidia_ai = NVIDIAService()
 
-# ==================== 10. أوامر البوت (مع تعديلات طفيفة) ====================
+# ==================== 10. أوامر البوت ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -925,7 +896,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "new_round":
         await start(update, context)
 
-# ==================== 12. التشغيل الرئيسي ====================
+# ==================== 12. حلقة الذكاء الاصطناعي الخلفية ====================
+async def ai_engine_loop():
+    while True:
+        try:
+            ai_engineer.run_cycle()
+        except Exception as e:
+            print("AI LOOP ERROR:", e)
+        await asyncio.sleep(300)  # كل 5 دقائق
+
+# ==================== 13. التشغيل الرئيسي ====================
 def main():
     # تهيئة قاعدة البيانات
     init_database()
@@ -954,7 +934,6 @@ def main():
     app.add_handler(CommandHandler("download", download_database))
     app.add_handler(CommandHandler("ai", ai_chat_command))
     app.add_handler(CommandHandler("end", end_chat))
-    app.add_handler(CommandHandler("analyze", analyze_and_update))  # الأمر الجديد
 
     # معالج النصوص
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
@@ -962,8 +941,12 @@ def main():
     # معالج الأزرار
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    print("🚀 HADES V100.2 يعمل... (نظام هجين + NVIDIA AI + وكيل ذاتي التحديث)")
-    print("📥 أوامر: /start, /performance, /status, /generate_keys, /mysub, /delete, /download, /ai, /end, /analyze")
+    # تشغيل حلقة الذكاء الاصطناعي في الخلفية
+    loop = asyncio.get_event_loop()
+    loop.create_task(ai_engine_loop())
+
+    print("🚀 HADES V101 يعمل... (نظام هجين + AI Engineer يعمل كل 5 دقائق)")
+    print("📥 أوامر: /start, /performance, /status, /generate_keys, /mysub, /delete, /download, /ai, /end")
     app.run_polling()
 
 if __name__ == "__main__":
