@@ -1,6 +1,6 @@
 """
-HADES V101 - Self-Optimizing AI Prediction Bot
-جميع الإعدادات مضمنة، يعمل تلقائياً دون تدخل بشري.
+HADES V101.5 - Anti-Bias Self-Optimizing AI Prediction Bot
+جميع المفاتيح مضمنة مباشرة، يعمل تلقائياً دون تدخل بشري.
 """
 
 import os
@@ -24,12 +24,10 @@ from telegram.ext import (
 )
 from openai import OpenAI
 
-# ==================== 1. الإعدادات والثوابت (مضمنة) ====================
+# ==================== الإعدادات والثوابت (مضمنة) ====================
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 ADMIN_ID = 6033203084
-
-# NVIDIA AI Settings
 NVIDIA_API_KEY = "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"
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_MODEL = "openai/gpt-oss-120b"
@@ -69,7 +67,7 @@ DYNAMIC_CONFIG = {
 # حالات المحادثة
 (AI_MODE, PREDICTION_MODE) = range(2)
 
-# ==================== 2. دوال تحليل الوقت ====================
+# ==================== دوال تحليل الوقت ====================
 def get_time_period(hour: int) -> str:
     if 6 <= hour < 12:
         return "morning"
@@ -88,7 +86,7 @@ def period_translate(period: str) -> str:
         "night": "🌙 الليل"
     }.get(period, period)
 
-# ==================== 3. دوال إدارة قاعدة البيانات والإعدادات ====================
+# ==================== دوال إدارة قاعدة البيانات والإعدادات ====================
 def init_database():
     """إنشاء الجداول المطلوبة إذا لم تكن موجودة."""
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
@@ -159,9 +157,9 @@ def save_dynamic_config(config_updates: Dict[str, Any]):
         DYNAMIC_CONFIG[name] = value
     conn.commit()
     conn.close()
-    load_dynamic_config()  # إعادة تحميل
+    load_dynamic_config()
 
-# ==================== 4. دوال إدارة الاشتراكات ====================
+# ==================== دوال إدارة الاشتراكات ====================
 def generate_keys():
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cur = conn.cursor()
@@ -222,7 +220,7 @@ def activate_subscription(user_id: int, key_code: str) -> bool:
     conn.close()
     return True
 
-# ==================== 5. دوال إدارة التباعد الزمني ====================
+# ==================== دوال إدارة التباعد الزمني ====================
 def init_user_session(context: ContextTypes.DEFAULT_TYPE):
     if 'session_start' not in context.user_data:
         context.user_data['session_start'] = None
@@ -230,6 +228,7 @@ def init_user_session(context: ContextTypes.DEFAULT_TYPE):
         context.user_data['cool_until'] = None
         context.user_data['cool_stage'] = 0
         context.user_data['correct_streak'] = 0
+        context.user_data['last_predictions'] = []  # لمكافحة الانحياز
 
 def can_user_play(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> tuple:
     if user_id == ADMIN_ID:
@@ -272,10 +271,11 @@ def update_session_after_play(context: ContextTypes.DEFAULT_TYPE):
 def inject_fake_prediction(pred_code: int) -> int:
     return 1 if pred_code == 0 else 0
 
-# ==================== 6. المحرك الرياضي الأساسي (محدث لاستخدام الإعدادات الديناميكية) ====================
+# ==================== المحرك الرياضي الأساسي ====================
 def sovereign_math_engine(b_num: str, suit: str, last_timestamp, current_timestamp):
     last_3 = b_num[-3:] if len(b_num) >= 3 else b_num
-    B = sum(int(d) for d in last_3 if d.isdigit())
+    # تجنب تضخم B باستخدام modulo 10
+    B = sum(int(d) for d in last_3 if d.isdigit()) % 10
     S = S_RED if suit in ['♦️', '♥️'] else S_BLACK
     delta_t = int((current_timestamp - last_timestamp).total_seconds()) if last_timestamp else 0
     R = (B * S) + delta_t
@@ -283,7 +283,7 @@ def sovereign_math_engine(b_num: str, suit: str, last_timestamp, current_timesta
     prediction_text = WINNER_NAMES[prediction_code]
     return prediction_text, prediction_code, R, delta_t, B, S
 
-# ==================== 7. تحليل بايزي ====================
+# ==================== تحليل بايزي ====================
 def bayesian_analysis(conn, current_hour: int, min_samples: int = 30):
     try:
         df = pd.read_sql("""
@@ -315,51 +315,45 @@ def bayesian_analysis(conn, current_hour: int, min_samples: int = 30):
         print(f"Bayesian Analysis Error: {e}")
         return None
 
+# ==================== دالة التنبؤ الهجين المعدلة (مع تصحيح التقارب) ====================
 def hybrid_prediction(b_num: str, suit: str, last_timestamp, current_timestamp, bayesian_probs):
     math_pred_text, math_pred_code, R, gap, B, S = sovereign_math_engine(
         b_num, suit, last_timestamp, current_timestamp
     )
+
     if bayesian_probs is None:
-        return math_pred_text, math_pred_code, R, gap, B, S, "المعادلة فقط (لا توجد بيانات كافية)"
+        return math_pred_text, math_pred_code, R, gap, B, S, "Math Only"
+
     current_period = get_time_period(current_timestamp.hour)
     period_probs = bayesian_probs.get(current_period)
+
     if period_probs is None:
-        return math_pred_text, math_pred_code, R, gap, B, S, "المعادلة فقط (بيانات غير كافية للفترة)"
+        return math_pred_text, math_pred_code, R, gap, B, S, "Math Only"
+
     p_rai, p_thawr, p_tie = period_probs
 
-    math_confidence = MATH_CONFIDENCE
-    probs = [p_rai, p_thawr, p_tie]
-    probs_sorted = sorted(probs, reverse=True)
-    bayes_confidence = probs_sorted[0] - probs_sorted[1]
+    # Bayesian prediction (يُستخدم لاحقاً)
+    bayes_code = np.argmax([p_rai, p_thawr, p_tie])
 
-    if bayes_confidence > CONFIDENCE_THRESHOLD:
-        if probs_sorted[0] == p_rai:
-            final_code = 0
-        elif probs_sorted[0] == p_thawr:
-            final_code = 1
-        else:
-            final_code = 2
-        final_text = WINNER_NAMES[final_code]
-        reason = f"بايزي (ثقة {bayes_confidence:.2f})"
-    elif math_confidence > CONFIDENCE_THRESHOLD:
-        final_code = math_pred_code
-        final_text = math_pred_text
-        reason = "المعادلة (ثقة افتراضية)"
-    else:
-        weighted_rai = MATH_WEIGHT * (1 if math_pred_code == 0 else 0) + BAYES_WEIGHT * p_rai
-        weighted_thawr = MATH_WEIGHT * (1 if math_pred_code == 1 else 0) + BAYES_WEIGHT * p_thawr
-        weighted_tie = MATH_WEIGHT * (1 if math_pred_code == 2 else 0) + BAYES_WEIGHT * p_tie
-        if weighted_rai > weighted_thawr and weighted_rai > weighted_tie:
-            final_code = 0
-        elif weighted_thawr > weighted_rai and weighted_thawr > weighted_tie:
-            final_code = 1
-        else:
-            final_code = 2
-        final_text = WINNER_NAMES[final_code]
-        reason = f"مزج (معادلة+بايزي) - معادلة: {math_pred_text}, بايزي: راعي {p_rai:.2f}, ثور {p_thawr:.2f}, تعادل {p_tie:.2f}"
+    # دمج الاحتمالات
+    weighted_rai = MATH_WEIGHT * (1 if math_pred_code == 0 else 0) + BAYES_WEIGHT * p_rai
+    weighted_thawr = MATH_WEIGHT * (1 if math_pred_code == 1 else 0) + BAYES_WEIGHT * p_thawr
+    weighted_tie = MATH_WEIGHT * (1 if math_pred_code == 2 else 0) + BAYES_WEIGHT * p_tie
+
+    scores = [weighted_rai, weighted_thawr, weighted_tie]
+    final_code = int(np.argmax(scores))
+
+    # إذا كان الفرق بين أعلى نتيجتين صغيراً (<0.05)، نأخذ بقرار Bayesian
+    sorted_scores = sorted(scores, reverse=True)
+    if sorted_scores[0] - sorted_scores[1] < 0.05:
+        final_code = bayes_code
+
+    final_text = WINNER_NAMES[final_code]
+    reason = f"Hybrid Mix | Math:{math_pred_text} | Bayes R:{p_rai:.2f} T:{p_thawr:.2f}"
+
     return final_text, final_code, R, gap, B, S, reason
 
-# ==================== 8. AI ENGINEER AGENT (HADES V101) ====================
+# ==================== AI ENGINEER AGENT (يعمل كل 30 دقيقة) ====================
 class HADESAIEngineer:
     def __init__(self):
         self.client = OpenAI(
@@ -417,7 +411,7 @@ MATH_CONFIDENCE={MATH_CONFIDENCE}
 
 المعادلة:
 R = (B × S) + ΔT
-حيث B = مجموع آخر 3 أرقام، S = معامل البذلة، ΔT = الفرق الزمني
+حيث B = مجموع آخر 3 أرقام (mod 10)، S = معامل البذلة، ΔT = الفرق الزمني
 
 المطلوب: تحسين القيم التالية لرفع الدقة:
 CONFIDENCE_THRESHOLD, MATH_WEIGHT, BAYES_WEIGHT, S_RED, S_BLACK, MATH_CONFIDENCE
@@ -435,6 +429,12 @@ CONFIDENCE_THRESHOLD, MATH_WEIGHT, BAYES_WEIGHT, S_RED, S_BLACK, MATH_CONFIDENCE
             match = re.search(r'\{.*\}', content, re.DOTALL)
             if match:
                 data = json.loads(match.group())
+                # منع القيم المتطرفة التي تسبب انحياز
+                if "MATH_WEIGHT" in data and "BAYES_WEIGHT" in data:
+                    if data["MATH_WEIGHT"] < 0.3:
+                        data["MATH_WEIGHT"] = 0.4
+                    if data["BAYES_WEIGHT"] > 0.7:
+                        data["BAYES_WEIGHT"] = 0.6
                 return data
         except Exception as e:
             print("AI OPT ERROR:", e)
@@ -460,10 +460,9 @@ CONFIDENCE_THRESHOLD, MATH_WEIGHT, BAYES_WEIGHT, S_RED, S_BLACK, MATH_CONFIDENCE
         except Exception as e:
             print("AI ENGINE ERROR:", e)
 
-# إنشاء كائن الوكيل
 ai_engineer = HADESAIEngineer()
 
-# ==================== 9. خدمة الذكاء الاصطناعي للمحادثة (NVIDIA) ====================
+# ==================== خدمة الذكاء الاصطناعي للمحادثة ====================
 class NVIDIAService:
     def __init__(self):
         self.client = OpenAI(
@@ -488,14 +487,14 @@ class NVIDIAService:
 
 nvidia_ai = NVIDIAService()
 
-# ==================== 10. أوامر البوت ====================
+# ==================== أوامر البوت ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     subscribed, plan, remaining = is_user_subscribed(user_id)
     if not subscribed and user_id != ADMIN_ID:
         await update.message.reply_text(
-            "🔐 **مرحبًا بك في HADES V100.2**\n"
+            "🔐 **مرحبًا بك في HADES V101.5**\n"
             "للاستخدام، يجب عليك إدخال مفتاح اشتراك صالح.\n"
             "أرسل المفتاح الآن، أو تواصل مع المسؤول للحصول على مفتاح.\n\n"
             "إذا كان لديك مفتاح، أرسله كرسالة مباشرة."
@@ -512,8 +511,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     remaining_text = f"اشتراكك ({plan}) متبقي {remaining} يوم." if subscribed else ""
     await update.message.reply_text(
-        f"🏛️ **الكيان السيادي HADES V100.2**\n"
-        f"محرك تنبؤي هجين (معادلة + بايزي) مع تحليل زمني.\n"
+        f"🏛️ **الكيان السيادي HADES V101.5**\n"
+        f"محرك تنبؤي هجين (معادلة + بايزي) مع تحليل زمني ومكافحة انحياز.\n"
         f"{remaining_text}\n\n"
         "🎴 اختر نوع البذلة للتنبؤ، أو اختر دردشة AI:",
         reply_markup=InlineKeyboardMarkup(kb),
@@ -760,7 +759,7 @@ async def download_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ في تحميل قاعدة البيانات: {e}")
 
-# ==================== 11. المعالجات الأساسية ====================
+# ==================== المعالجات الأساسية ====================
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -798,6 +797,24 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         cur.close()
         conn.close()
+
+        # ===== مكافحة الانحياز (تطبيق فعلي) =====
+        history = context.user_data.get("last_predictions", [])
+        history.append(pred_code)
+        if len(history) > 6:
+            history.pop(0)
+        context.user_data["last_predictions"] = history
+
+        anti_bias_warning = ""
+        if len(history) == 6 and len(set(history)) == 1:
+            # كلها نفس اللون، نقلب
+            pred_code = 1 if pred_code == 0 else 0
+            pred_text = WINNER_NAMES[pred_code]
+            anti_bias_warning = "\n⚠️ **مكافحة انحياز:** تم تغيير التوقع لكسر تكرار اللون.\n\n"
+            # إعادة تعيين السجل بعد التعديل
+            context.user_data["last_predictions"] = []
+
+        # ===== جولة خاطئة إذا وصل streak =====
         if user_id != ADMIN_ID and context.user_data.get('correct_streak', 0) >= MAX_CORRECT_STREAK:
             pred_code = inject_fake_prediction(pred_code)
             pred_text = WINNER_NAMES[pred_code]
@@ -805,9 +822,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             fake_warning = "\n⚠️ **تنبيه:** بناءً على تحليل الأرباح، تم تعديل التوقع بشكل مؤقت.\n\n"
         else:
             fake_warning = ""
+
         context.user_data['bonus'] = text
         context.user_data['prediction_code'] = pred_code
         context.user_data['current_time'] = current_time
+
         kb = [
             [InlineKeyboardButton("🔴 فاز الراعي", callback_data="save_الراعي 🔴"),
              InlineKeyboardButton("🔵 فاز الثور", callback_data="save_الثور 🔵")],
@@ -815,7 +834,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         suit_color = "🔴" if context.user_data['suit'] in ['♦️', '♥️'] else "⚫"
         await update.message.reply_text(
-            f"{fake_warning}"
+            f"{anti_bias_warning}{fake_warning}"
             f"🎯 **التوقع النهائي:** {pred_text}\n"
             f"📊 **المنهج:** {reason}\n"
             f"🎴 البذلة: {context.user_data['suit']} {suit_color}\n"
@@ -896,16 +915,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "new_round":
         await start(update, context)
 
-# ==================== 12. حلقة الذكاء الاصطناعي الخلفية ====================
+# ==================== حلقة الذكاء الاصطناعي الخلفية ====================
 async def ai_engine_loop():
     while True:
         try:
             ai_engineer.run_cycle()
         except Exception as e:
             print("AI LOOP ERROR:", e)
-        await asyncio.sleep(300)  # كل 5 دقائق
+        await asyncio.sleep(1800)  # كل 30 دقيقة
 
-# ==================== 13. التشغيل الرئيسي ====================
+# ==================== التشغيل الرئيسي ====================
 def main():
     # تهيئة قاعدة البيانات
     init_database()
@@ -945,7 +964,7 @@ def main():
     loop = asyncio.get_event_loop()
     loop.create_task(ai_engine_loop())
 
-    print("🚀 HADES V101 يعمل... (نظام هجين + AI Engineer يعمل كل 5 دقائق)")
+    print("🚀 HADES V101.5 يعمل... (نظام هجين + AI Engineer + Anti-Bias)")
     print("📥 أوامر: /start, /performance, /status, /generate_keys, /mysub, /delete, /download, /ai, /end")
     app.run_polling()
 
