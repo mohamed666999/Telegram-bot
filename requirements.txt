@@ -8,3 +8,17 @@ joblib==1.3.2
 numpy==1.24.3
 gplearn==0.4.2
 mlxtend==0.22.0
+SQLAlchemy==2.0.25
+alembic
+redis
+celery
+pydantic
+pydantic-settings
+openai
+stripe
+langchain
+pinecone-client
+prophet
+xgboost
+python-dotenv
+boto3
