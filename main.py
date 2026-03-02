@@ -1,7 +1,7 @@
 """
 HADES V101.5 - Anti-Bias Self-Optimizing AI Prediction Bot
 جميع المفاتيح مضمنة، يعمل فوراً على Railway مع PostgreSQL.
-تم تعديل المعادلة الرياضية لإزالة الانحياز الناتج عن delta_t.
+تم تحديث النموذج إلى GLM-5 مع تفعيل التفكير الظاهر.
 """
 
 import os
@@ -27,13 +27,13 @@ from openai import OpenAI
 
 # ==================== الإعدادات والثوابت (مضمنة) ====================
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
-DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
+DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@postgres.railway.internal:5432/railway"
 ADMIN_ID = 6033203084
 
-# تم التحديث إلى المفتاح والنموذج الجديدين
-NVIDIA_API_KEY = "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"
+# تحديث إلى GLM-5 مع المفتاح الجديد
+NVIDIA_API_KEY = "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"
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-NVIDIA_MODEL = "qwen/qwen3-coder-480b-a35b-instruct"
+NVIDIA_MODEL = "z-ai/glm5"
 
 # خطط الاشتراك (بالأيام)
 PLANS = {
@@ -391,7 +391,7 @@ class HADESAIEngineer:
         conn.close()
         if len(df) < 800:
             return None
-        # تجاهل أول 700 جولة
+        # تجاهل أول 700 جولة (إذا كانت كلها تعادل أو غير موثوقة)
         df = df.iloc[700:]
         return df
 
@@ -413,7 +413,7 @@ class HADESAIEngineer:
         prompt = f"""
 أنت مهندس ذكاء اصطناعي مسؤول عن تحسين نظام تنبؤ.
 
-بيانات النظام:
+بيانات النظام (بعد تجاهل أول 700 جولة غير موثوقة):
 عدد الجولات: {metrics['rounds']}
 الدقة العامة: {metrics['total_accuracy']}
 آخر 50 جولة: {metrics['last50']}
@@ -442,8 +442,11 @@ CONFIDENCE_THRESHOLD, MATH_WEIGHT, BAYES_WEIGHT, S_RED, S_BLACK, MATH_CONFIDENCE
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.4,
-                max_tokens=800
+                temperature=1,
+                top_p=1,
+                max_tokens=16384,
+                extra_body={"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}},
+                stream=False
             )
             content = response.choices[0].message.content
             match = re.search(r'\{.*\}', content, re.DOTALL)
@@ -483,7 +486,7 @@ CONFIDENCE_THRESHOLD, MATH_WEIGHT, BAYES_WEIGHT, S_RED, S_BLACK, MATH_CONFIDENCE
 
 ai_engineer = HADESAIEngineer()
 
-# ==================== خدمة الذكاء الاصطناعي للمحادثة ====================
+# ==================== خدمة الذكاء الاصطناعي للمحادثة (GLM-5) ====================
 class NVIDIAService:
     def __init__(self):
         self.client = OpenAI(
@@ -497,11 +500,13 @@ class NVIDIAService:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,          # تحديث القيم
-                top_p=0.8,                 # تحديث القيم
-                max_tokens=4096,
+                temperature=1,
+                top_p=1,
+                max_tokens=16384,
+                extra_body={"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}},
                 stream=False
             )
+            # نستطيع هنا معالجة التفكير إذا أردنا فصله، لكن سنعيد المحتوى الكامل
             return response.choices[0].message.content
         except Exception as e:
             return f"⚠️ خطأ في الاتصال بالذكاء الاصطناعي: {str(e)}"
@@ -979,7 +984,7 @@ def main():
     # معالج النصوص (للبونص والمفاتيح والدردشة)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, general_message_handler))
 
-    print("🚀 محرك HADES V101.5 يعمل الآن بكامل طاقته...")
+    print("🚀 محرك HADES V101.5 يعمل الآن بكامل طاقته (مع GLM-5)...")
     app.run_polling()
 
 if __name__ == "__main__":
