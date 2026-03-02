@@ -22,3 +22,8 @@ prophet
 xgboost
 python-dotenv
 boto3
+python-telegram-bot[job-queue]==20.7
+psycopg2-binary
+pandas
+numpy
+openai
