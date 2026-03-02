@@ -220,7 +220,6 @@ class HadesXAnalytics:
 analytics = HadesXAnalytics()
 
 # ==================== 4. دوال البوت التفاعلية ====================
-# سنستخدم user_data لتخزين حالة المستخدم
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """عرض أزرار اختيار البذلة"""
     keyboard = [
@@ -262,8 +261,9 @@ async def handle_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text.isdigit() or len(text) < 7:
         await update.message.reply_text("❌ الرقم يجب أن يتكون من 7 أرقام على الأقل وبدون أحرف.")
         return
-    # حساب التوقع (هنا نستخدم نموذج بسيط، يمكنك لاحقاً دمجه مع التحليل)
-    # نستخدم طريقة بسيطة: إذا كان مجموع الأرقام زوجي -> ثور، فردي -> راعي
+    # تنظيف بيانات التوقع السابقة
+    context.user_data.pop('prediction', None)
+    # حساب التوقع البسيط (مثال: مجموع الأرقام زوجي -> ثور)
     total = sum(int(d) for d in text)
     pred = 1 if total % 2 == 0 else 0
     pred_text = WINNER_NAMES[pred]
@@ -352,25 +352,21 @@ async def delete_last_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(f"❌ خطأ: {e}")
 
 async def new_round_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """بدء جولة جديدة (نفس /start)"""
-    # مسح بيانات المستخدم وإظهار أزرار الورق
+    """بدء جولة جديدة عبر زر"""
+    query = update.callback_query
+    await query.answer()
     context.user_data.clear()
-    await start(update, context)  # لكن هنا update هو callback_query، نحتاج لاستدعاء start كـ command
-    # بدلاً من ذلك، نرسل رسالة جديدة ونقوم بمحاكاة الأمر start
-    await start(update, context)  # تمرير update وهو callback_query لن يعمل لأن start يتوقع Message
-    # الحل: نرسل رسالة من البوت
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="🔄 جولة جديدة، اختر نوع الورق:",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("♦️", callback_data="suit_♦️"),
-            InlineKeyboardButton("♥️", callback_data="suit_♥️"),
-            InlineKeyboardButton("♠️", callback_data="suit_♠️"),
-            InlineKeyboardButton("♣️", callback_data="suit_♣️")
-        ]])
+    keyboard = [
+        [InlineKeyboardButton("♦️", callback_data="suit_♦️"),
+         InlineKeyboardButton("♥️", callback_data="suit_♥️")],
+        [InlineKeyboardButton("♠️", callback_data="suit_♠️"),
+         InlineKeyboardButton("♣️", callback_data="suit_♣️")]
+    ]
+    await query.edit_message_text(
+        "🔄 **جولة جديدة**\nاختر نوع الورق:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
     )
-    # نمسك البيانات القديمة
-    context.user_data.clear()
 
 # ==================== 5. أوامر التحليل (كما هي) ====================
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -436,6 +432,8 @@ if __name__ == "__main__":
         cur = conn.cursor()
         cur.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS prediction INTEGER;")
         cur.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS user_id BIGINT;")
+        # إضافة created_at لتسهيل التحليل الزمني
+        cur.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();")
         conn.commit()
         cur.close()
         conn.close()
@@ -458,5 +456,5 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(new_round_callback, pattern="^new_round$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_number))
 
-    print("🚀 HADES X (البوت الفائق) يعمل الآن مع أزرار تفاعلية...")
+    print("🚀 HADES X Stable يعمل الآن مع أزرار تفاعلية...")
     app.run_polling()
