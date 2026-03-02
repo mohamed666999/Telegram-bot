@@ -1,6 +1,7 @@
 """
 HADES V101.5 - Anti-Bias Self-Optimizing AI Prediction Bot
-المفاتيح مضمنة - تم إصلاح جميع الأخطاء.
+جميع المفاتيح مضمنة، يعمل فوراً على Railway مع PostgreSQL.
+تم إصلاح مشكلة الانحياز للأحمر عبر تعديل معاملات البذلة وإضافة عشوائية طفيفة.
 """
 
 import os
@@ -20,7 +21,7 @@ from typing import Dict, Any, Tuple, Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler,
-    CommandHandler, ContextTypes, ConversationHandler, JobQueue
+    CommandHandler, ContextTypes, ConversationHandler
 )
 from openai import OpenAI
 
@@ -61,7 +62,8 @@ DYNAMIC_CONFIG = {
     'BAYES_WEIGHT': 0.3,
     'MATH_CONFIDENCE': 0.7,
     'S_RED': 1,
-    'S_BLACK': 2,
+    'S_BLACK': 1,          # تم تعديله ليكون 1 لمنع الانحياز
+    'RANDOM_NOISE': 0.02,   # إضافة عشوائية صغيرة لكسر الانحياز
 }
 
 # حالات المحادثة
@@ -134,7 +136,7 @@ def init_database():
 
 def load_dynamic_config():
     """تحميل الإعدادات الديناميكية من قاعدة البيانات وتحديث المتغيرات العامة."""
-    global DYNAMIC_CONFIG, CONFIDENCE_THRESHOLD, MATH_WEIGHT, BAYES_WEIGHT, MATH_CONFIDENCE, S_RED, S_BLACK
+    global DYNAMIC_CONFIG, CONFIDENCE_THRESHOLD, MATH_WEIGHT, BAYES_WEIGHT, MATH_CONFIDENCE, S_RED, S_BLACK, RANDOM_NOISE
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cur = conn.cursor()
     cur.execute("SELECT config_name, config_value FROM ai_settings")
@@ -153,7 +155,8 @@ def load_dynamic_config():
     BAYES_WEIGHT = DYNAMIC_CONFIG.get('BAYES_WEIGHT', 0.3)
     MATH_CONFIDENCE = DYNAMIC_CONFIG.get('MATH_CONFIDENCE', 0.7)
     S_RED = DYNAMIC_CONFIG.get('S_RED', 1)
-    S_BLACK = DYNAMIC_CONFIG.get('S_BLACK', 2)
+    S_BLACK = DYNAMIC_CONFIG.get('S_BLACK', 1)
+    RANDOM_NOISE = DYNAMIC_CONFIG.get('RANDOM_NOISE', 0.02)
 
 def save_dynamic_config(config_updates: Dict[str, Any]):
     """حفظ تحديثات الإعدادات في قاعدة البيانات وتحديث الذاكرة."""
@@ -287,7 +290,6 @@ def inject_fake_prediction(pred_code: int) -> int:
 # ==================== المحرك الرياضي الأساسي ====================
 def sovereign_math_engine(b_num: str, suit: str, last_timestamp, current_timestamp):
     last_3 = b_num[-3:] if len(b_num) >= 3 else b_num
-    # تجنب تضخم B باستخدام modulo 10
     B = sum(int(d) for d in last_3 if d.isdigit()) % 10
     S = S_RED if suit in ['♦️', '♥️'] else S_BLACK
     delta_t = int((current_timestamp - last_timestamp).total_seconds()) if last_timestamp else 0
@@ -328,7 +330,7 @@ def bayesian_analysis(conn, current_hour: int, min_samples: int = 30):
         print(f"Bayesian Analysis Error: {e}")
         return None
 
-# ==================== دالة التنبؤ الهجين المعدلة (مع تصحيح التقارب) ====================
+# ==================== دالة التنبؤ الهجين (مع عشوائية لكسر الانحياز) ====================
 def hybrid_prediction(b_num: str, suit: str, last_timestamp, current_timestamp, bayesian_probs):
     math_pred_text, math_pred_code, R, gap, B, S = sovereign_math_engine(
         b_num, suit, last_timestamp, current_timestamp
@@ -345,20 +347,20 @@ def hybrid_prediction(b_num: str, suit: str, last_timestamp, current_timestamp, 
 
     p_rai, p_thawr, p_tie = period_probs
 
-    # Bayesian prediction (يُستخدم لاحقاً)
+    # Bayesian prediction
     bayes_code = np.argmax([p_rai, p_thawr, p_tie])
 
-    # دمج الاحتمالات
-    weighted_rai = MATH_WEIGHT * (1 if math_pred_code == 0 else 0) + BAYES_WEIGHT * p_rai
-    weighted_thawr = MATH_WEIGHT * (1 if math_pred_code == 1 else 0) + BAYES_WEIGHT * p_thawr
-    weighted_tie = MATH_WEIGHT * (1 if math_pred_code == 2 else 0) + BAYES_WEIGHT * p_tie
+    # دمج الاحتمالات مع عشوائية طفيفة لكسر الانحياز
+    weighted_rai = MATH_WEIGHT * (1 if math_pred_code == 0 else 0) + BAYES_WEIGHT * p_rai + random.uniform(0, RANDOM_NOISE)
+    weighted_thawr = MATH_WEIGHT * (1 if math_pred_code == 1 else 0) + BAYES_WEIGHT * p_thawr + random.uniform(0, RANDOM_NOISE)
+    weighted_tie = MATH_WEIGHT * (1 if math_pred_code == 2 else 0) + BAYES_WEIGHT * p_tie + random.uniform(0, RANDOM_NOISE)
 
     scores = [weighted_rai, weighted_thawr, weighted_tie]
     final_code = int(np.argmax(scores))
 
-    # إذا كان الفرق بين أعلى نتيجتين صغيراً (<0.05)، نأخذ بقرار Bayesian
+    # إذا كان الفرق بين أعلى نتيجتين صغيراً جداً، نأخذ بقرار Bayesian
     sorted_scores = sorted(scores, reverse=True)
-    if sorted_scores[0] - sorted_scores[1] < 0.05:
+    if sorted_scores[0] - sorted_scores[1] < 0.02:
         final_code = bayes_code
 
     final_text = WINNER_NAMES[final_code]
@@ -421,13 +423,14 @@ BAYES_WEIGHT={BAYES_WEIGHT}
 S_RED={S_RED}
 S_BLACK={S_BLACK}
 MATH_CONFIDENCE={MATH_CONFIDENCE}
+RANDOM_NOISE={RANDOM_NOISE}
 
 المعادلة:
 R = (B × S) + ΔT
 حيث B = مجموع آخر 3 أرقام (mod 10)، S = معامل البذلة، ΔT = الفرق الزمني
 
 المطلوب: تحسين القيم التالية لرفع الدقة:
-CONFIDENCE_THRESHOLD, MATH_WEIGHT, BAYES_WEIGHT, S_RED, S_BLACK, MATH_CONFIDENCE
+CONFIDENCE_THRESHOLD, MATH_WEIGHT, BAYES_WEIGHT, S_RED, S_BLACK, MATH_CONFIDENCE, RANDOM_NOISE
 
 أعد فقط JSON.
 """
@@ -442,12 +445,14 @@ CONFIDENCE_THRESHOLD, MATH_WEIGHT, BAYES_WEIGHT, S_RED, S_BLACK, MATH_CONFIDENCE
             match = re.search(r'\{.*\}', content, re.DOTALL)
             if match:
                 data = json.loads(match.group())
-                # منع القيم المتطرفة التي تسبب انحياز
+                # منع القيم المتطرفة
                 if "MATH_WEIGHT" in data and "BAYES_WEIGHT" in data:
                     if data["MATH_WEIGHT"] < 0.3:
                         data["MATH_WEIGHT"] = 0.4
                     if data["BAYES_WEIGHT"] > 0.7:
                         data["BAYES_WEIGHT"] = 0.6
+                if "RANDOM_NOISE" in data:
+                    data["RANDOM_NOISE"] = min(0.05, max(0.005, data["RANDOM_NOISE"]))
                 return data
         except Exception as e:
             print("AI OPT ERROR:", e)
@@ -463,7 +468,6 @@ CONFIDENCE_THRESHOLD, MATH_WEIGHT, BAYES_WEIGHT, S_RED, S_BLACK, MATH_CONFIDENCE
             if metrics is None:
                 return
             print("AI METRICS:", metrics)
-            # كشف انهيار الأداء
             if metrics["last100"] < 0.55 or metrics["last50"] < 0.50:
                 print("AI detected performance drop")
                 suggestions = self.ai_optimize(metrics)
@@ -548,7 +552,6 @@ async def end_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
-
     if activate_subscription(user_id, text):
         await update.message.reply_text(
             "✅ تم تفعيل اشتراكك بنجاح! يمكنك الآن استخدام /start للبدء."
@@ -816,7 +819,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur.close()
         conn.close()
 
-        # ===== مكافحة الانحياز (تطبيق فعلي) =====
+        # مكافحة الانحياز
         history = context.user_data.get("last_predictions", [])
         history.append(pred_code)
         if len(history) > 6:
@@ -825,14 +828,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         anti_bias_warning = ""
         if len(history) == 6 and len(set(history)) == 1:
-            # كلها نفس اللون، نقلب
             pred_code = 1 if pred_code == 0 else 0
             pred_text = WINNER_NAMES[pred_code]
             anti_bias_warning = "\n⚠️ **مكافحة انحياز:** تم تغيير التوقع لكسر تكرار اللون.\n\n"
-            # إعادة تعيين السجل بعد التعديل
             context.user_data["last_predictions"] = []
 
-        # ===== جولة خاطئة إذا وصل streak =====
         if user_id != ADMIN_ID and context.user_data.get('correct_streak', 0) >= MAX_CORRECT_STREAK:
             pred_code = inject_fake_prediction(pred_code)
             pred_text = WINNER_NAMES[pred_code]
@@ -908,7 +908,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.commit()
             conn.close()
 
-            # تصحيح المقارنة باستخدام WINNER_MAP
             winner_code = WINNER_MAP.get(winner_db)
             is_correct = "✅" if winner_code == pred_code else "❌"
 
@@ -940,13 +939,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== التشغيل الرئيسي ====================
 def main():
-    # تهيئة قاعدة البيانات
     init_database()
-
-    # تحميل الإعدادات الديناميكية
     load_dynamic_config()
 
-    # توليد مفاتيح أولية إذا لزم الأمر
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM subscription_keys")
@@ -955,17 +950,15 @@ def main():
     if count == 0:
         generate_keys()
 
-    # إنشاء التطبيق مع JobQueue
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # جدولة تشغيل AI Engineer كل 30 دقيقة (1800 ثانية)
+    # جدولة AI Engineer كل 30 دقيقة
     app.job_queue.run_repeating(
         lambda ctx: ai_engineer.run_cycle(),
         interval=1800,
-        first=10  # يبدأ بعد 10 ثوانٍ من التشغيل
+        first=10
     )
 
-    # الأوامر
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("performance", performance_command))
     app.add_handler(CommandHandler("status", model_status))
@@ -976,10 +969,7 @@ def main():
     app.add_handler(CommandHandler("ai", ai_chat_command))
     app.add_handler(CommandHandler("end", end_chat))
 
-    # معالج النصوص (للبونص والمفاتيح)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-
-    # معالج الأزرار
     app.add_handler(CallbackQueryHandler(callback_handler))
 
     print("🚀 HADES V101.5 يعمل... (نظام هجين + AI Engineer + Anti-Bias)")
