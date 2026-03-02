@@ -29,9 +29,11 @@ from openai import OpenAI
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 ADMIN_ID = 6033203084
-NVIDIA_API_KEY = "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"
+
+# تم التحديث إلى المفتاح والنموذج الجديدين
+NVIDIA_API_KEY = "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"
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-NVIDIA_MODEL = "openai/gpt-oss-120b"
+NVIDIA_MODEL = "qwen/qwen3-coder-480b-a35b-instruct"
 
 # خطط الاشتراك (بالأيام)
 PLANS = {
@@ -58,12 +60,12 @@ WINNER_NAMES = {0: 'الراعي 🔴', 1: 'الثور 🔵', 2: 'تعادل ⚪
 # الإعدادات الديناميكية (سيتم تحميلها من قاعدة البيانات)
 DYNAMIC_CONFIG = {
     'CONFIDENCE_THRESHOLD': 0.65,
-    'MATH_WEIGHT': 0.55,          # تم تعديله لتحقيق توازن أفضل
-    'BAYES_WEIGHT': 0.45,          # تم تعديله لتحقيق توازن أفضل
+    'MATH_WEIGHT': 0.55,
+    'BAYES_WEIGHT': 0.45,
     'MATH_CONFIDENCE': 0.7,
     'S_RED': 1,
-    'S_BLACK': 1,                  # تم تعديله ليكون 1 لمنع الانحياز
-    'RANDOM_NOISE': 0.02,           # إضافة عشوائية صغيرة لكسر الانحياز
+    'S_BLACK': 1,
+    'RANDOM_NOISE': 0.02,
 }
 
 # حالات المحادثة
@@ -495,8 +497,8 @@ class NVIDIAService:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=1,
-                top_p=1,
+                temperature=0.7,          # تحديث القيم
+                top_p=0.8,                 # تحديث القيم
                 max_tokens=4096,
                 stream=False
             )
