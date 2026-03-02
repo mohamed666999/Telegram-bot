@@ -1,537 +1,356 @@
 import os
 import datetime
-import psycopg2
+import asyncio
+import pickle
+import numpy as np
 import pandas as pd
-import secrets
+import psycopg2
+import re
+from collections import deque
+from typing import List, Dict, Tuple, Optional
+
+# -------------------- مكتبات التحليل المتقدم --------------------
+from sklearn.tree import DecisionTreeClassifier, export_text
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import LabelEncoder
+import gplearn.genetic as gpl  # للانحدار الرمزي (يتطلب تثبيت: pip install gplearn)
+from mlxtend.frequent_patterns import apriori, association_rules  # لقواعد الارتباط
+
+# -------------------- مكتبات البوت --------------------
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # ==================== 1. الإعدادات والثوابت ====================
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
-ADMIN_ID = 6033203084  # معرف المسؤول (لأوامر الاشتراكات)
+ADMIN_ID = 6033203084  # معرف المسؤول لتلقي التقارير
 
-# خطط الاشتراك (بالأيام)
-PLANS = {
-    'day': 1,
-    'two_days': 2,
-    'week': 7,
-    'month': 30
-}
-
-# خريطة تحويل أسماء الفائزين إلى أرقام
 WINNER_MAP = {
     'الراعي 🔴': 0, 'راعي': 0, 'الراعي': 0, '🔴': 0,
     'الثور 🔵': 1, 'ثور': 1, 'الثور': 1, '🔵': 1,
     'تعادل ⚪': 2, 'تعادل': 2, '⚪': 2
 }
-
 WINNER_NAMES = {0: 'الراعي 🔴', 1: 'الثور 🔵', 2: 'تعادل ⚪'}
+
+# مسار حفظ النماذج والقوانين
+MODELS_DIR = "hades_x_models"
+os.makedirs(MODELS_DIR, exist_ok=True)
 
 # ==================== 2. دوال مساعدة ====================
 def get_time_period(hour: int) -> str:
-    """تحديد الفترة الزمنية بناءً على الساعة"""
     if 6 <= hour < 12: return "morning"
     elif 12 <= hour < 18: return "afternoon"
     elif 18 <= hour < 24: return "evening"
     else: return "night"
 
 def period_translate(period: str) -> str:
-    """ترجمة الفترة إلى العربية مع رمز"""
-    return {
-        "morning": "🌅 الصباح",
-        "afternoon": "☀️ الظهر",
-        "evening": "🌇 المساء",
-        "night": "🌙 الليل"
-    }.get(period, period)
+    return {"morning": "🌅 الصباح", "afternoon": "☀️ الظهر", "evening": "🌇 المساء", "night": "🌙 الليل"}.get(period, period)
 
-# ==================== 3. دوال إدارة الاشتراكات ====================
-def init_subscription_table():
-    """إنشاء جدول الاشتراكات إذا لم يكن موجودًا"""
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS subscription_keys (
-            id SERIAL PRIMARY KEY,
-            key_code VARCHAR(50) UNIQUE NOT NULL,
-            plan VARCHAR(20) NOT NULL,
-            is_used BOOLEAN DEFAULT FALSE,
-            used_by BIGINT,
-            used_at TIMESTAMP,
-            expires_at TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
+def extract_features(b_num: str, suit: str, hour: int, last_winner: Optional[int] = None) -> Dict:
+    """استخراج ميزات متقدمة من الجولة"""
+    digits = [int(d) for d in b_num if d.isdigit()]
+    features = {
+        'b_num_len': len(b_num),
+        'b_num_sum': sum(digits) if digits else 0,
+        'b_num_avg': np.mean(digits) if digits else 0,
+        'b_num_max': max(digits) if digits else 0,
+        'b_num_min': min(digits) if digits else 0,
+        'last_digit': digits[-1] if digits else 0,
+        'last_digit_parity': digits[-1] % 2 if digits else 0,
+        'even_digits_count': sum(1 for d in digits if d % 2 == 0) if digits else 0,
+        'odd_digits_count': sum(1 for d in digits if d % 2 == 1) if digits else 0,
+        'suit_red': 1 if suit in ['♦️', '♥️'] else 0,
+        'suit_black': 1 if suit in ['♠️', '♣️'] else 0,
+        'suit_♠️': 1 if suit == '♠️' else 0,
+        'suit_♣️': 1 if suit == '♣️' else 0,
+        'suit_♦️': 1 if suit == '♦️' else 0,
+        'suit_♥️': 1 if suit == '♥️' else 0,
+        'hour': hour,
+        'time_period_morning': 1 if get_time_period(hour) == 'morning' else 0,
+        'time_period_afternoon': 1 if get_time_period(hour) == 'afternoon' else 0,
+        'time_period_evening': 1 if get_time_period(hour) == 'evening' else 0,
+        'time_period_night': 1 if get_time_period(hour) == 'night' else 0,
+    }
+    if last_winner is not None:
+        features['last_winner'] = last_winner
+    return features
 
-def generate_keys():
-    """
-    توليد 5 مفاتيح جديدة لكل خطة في كل مرة يتم استدعاء هذه الدالة.
-    """
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    cur = conn.cursor()
-    for plan in PLANS.keys():
-        for _ in range(5):
-            key = secrets.token_urlsafe(16)  # مفتاح عشوائي آمن
-            try:
-                cur.execute(
-                    "INSERT INTO subscription_keys (key_code, plan) VALUES (%s, %s)",
-                    (key, plan)
-                )
-            except psycopg2.IntegrityError:
-                # في حالة وجود مفتاح مكرر (نادر جداً)، نتجاهل ونستمر
-                conn.rollback()
-                continue
-    conn.commit()
-    conn.close()
+# ==================== 3. محرك التحليل والقوانين ====================
+class HadesXAnalytics:
+    def __init__(self):
+        self.df_history = None          # آخر 500 جولة
+        self.last_analyzed_id = 0       # آخر id تم تحليله
+        self.rules = []                  # قائمة القوانين المكتشفة
+        self.models = {}                  # النماذج المدربة
+        self.symbolic_functions = []      # دوال رمزية مكتشفة
+        self.last_update = None
 
-def is_user_subscribed(user_id: int) -> tuple:
-    """
-    التحقق مما إذا كان المستخدم لديه اشتراك صالح
-    تُرجع (True/False, الخطة, الأيام المتبقية)
-    """
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT plan, expires_at FROM subscription_keys 
-        WHERE used_by = %s AND expires_at > NOW() 
-        ORDER BY expires_at DESC LIMIT 1
-    """, (user_id,))
-    row = cur.fetchone()
-    conn.close()
-    
-    if row:
-        plan = row[0]
-        expires = row[1]
-        remaining = (expires - datetime.datetime.now()).days
-        return True, plan, remaining
-    return False, None, 0
-
-def activate_subscription(user_id: int, key_code: str) -> bool:
-    """تفعيل الاشتراك بمفتاح معين لمستخدم"""
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    cur = conn.cursor()
-    
-    # البحث عن المفتاح
-    cur.execute("SELECT id, plan, is_used FROM subscription_keys WHERE key_code = %s", (key_code,))
-    row = cur.fetchone()
-    if not row:
+    def load_new_data(self) -> int:
+        """تحميل البيانات الجديدة منذ آخر تحليل"""
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        df = pd.read_sql(f"SELECT * FROM history WHERE id > {self.last_analyzed_id} ORDER BY id", conn)
         conn.close()
-        return False  # مفتاح غير موجود
-    
-    key_id, plan, is_used = row
-    if is_used:
-        conn.close()
-        return False  # مفتاح مستخدم مسبقًا
-    
-    # حساب تاريخ الانتهاء
-    days = PLANS.get(plan)
-    if not days:
-        conn.close()
-        return False
-    
-    expires_at = datetime.datetime.now() + datetime.timedelta(days=days)
-    
-    # تحديث المفتاح
-    cur.execute("""
-        UPDATE subscription_keys 
-        SET is_used = TRUE, used_by = %s, used_at = NOW(), expires_at = %s
-        WHERE id = %s
-    """, (user_id, expires_at, key_id))
-    
-    conn.commit()
-    conn.close()
-    return True
+        if df.empty:
+            return 0
+        # تحديث self.df_history بإضافة الجديد وحذف القديم (الاحتفاظ بـ 500)
+        if self.df_history is not None:
+            self.df_history = pd.concat([self.df_history, df], ignore_index=True).tail(500)
+        else:
+            self.df_history = df.tail(500)
+        new_count = len(df)
+        self.last_analyzed_id = self.df_history['id'].max()
+        return new_count
 
-# ==================== 4. المحرك الرياضي ====================
-def sovereign_math_engine(b_num: str, suit: str, last_timestamp, current_timestamp):
-    """المعادلة الرياضية السيادية الأساسية"""
-    last_3 = b_num[-3:] if len(b_num) >= 3 else b_num
-    B = sum(int(d) for d in last_3 if d.isdigit())
-    S = 1 if suit in ['♦️', '♥️'] else 2
-    delta_t = int((current_timestamp - last_timestamp).total_seconds()) if last_timestamp else 0
-    R = (B * S) + delta_t
-    prediction_code = 1 if (R % 2 == 0) else 0  # 1=ثور, 0=راعي
-    prediction_text = WINNER_NAMES[prediction_code]
-    return prediction_text, prediction_code, R, delta_t, B, S
+    def prepare_data(self):
+        """تحضير البيانات للتحليل: إضافة ميزات، ترميز الفائز"""
+        if self.df_history is None or len(self.df_history) < 30:
+            return None, None
+        df = self.df_history.copy()
+        # استخراج الميزات لكل صف
+        rows = []
+        last_winner = None
+        for _, row in df.iterrows():
+            features = extract_features(
+                str(row['b_num']),
+                row['suit'],
+                pd.to_datetime(row['timestamp']).hour,
+                last_winner
+            )
+            features['winner'] = WINNER_MAP.get(row['winner'], 2)
+            rows.append(features)
+            last_winner = features['winner']
+        df_feat = pd.DataFrame(rows)
+        # حذف الصفوف ذات القيم المفقودة
+        df_feat = df_feat.dropna()
+        X = df_feat.drop('winner', axis=1)
+        y = df_feat['winner']
+        return X, y
 
-# ==================== 5. الذكاء البايزي (Bayesian Layer) ====================
-def bayesian_adjustment(prediction_code: int, current_hour: int, conn, min_samples: int = 15):
-    """تعديل التوقع بناءً على أداء الخوارزمية في هذه الساعة تحديداً"""
-    try:
-        period = get_time_period(current_hour)
-        
-        # جلب أحدث 200 جولة فقط
-        df = pd.read_sql("""
-            SELECT winner, prediction, timestamp 
-            FROM history 
-            WHERE prediction IS NOT NULL 
-            ORDER BY id DESC LIMIT 200
-        """, conn)
-        
-        if len(df) < min_samples: return prediction_code, None
-        
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df['period'] = df['timestamp'].dt.hour.apply(get_time_period)
-        
-        period_data = df[df['period'] == period].copy()
-        if len(period_data) < min_samples: return prediction_code, None
-        
-        period_data['winner_code'] = period_data['winner'].map(WINNER_MAP)
-        period_data = period_data.dropna(subset=['winner_code'])
-        
-        if len(period_data) < min_samples: return prediction_code, None
-        
-        total = len(period_data)
-        p_rai = (period_data['winner_code'] == 0).sum() / total
-        p_thawr = (period_data['winner_code'] == 1).sum() / total
-        
-        # Prior probabilities (المعادلة الرياضية تعطى ثقة 80%)
-        prior_rai, prior_thawr = (0.80, 0.20) if prediction_code == 0 else (0.20, 0.80)
-        
-        # Bayesian Update
-        norm_rai = prior_rai * p_rai
-        norm_thawr = prior_thawr * p_thawr
-        
-        if (norm_rai + norm_thawr) == 0: return prediction_code, None
-        
-        posterior_rai = norm_rai / (norm_rai + norm_thawr)
-        posterior_thawr = norm_thawr / (norm_rai + norm_thawr)
-        
-        adjusted_code = 0 if posterior_rai > posterior_thawr else 1
-        return adjusted_code, (posterior_rai, posterior_thawr)
-        
-    except Exception as e:
-        print(f"Bayesian Error: {e}")
-        return prediction_code, None
+    def run_association_rules(self, X, y, min_support=0.1, min_threshold=0.6):
+        """استخراج قواعد الارتباط بين الميزات والنتيجة"""
+        # دمج الميزات مع النتيجة في DataFrame واحد
+        df_temp = X.copy()
+        df_temp['winner'] = y
+        # تحويل البيانات إلى قيم قاطعة (لـ mlxtend)
+        df_disc = df_temp.copy()
+        for col in df_disc.columns:
+            if col in ['hour', 'b_num_len', 'b_num_sum', 'b_num_avg', 'b_num_max', 'b_num_min', 'last_digit', 'even_digits_count', 'odd_digits_count']:
+                df_disc[col] = pd.cut(df_disc[col], bins=5, labels=False)  # تقطيع إلى 5 فئات
+            else:
+                df_disc[col] = df_disc[col].astype(str)  # الباقي قاطع بالفعل
+        # ترميز واحد ساخن (one-hot)
+        df_encoded = pd.get_dummies(df_disc)
+        try:
+            frequent_itemsets = apriori(df_encoded, min_support=min_support, use_colnames=True)
+            rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_threshold)
+            # تصفية القواعد التي تكون فيها النتيجة (winner) في التالي
+            rules_with_winner = rules[rules['consequents'].apply(lambda x: any('winner' in str(i) for i in x))]
+            return rules_with_winner
+        except:
+            return pd.DataFrame()
 
-# ==================== 6. أوامر البوت ====================
+    def train_decision_tree(self, X, y, max_depth=4):
+        """تدريب شجرة قرار لاستخراج قواعد سهلة الفهم"""
+        clf = DecisionTreeClassifier(max_depth=max_depth, random_state=42)
+        clf.fit(X, y)
+        rules_text = export_text(clf, feature_names=list(X.columns))
+        return clf, rules_text
+
+    def train_random_forest(self, X, y):
+        """تدريب غابة عشوائية واستخراج أهمية الميزات"""
+        rf = RandomForestClassifier(n_estimators=100, random_state=42)
+        rf.fit(X, y)
+        importance = pd.DataFrame({'feature': X.columns, 'importance': rf.feature_importances_}).sort_values('importance', ascending=False)
+        return rf, importance
+
+    def symbolic_regression(self, X, y):
+        """انحدار رمزي للعثور على معادلات رياضية تربط الميزات بالنتيجة (للتبسيط، نستخدم gplearn)"""
+        # هذا الجزء متقدم ويتطلب بيانات مستمرة، وقد لا يعمل مباشرة مع القيم القاطعة.
+        # سنستخدمه بشكل تجريبي.
+        try:
+            # اختيار ميزات عددية فقط
+            numeric_cols = ['b_num_len', 'b_num_sum', 'b_num_avg', 'b_num_max', 'b_num_min', 'last_digit', 'even_digits_count', 'odd_digits_count', 'hour']
+            X_num = X[numeric_cols].fillna(0)
+            y_bin = (y == 1).astype(int)  # نتنبأ بالثور فقط كمثال
+            function_set = ['add', 'sub', 'mul', 'div', 'sin', 'cos', 'log', 'sqrt']
+            est = gpl.SymbolicRegressor(population_size=1000,
+                                        generations=10,
+                                        function_set=function_set,
+                                        verbose=0,
+                                        random_state=42)
+            est.fit(X_num.values, y_bin.values)
+            return est._program
+        except Exception as e:
+            print(f"Symbolic regression error: {e}")
+            return None
+
+    def run_full_analysis(self):
+        """تشغيل جميع أنواع التحليلات وتخزين النتائج"""
+        X, y = self.prepare_data()
+        if X is None:
+            return
+        results = {}
+
+        # 1. قواعد الارتباط
+        assoc_rules = self.run_association_rules(X, y)
+        results['association_rules'] = assoc_rules
+
+        # 2. شجرة القرار
+        dt_model, dt_rules_text = self.train_decision_tree(X, y)
+        results['decision_tree'] = {'model': dt_model, 'rules_text': dt_rules_text}
+
+        # 3. غابة عشوائية + أهمية الميزات
+        rf_model, rf_importance = self.train_random_forest(X, y)
+        results['random_forest'] = {'model': rf_model, 'importance': rf_importance}
+
+        # 4. انحدار رمزي (اختياري)
+        sym_func = self.symbolic_regression(X, y)
+        results['symbolic_function'] = sym_func
+
+        self.models = results
+        self.last_update = datetime.datetime.now()
+        return results
+
+    def generate_report(self) -> str:
+        """توليد تقرير بالعربية عن آخر التحليلات"""
+        if self.models is None or len(self.models) == 0:
+            return "⚠️ لم يتم إجراء أي تحليل بعد."
+
+        report = f"📊 **تقرير HADES X التحليلي**\n"
+        report += f"🕐 آخر تحديث: {self.last_update.strftime('%Y-%m-%d %H:%M')}\n"
+        report += f"📈 عدد الجولات المحللة: {len(self.df_history) if self.df_history is not None else 0}\n"
+        report += "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        # أهمية الميزات من الغابة العشوائية
+        if 'random_forest' in self.models:
+            imp = self.models['random_forest']['importance']
+            top_features = imp.head(5)
+            report += "**🔥 أهم 5 ميزات مؤثرة:**\n"
+            for _, row in top_features.iterrows():
+                report += f"▪️ {row['feature']}: {row['importance']:.3f}\n"
+            report += "\n"
+
+        # قواعد شجرة القرار
+        if 'decision_tree' in self.models:
+            report += "**🌳 قواعد شجرة القرار (أهم المسارات):**\n"
+            rules_text = self.models['decision_tree']['rules_text']
+            # نأخذ أول 10 أسطر فقط للتبسيط
+            lines = rules_text.split('\n')[:15]
+            report += "```\n" + "\n".join(lines) + "\n```\n\n"
+
+        # قواعد الارتباط (أقوى 5)
+        if 'association_rules' in self.models and not self.models['association_rules'].empty:
+            rules = self.models['association_rules'].sort_values('confidence', ascending=False).head(5)
+            report += "**🔗 أقوى قواعد الارتباط:**\n"
+            for idx, rule in rules.iterrows():
+                antecedents = ', '.join(list(rule['antecedents']))
+                consequents = ', '.join(list(rule['consequents']))
+                report += f"▪️ إذا {{{antecedents}}} ← {{{consequents}}} (ثقة: {rule['confidence']:.2f})\n"
+            report += "\n"
+
+        # توصيات عامة
+        report += "**💡 توصيات ذكية:**\n"
+        # يمكن إضافة توصيات مبنية على النتائج، مثلاً:
+        if 'random_forest' in self.models:
+            imp = self.models['random_forest']['importance']
+            top_feat = imp.iloc[0]['feature']
+            report += f"▪️ الميزة الأكثر تأثيراً هي `{top_feat}`، راقبها.\n"
+        report += "▪️ يُنصح باللعب في الأوقات التي يكون فيها النموذج أكثر دقة.\n"
+        return report
+
+# ==================== 4. البوت والجدولة ====================
+# إنشاء كائن التحليل العام
+analytics = HadesXAnalytics()
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """بدء التفاعل مع التحقق من الاشتراك"""
-    user_id = update.effective_user.id
-    
-    # التحقق من الاشتراك (المسؤول مستثنى)
-    subscribed, plan, remaining = is_user_subscribed(user_id)
-    
-    if not subscribed and user_id != ADMIN_ID:
-        # إذا لم يكن مشتركًا وليس أدمن، نطلب إدخال مفتاح
-        await update.message.reply_text(
-            "🔐 **مرحبًا بك في HADES V3**\n"
-            "للاستخدام، يجب عليك إدخال مفتاح اشتراك صالح.\n"
-            "أرسل المفتاح الآن، أو تواصل مع المسؤول للحصول على مفتاح.\n\n"
-            "إذا كان لديك مفتاح، أرسله كرسالة مباشرة."
-        )
-        return
-    
-    # إذا كان مشتركًا أو أدمن، نكمل
-    context.user_data.clear()
-    kb = [
-        [InlineKeyboardButton("♦️ ديناري (أحمر)", callback_data="s_♦️"), 
-         InlineKeyboardButton("♥️ قلب (أحمر)", callback_data="s_♥️")],
-        [InlineKeyboardButton("♠️ سبايد (أسود)", callback_data="s_♠️"), 
-         InlineKeyboardButton("♣️ كلبة (أسود)", callback_data="s_♣️")]
-    ]
-    remaining_text = f"اشتراكك ({plan}) متبقي {remaining} يوم." if subscribed else ""
     await update.message.reply_text(
-        f"🏛️ **محرك HADES V3 - الإصدار الشخصي النخبوي**\n"
-        f"{remaining_text}\n\n"
-        "🎴 اختر نوع البذلة للبدء:",
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode='Markdown'
+        "🧠 **HADES X - البوت التحليلي الفائق**\n"
+        "يقوم بتحليل قاعدة البيانات باستمرار واستخراج القوانين الرياضية.\n\n"
+        "الأوامر:\n"
+        "/report - عرض آخر تقرير تحليلي\n"
+        "/rules - عرض القوانين المكتشفة\n"
+        "/importance - أهم الميزات\n"
+        "/force - تشغيل تحليل جديد (للمسؤول)"
     )
 
-async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج إدخال مفتاح الاشتراك"""
-    user_id = update.effective_user.id
-    text = update.message.text.strip()
-    
-    # محاولة تفعيل الاشتراك
-    if activate_subscription(user_id, text):
-        await update.message.reply_text("✅ تم تفعيل اشتراكك بنجاح! يمكنك الآن استخدام /start للبدء.")
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    report = analytics.generate_report()
+    await update.message.reply_text(report, parse_mode='Markdown')
+
+async def rules_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if analytics.models and 'decision_tree' in analytics.models:
+        rules = analytics.models['decision_tree']['rules_text']
+        await update.message.reply_text(f"🌳 **قواعد شجرة القرار:**\n```\n{rules}\n```", parse_mode='Markdown')
     else:
-        await update.message.reply_text("❌ المفتاح غير صالح أو مستخدم مسبقًا. تأكد من المفتاح وحاول مرة أخرى.")
+        await update.message.reply_text("⚠️ لا توجد قواعد بعد.")
 
-async def generate_keys_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """أمر للمسؤول لتوليد مفاتيح جديدة وعرضها"""
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("⛔ هذا الأمر متاح للمسؤول فقط.")
-        return
-
-    generate_keys()
-
-    # جلب المفاتيح غير المستخدمة من قاعدة البيانات
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    cur = conn.cursor()
-    cur.execute("SELECT key_code, plan FROM subscription_keys WHERE is_used = FALSE ORDER BY plan, id")
-    rows = cur.fetchall()
-    conn.close()
-
-    if not rows:
-        await update.message.reply_text("⚠️ لا توجد مفاتيح غير مستخدمة حالياً.")
-        return
-
-    # تجميع المفاتيح حسب الخطة
-    result = "🔑 **المفاتيح المتاحة:**\n\n"
-    plans_keys = {plan: [] for plan in PLANS.keys()}
-    for key, plan in rows:
-        plans_keys[plan].append(key)
-
-    for plan in PLANS.keys():
-        plan_name = {
-            'day': '📆 يوم',
-            'two_days': '📆📆 يومين',
-            'week': '📅 أسبوع',
-            'month': '📅 شهر'
-        }.get(plan, plan)
-        keys = plans_keys[plan]
-        result += f"**{plan_name}** ({len(keys)} مفتاح):\n"
-        if keys:
-            for k in keys:
-                result += f"`{k}`\n"
-        else:
-            result += "لا توجد مفاتيح.\n"
-        result += "\n"
-
-    await update.message.reply_text(result, parse_mode='Markdown')
-
-async def my_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض حالة الاشتراك الحالية للمستخدم"""
-    user_id = update.effective_user.id
-    subscribed, plan, remaining = is_user_subscribed(user_id)
-    
-    if subscribed or user_id == ADMIN_ID:
-        plan_name = {
-            'day': 'يوم',
-            'two_days': 'يومين',
-            'week': 'أسبوع',
-            'month': 'شهر'
-        }.get(plan, plan) if subscribed else "مشرف"
-        await update.message.reply_text(
-            f"✅ أنت مشترك حاليًا في خطة **{plan_name}**.\n"
-            f"⏳ متبقي: {remaining if subscribed else 'غير محدود'} يوم."
-        )
+async def importance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if analytics.models and 'random_forest' in analytics.models:
+        imp = analytics.models['random_forest']['importance']
+        msg = "🔥 **أهمية الميزات:**\n"
+        for _, row in imp.head(10).iterrows():
+            msg += f"▪️ {row['feature']}: {row['importance']:.3f}\n"
+        await update.message.reply_text(msg)
     else:
-        await update.message.reply_text("❌ لا يوجد اشتراك نشط. استخدم /start وأدخل مفتاحًا صالحًا.")
+        await update.message.reply_text("⚠️ لا توجد بيانات.")
 
-async def performance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تحليل الأداء المتقدم"""
-    try:
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-        df = pd.read_sql("SELECT winner, prediction, timestamp, suit FROM history WHERE prediction IS NOT NULL", conn)
-        conn.close()
-
-        if len(df) < 10:
-            await update.message.reply_text("⚠️ البيانات غير كافية للتحليل (نحتاج 10 جولات على الأقل).")
-            return
-
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df['hour'] = df['timestamp'].dt.hour
-        df['winner_code'] = df['winner'].map(WINNER_MAP)
-        df = df.dropna(subset=['winner_code', 'prediction'])
-        df['correct'] = (df['winner_code'] == df['prediction']).astype(int)
-
-        accuracy = df['correct'].mean() * 100
-        hour_stats = df.groupby('hour').agg(acc=('correct', 'mean'), count=('correct', 'count'))
-        hour_stats = hour_stats[hour_stats['count'] >= 5]
-        
-        report = f"📊 **تقرير الأداء الشامل**\n━━━━━━━━━━━━━━\n📈 **الدقة العامة:** {accuracy:.1f}%\n"
-        
-        if not hour_stats.empty:
-            best_hour = hour_stats['acc'].idxmax()
-            worst_hour = hour_stats['acc'].idxmin()
-            report += f"🏆 **أفضل ساعة للعب:** {best_hour:02d}:00 ({hour_stats.loc[best_hour, 'acc']*100:.1f}%)\n"
-            report += f"⚠️ **أسوأ ساعة للعب:** {worst_hour:02d}:00 ({hour_stats.loc[worst_hour, 'acc']*100:.1f}%)\n"
-
+async def force_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ هذا الأمر للمسؤول فقط.")
+        return
+    await update.message.reply_text("🔄 جاري تشغيل التحليل...")
+    new = analytics.load_new_data()
+    if new > 0:
+        analytics.run_full_analysis()
+        await update.message.reply_text(f"✅ تم تحليل {new} جولة جديدة.")
+        # إرسال التقرير للمسؤول
+        report = analytics.generate_report()
         await update.message.reply_text(report, parse_mode='Markdown')
-    except Exception as e:
-        await update.message.reply_text(f"❌ خطأ: {e}")
-
-async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """حذف آخر إدخال في حالة الخطأ"""
-    try:
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-        cur = conn.cursor()
-        cur.execute("SELECT id FROM history ORDER BY id DESC LIMIT 1")
-        row = cur.fetchone()
-        if row:
-            cur.execute("DELETE FROM history WHERE id = %s", (row[0],))
-            conn.commit()
-            await update.message.reply_text("🗑️ تم حذف آخر جولة بنجاح.")
-        else:
-            await update.message.reply_text("⚠️ لا توجد بيانات للحذف.")
-        conn.close()
-    except Exception as e:
-         await update.message.reply_text(f"❌ خطأ: {e}")
-
-# ==================== 7. معالج الرسائل والأزرار ====================
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """استقبال البونص وإصدار التوقع الهجين (مع التحقق من الاشتراك)"""
-    user_id = update.effective_user.id
-    text = update.message.text.strip()
-    
-    # التحقق من الاشتراك أولاً
-    subscribed, _, _ = is_user_subscribed(user_id)
-    if not subscribed and user_id != ADMIN_ID:
-        # إذا لم يكن مشتركًا وليس أدمن، نتعامل مع الرسالة كمحاولة اشتراك
-        await subscribe(update, context)
-        return
-    
-    # متابعة المعالجة للمشتركين
-    if text.isdigit() and len(text) >= 7:
-        if 'suit' not in context.user_data:
-            await update.message.reply_text("⚠️ اختر البذلة أولاً عبر /start.")
-            return
-
-        current_time = datetime.datetime.now()
-        
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-        cur = conn.cursor()
-        cur.execute("SELECT timestamp FROM history ORDER BY id DESC LIMIT 1")
-        row = cur.fetchone()
-        last_time = row[0] if row else None
-
-        # 1. التوقع الرياضي
-        pred_text, pred_code, R, gap, B, S = sovereign_math_engine(
-            text, context.user_data['suit'], last_time, current_time
-        )
-
-        # 2. التعديل البايزي (الذكاء الاصطناعي)
-        adjusted_code, posteriors = bayesian_adjustment(pred_code, current_time.hour, conn)
-        
-        cur.close()
-        conn.close()
-
-        warning_text = ""
-        if adjusted_code is not None and adjusted_code != pred_code and posteriors is not None:
-            pred_code = adjusted_code
-            pred_text = WINNER_NAMES[pred_code]
-            p_rai, p_thawr = posteriors
-            warning_text = (
-                f"🧠 **تصحيح ذكي (بايز):**\n"
-                f"البيانات ترجح {pred_text} بنسبة {max(p_rai, p_thawr)*100:.0f}%\n"
-                f"تم تعديل التوقع تلقائياً لحمايتك.\n\n"
-            )
-
-        context.user_data['bonus'] = text
-        context.user_data['prediction_code'] = pred_code
-        context.user_data['current_time'] = current_time
-
-        kb = [
-            [InlineKeyboardButton("🔴 فاز الراعي", callback_data="save_الراعي 🔴"),
-             InlineKeyboardButton("🔵 فاز الثور", callback_data="save_الثور 🔵")],
-            [InlineKeyboardButton("⚪ تعادل", callback_data="save_تعادل ⚪")]
-        ]
-
-        await update.message.reply_text(
-            f"{warning_text}"
-            f"🎯 **التوقع النهائي:** {pred_text}\n"
-            f"🎴 البذلة: {context.user_data['suit']}\n"
-            f"🔢 المعادلة: B={B} × S={S} + ΔT={gap} → R={R}\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"اختر النتيجة الحقيقية بعد انتهاء الجولة:",
-            reply_markup=InlineKeyboardMarkup(kb),
-            parse_mode='Markdown'
-        )
     else:
-        await update.message.reply_text("❌ أدخل رقم صحيح (7 أرقام على الأقل).")
+        await update.message.reply_text("ℹ️ لا توجد بيانات جديدة.")
 
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """حفظ النتيجة في قاعدة البيانات"""
-    query = update.callback_query
-    await query.answer()
-
-    if query.data.startswith("s_"):
-        suit = query.data[2:]
-        context.user_data['suit'] = suit
-        await query.edit_message_text(f"✅ تم اختيار: {suit}\n📥 أرسل رقم البونص للجولة القادمة:")
-
-    elif query.data.startswith("save_"):
-        winner_db = query.data[5:]
-        pred_code = context.user_data.get('prediction_code')
-        
-        if pred_code is None:
-            await query.edit_message_text("❌ خطأ: لا يوجد توقع مخزن. ابدأ من جديد /start.")
-            return
-
+# ==================== 5. المهام الدورية ====================
+async def periodic_analysis(app):
+    """دالة تُستدعى بشكل دوري لفحص البيانات الجديدة وإجراء التحليل"""
+    while True:
         try:
-            conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO history (b_num, suit, winner, timestamp, prediction) 
-                VALUES (%s, %s, %s, %s, %s)
-            """, (
-                context.user_data['bonus'], context.user_data['suit'],
-                winner_db, context.user_data['current_time'], pred_code
-            ))
-            conn.commit()
-            conn.close()
-
-            pred_winner = WINNER_NAMES[pred_code]
-            is_correct = "✅" if winner_db == pred_winner else "❌"
-            
-            kb = [[InlineKeyboardButton("🔄 بدء جولة جديدة", callback_data="new_round")]]
-            
-            await query.edit_message_text(
-                f"{is_correct} **تم التسجيل بنجاح**\n\n"
-                f"🎯 توقعنا: {pred_winner}\n"
-                f"🏆 النتيجة الفعلية: {winner_db}\n"
-                f"━━━━━━━━━━━━━━\n"
-                f"/performance - تقرير الأداء\n"
-                f"/delete - التراجع عن التسجيل",
-                parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup(kb)
-            )
+            new_count = analytics.load_new_data()
+            if new_count >= 10:
+                print(f"🔍 تحليل دوري: {new_count} جولة جديدة.")
+                analytics.run_full_analysis()
+                # إرسال التقرير إلى المسؤول
+                report = analytics.generate_report()
+                await app.bot.send_message(chat_id=ADMIN_ID, text=report, parse_mode='Markdown')
+            else:
+                print(f"⏳ انتظار بيانات جديدة (آخر {new_count} جولة)")
         except Exception as e:
-            await query.edit_message_text(f"❌ خطأ في الحفظ: {e}")
+            print(f"❌ خطأ في التحليل الدوري: {e}")
+        await asyncio.sleep(3600)  # فحص كل ساعة (يمكن تعديلها)
 
-    elif query.data == "new_round":
-        await start(update, context)
+# ==================== 6. التشغيل الرئيسي ====================
+async def post_init(app):
+    """بعد بدء البوت، نبدأ المهمة الدورية"""
+    asyncio.create_task(periodic_analysis(app))
+    print("✅ بدأت المهام الدورية.")
 
-# ==================== 8. التشغيل والتأسيس ====================
 if __name__ == "__main__":
-    # --- تأسيس قاعدة البيانات تلقائياً ---
+    # تأكد من وجود عمود prediction في history (اختياري)
     try:
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         cur = conn.cursor()
-        # إضافة عمود prediction إذا لم يكن موجوداً
         cur.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS prediction INTEGER;")
-        # إضافة عمود user_id إذا لم يكن موجوداً (قد يكون مفيداً)
-        cur.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS user_id BIGINT;")
         conn.commit()
         cur.close()
         conn.close()
-        print("✅ قاعدة البيانات جاهزة ومحدثة.")
-    except Exception as e:
-        print(f"⚠️ ملاحظة حول قاعدة البيانات: {e}")
-    
-    # تهيئة جدول الاشتراكات
-    init_subscription_table()
-    
-    # توليد مفاتيح أولية إذا لم توجد
-    try:
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM subscription_keys")
-        count = cur.fetchone()[0]
-        if count == 0:
-            generate_keys()
-        conn.close()
-    except Exception as e:
-        print(f"⚠️ خطأ في توليد المفاتيح: {e}")
-    # ------------------------------------
+    except:
+        pass
 
-    app = ApplicationBuilder().token(TOKEN).build()
-
+    app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("performance", performance_command))
-    app.add_handler(CommandHandler("delete", delete_command))
-    app.add_handler(CommandHandler("generate_keys", generate_keys_command))
-    app.add_handler(CommandHandler("mysub", my_subscription))
-    
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_handler(CommandHandler("report", report_command))
+    app.add_handler(CommandHandler("rules", rules_command))
+    app.add_handler(CommandHandler("importance", importance_command))
+    app.add_handler(CommandHandler("force", force_analysis))
 
-    print("🚀 محرك HADES V3 (مع نظام اشتراكات) يعمل الآن...")
+    print("🚀 HADES X (البوت الفائق) يعمل الآن...")
     app.run_polling()
