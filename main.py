@@ -1,5 +1,5 @@
 """
-بوت HADES V100.2 المُطوَّر مع تكامل NVIDIA AI
+بوت HADES V100.2 المُطوَّر مع تكامل NVIDIA AI وكيل ذكي لتحليل البيانات وتحديث القوانين تلقائيًا
 جميع الإعدادات مضمنة، جاهز للنسخ واللصق والتشغيل على Railway مع PostgreSQL.
 """
 
@@ -13,11 +13,15 @@ import uuid
 import random
 import asyncio
 import io
+import json
+from typing import Dict, Any, Tuple, Optional
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler,
     CommandHandler, ContextTypes, ConversationHandler
 )
+from openai import OpenAI
 
 # ==================== 1. الإعدادات والثوابت (مضمنة) ====================
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
@@ -37,7 +41,7 @@ PLANS = {
     'month': 30
 }
 
-# إعدادات التباعد الزمني
+# إعدادات التباعد الزمني (سيتم تحديثها عبر AI)
 PLAY_SESSION_MINUTES = 30
 COOL_DOWN_1_MIN = (5, 10)
 COOL_DOWN_2_MIN = 15
@@ -51,7 +55,15 @@ WINNER_MAP = {
 }
 WINNER_NAMES = {0: 'الراعي 🔴', 1: 'الثور 🔵', 2: 'تعادل ⚪'}
 
-CONFIDENCE_THRESHOLD = 0.65
+# الإعدادات الديناميكية (سيتم تحميلها من قاعدة البيانات)
+DYNAMIC_CONFIG = {
+    'CONFIDENCE_THRESHOLD': 0.65,      # عتبة الثقة للنماذج
+    'MATH_WEIGHT': 0.7,                # وزن المعادلة في المزج
+    'BAYES_WEIGHT': 0.3,                # وزن بايزي في المزج
+    'MATH_CONFIDENCE': 0.7,             # ثقة المعادلة الافتراضية
+    'S_RED': 1,                          # معامل S للبذلة الحمراء
+    'S_BLACK': 2,                         # معامل S للبذلة السوداء
+}
 
 # حالات المحادثة
 (AI_MODE, PREDICTION_MODE) = range(2)
@@ -75,10 +87,13 @@ def period_translate(period: str) -> str:
         "night": "🌙 الليل"
     }.get(period, period)
 
-# ==================== 3. دوال إدارة الاشتراكات ====================
-def init_subscription_table():
+# ==================== 3. دوال إدارة قاعدة البيانات والإعدادات ====================
+def init_database():
+    """إنشاء الجداول المطلوبة إذا لم تكن موجودة."""
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cur = conn.cursor()
+
+    # جدول الاشتراكات
     cur.execute("""
         CREATE TABLE IF NOT EXISTS subscription_keys (
             id SERIAL PRIMARY KEY,
@@ -91,9 +106,64 @@ def init_subscription_table():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # جدول الإعدادات الديناميكية (AI settings)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_settings (
+            id SERIAL PRIMARY KEY,
+            config_name VARCHAR(50) UNIQUE NOT NULL,
+            config_value TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     conn.commit()
     conn.close()
 
+def load_dynamic_config():
+    """تحميل الإعدادات الديناميكية من قاعدة البيانات وتحديث المتغيرات العامة."""
+    global DYNAMIC_CONFIG, CONFIDENCE_THRESHOLD, MATH_WEIGHT, BAYES_WEIGHT, MATH_CONFIDENCE, S_RED, S_BLACK
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    cur = conn.cursor()
+    cur.execute("SELECT config_name, config_value FROM ai_settings")
+    rows = cur.fetchall()
+    conn.close()
+
+    for name, value in rows:
+        if name in DYNAMIC_CONFIG:
+            # نفترض أن القيمة مخزنة كـ JSON
+            try:
+                DYNAMIC_CONFIG[name] = json.loads(value)
+            except:
+                DYNAMIC_CONFIG[name] = value
+
+    # تحديث المتغيرات العامة
+    CONFIDENCE_THRESHOLD = DYNAMIC_CONFIG.get('CONFIDENCE_THRESHOLD', 0.65)
+    MATH_WEIGHT = DYNAMIC_CONFIG.get('MATH_WEIGHT', 0.7)
+    BAYES_WEIGHT = DYNAMIC_CONFIG.get('BAYES_WEIGHT', 0.3)
+    MATH_CONFIDENCE = DYNAMIC_CONFIG.get('MATH_CONFIDENCE', 0.7)
+    S_RED = DYNAMIC_CONFIG.get('S_RED', 1)
+    S_BLACK = DYNAMIC_CONFIG.get('S_BLACK', 2)
+
+def save_dynamic_config(config_updates: Dict[str, Any]):
+    """حفظ تحديثات الإعدادات في قاعدة البيانات وتحديث الذاكرة."""
+    global DYNAMIC_CONFIG
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    cur = conn.cursor()
+    for name, value in config_updates.items():
+        json_value = json.dumps(value)
+        cur.execute("""
+            INSERT INTO ai_settings (config_name, config_value)
+            VALUES (%s, %s)
+            ON CONFLICT (config_name) DO UPDATE SET config_value = EXCLUDED.config_value, updated_at = CURRENT_TIMESTAMP
+        """, (name, json_value))
+        DYNAMIC_CONFIG[name] = value
+    conn.commit()
+    conn.close()
+    # إعادة تحميل الإعدادات لتحديث المتغيرات العامة
+    load_dynamic_config()
+
+# ==================== 4. دوال إدارة الاشتراكات ====================
 def generate_keys():
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cur = conn.cursor()
@@ -154,7 +224,7 @@ def activate_subscription(user_id: int, key_code: str) -> bool:
     conn.close()
     return True
 
-# ==================== 4. دوال إدارة التباعد الزمني ====================
+# ==================== 5. دوال إدارة التباعد الزمني ====================
 def init_user_session(context: ContextTypes.DEFAULT_TYPE):
     if 'session_start' not in context.user_data:
         context.user_data['session_start'] = None
@@ -204,18 +274,19 @@ def update_session_after_play(context: ContextTypes.DEFAULT_TYPE):
 def inject_fake_prediction(pred_code: int) -> int:
     return 1 if pred_code == 0 else 0
 
-# ==================== 5. المحرك الرياضي الأساسي ====================
+# ==================== 6. المحرك الرياضي الأساسي (محدث لاستخدام الإعدادات الديناميكية) ====================
 def sovereign_math_engine(b_num: str, suit: str, last_timestamp, current_timestamp):
     last_3 = b_num[-3:] if len(b_num) >= 3 else b_num
     B = sum(int(d) for d in last_3 if d.isdigit())
-    S = 1 if suit in ['♦️', '♥️'] else 2
+    # استخدام المعاملات الديناميكية S_RED و S_BLACK
+    S = S_RED if suit in ['♦️', '♥️'] else S_BLACK
     delta_t = int((current_timestamp - last_timestamp).total_seconds()) if last_timestamp else 0
     R = (B * S) + delta_t
     prediction_code = 1 if (R % 2 == 0) else 0
     prediction_text = WINNER_NAMES[prediction_code]
     return prediction_text, prediction_code, R, delta_t, B, S
 
-# ==================== 6. تحليل بايزي ====================
+# ==================== 7. تحليل بايزي (محدث لاستخدام الإعدادات الديناميكية) ====================
 def bayesian_analysis(conn, current_hour: int, min_samples: int = 30):
     try:
         df = pd.read_sql("""
@@ -258,10 +329,13 @@ def hybrid_prediction(b_num: str, suit: str, last_timestamp, current_timestamp, 
     if period_probs is None:
         return math_pred_text, math_pred_code, R, gap, B, S, "المعادلة فقط (بيانات غير كافية للفترة)"
     p_rai, p_thawr, p_tie = period_probs
-    math_confidence = 0.7
+
+    # استخدام الأوزان الديناميكية
+    math_confidence = MATH_CONFIDENCE
     probs = [p_rai, p_thawr, p_tie]
     probs_sorted = sorted(probs, reverse=True)
     bayes_confidence = probs_sorted[0] - probs_sorted[1]
+
     if bayes_confidence > CONFIDENCE_THRESHOLD:
         if probs_sorted[0] == p_rai:
             final_code = 0
@@ -276,9 +350,10 @@ def hybrid_prediction(b_num: str, suit: str, last_timestamp, current_timestamp, 
         final_text = math_pred_text
         reason = "المعادلة (ثقة افتراضية)"
     else:
-        weighted_rai = 0.7 * (1 if math_pred_code == 0 else 0) + 0.3 * p_rai
-        weighted_thawr = 0.7 * (1 if math_pred_code == 1 else 0) + 0.3 * p_thawr
-        weighted_tie = 0.7 * (1 if math_pred_code == 2 else 0) + 0.3 * p_tie
+        # مزج باستخدام الأوزان الديناميكية
+        weighted_rai = MATH_WEIGHT * (1 if math_pred_code == 0 else 0) + BAYES_WEIGHT * p_rai
+        weighted_thawr = MATH_WEIGHT * (1 if math_pred_code == 1 else 0) + BAYES_WEIGHT * p_thawr
+        weighted_tie = MATH_WEIGHT * (1 if math_pred_code == 2 else 0) + BAYES_WEIGHT * p_tie
         if weighted_rai > weighted_thawr and weighted_rai > weighted_tie:
             final_code = 0
         elif weighted_thawr > weighted_rai and weighted_thawr > weighted_tie:
@@ -289,9 +364,135 @@ def hybrid_prediction(b_num: str, suit: str, last_timestamp, current_timestamp, 
         reason = f"مزج (معادلة+بايزي) - معادلة: {math_pred_text}, بايزي: راعي {p_rai:.2f}, ثور {p_thawr:.2f}, تعادل {p_tie:.2f}"
     return final_text, final_code, R, gap, B, S, reason
 
-# ==================== 7. خدمة الذكاء الاصطناعي NVIDIA ====================
-from openai import OpenAI
+# ==================== 8. وكيل الذكاء الاصطناعي المتقدم ====================
+class AIAgent:
+    def __init__(self):
+        self.client = OpenAI(
+            base_url=NVIDIA_BASE_URL,
+            api_key=NVIDIA_API_KEY
+        )
+        self.model = NVIDIA_MODEL
 
+    def analyze_and_suggest(self) -> Dict[str, Any]:
+        """تحليل قاعدة البيانات بالكامل وتقديم توصيات لتحديث القوانين."""
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        # جلب كل البيانات
+        df = pd.read_sql("SELECT * FROM history ORDER BY id", conn)
+        conn.close()
+
+        if len(df) < 50:
+            return {}  # بيانات غير كافية
+
+        # تحويل الأعمدة
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df['hour'] = df['timestamp'].dt.hour
+        df['period'] = df['hour'].apply(get_time_period)
+        df['winner_code'] = df['winner'].map(WINNER_MAP)
+        df['prediction_code'] = df['prediction']  # افتراض أن prediction هو الرقم
+        df['correct'] = (df['winner_code'] == df['prediction_code']).astype(int)
+
+        # حساب إحصائيات شاملة
+        total_accuracy = df['correct'].mean()
+        period_accuracy = df.groupby('period')['correct'].mean().to_dict()
+        hour_accuracy = df.groupby('hour')['correct'].mean().to_dict()
+        suit_accuracy = df.groupby('suit')['correct'].mean().to_dict()
+        recent_accuracy = df.tail(100)['correct'].mean() if len(df) >= 100 else total_accuracy
+
+        # تحليل أداء المعادلة وبايزي (إذا توفر prediction)
+        # نقارن prediction_code مع winner_code لمعرفة دقة كل نموذج على حدة؟ ليس لدينا تفصيل، ولكن يمكننا استخدام سبب التنبؤ المخزن؟ لا يوجد.
+        # لذلك سنعتمد على الإحصائيات العامة.
+
+        # بناء برومبت للذكاء الاصطناعي
+        prompt = f"""
+        أنت خبير في تحليل البيانات وتحسين أنظمة التنبؤ. لديك قاعدة بيانات تحتوي على {len(df)} جولة من لعبة تنبؤ.
+
+        الإحصائيات الحالية:
+        - الدقة الإجمالية: {total_accuracy:.2%}
+        - دقة آخر 100 جولة: {recent_accuracy:.2%}
+        - الدقة حسب الفترة: {period_accuracy}
+        - الدقة حسب الساعة: {hour_accuracy}
+        - الدقة حسب نوع البذلة: {suit_accuracy}
+
+        النظام الحالي يستخدم:
+        - معادلة رياضية: R = (B × S) + ΔT، حيث B = مجموع آخر 3 أرقام من رقم البونص، S معامل للبذلة (أحمر=1، أسود=2 حاليًا)، ΔT الفرق الزمني بالثواني.
+        - تحليل بايزي يعطي احتمالات لكل فترة زمنية.
+        - ثم يتم المزج باستخدام أوزان: وزن المعادلة = {MATH_WEIGHT}, وزن بايزي = {BAYES_WEIGHT}.
+        - عتبة الثقة {CONFIDENCE_THRESHOLD}، إذا تجاوزت ثقة أحد النموذجين هذه العتبة يتم اعتماد توقعه.
+
+        المطلوب: تقديم توصيات لتعديل المعاملات التالية لتحسين الدقة:
+        1. CONFIDENCE_THRESHOLD (عتبة الثقة) – قيمة بين 0 و1.
+        2. MATH_WEIGHT (وزن المعادلة في المزج) – قيمة بين 0 و1.
+        3. BAYES_WEIGHT (وزن بايزي) – يجب أن يكون MATH_WEIGHT + BAYES_WEIGHT = 1.
+        4. S_RED (معامل البذلة الحمراء) – رقم موجب.
+        5. S_BLACK (معامل البذلة السوداء) – رقم موجب.
+        6. MATH_CONFIDENCE (ثقة المعادلة الافتراضية) – قيمة بين 0 و1.
+        7. PLAY_SESSION_MINUTES (مدة جلسة اللعب بالدقائق)
+        8. COOL_DOWN_1_MIN (فترة التبريد الأولى بالدقائق – يمكن أن تكون مدى)
+        9. COOL_DOWN_2_MIN (فترة التبريد الثانية)
+        10. MAX_CORRECT_STREAK (عدد الجولات الصحيحة المتتالية قبل إجبار خطأ)
+
+        قم بتحليل البيانات واقترح قيماً جديدة لهذه المتغيرات مع ذكر السبب.
+        أعد الاقتراحات بصيغة JSON فقط، مثل:
+        {{
+            "CONFIDENCE_THRESHOLD": 0.7,
+            "MATH_WEIGHT": 0.65,
+            "BAYES_WEIGHT": 0.35,
+            "S_RED": 1.2,
+            "S_BLACK": 1.8,
+            "MATH_CONFIDENCE": 0.75,
+            "PLAY_SESSION_MINUTES": 25,
+            "COOL_DOWN_1_MIN": [6, 12],
+            "COOL_DOWN_2_MIN": 20,
+            "MAX_CORRECT_STREAK": 12
+        }}
+        """
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.5,
+                max_tokens=1000,
+                stream=False
+            )
+            content = response.choices[0].message.content
+            # استخراج JSON من الرد
+            import re
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                suggestions = json.loads(json_match.group())
+                return suggestions
+            else:
+                return {}
+        except Exception as e:
+            print(f"AI Agent error: {e}")
+            return {}
+
+    def apply_suggestions(self, suggestions: Dict[str, Any]):
+        """تطبيق التوصيات على قاعدة البيانات وإعادة تحميل الإعدادات."""
+        if not suggestions:
+            return
+        save_dynamic_config(suggestions)
+        print("✅ تم تحديث الإعدادات بناءً على توصيات الذكاء الاصطناعي.")
+
+# إنشاء كائن الوكيل
+ai_agent = AIAgent()
+
+async def analyze_and_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر للأدمن لتشغيل التحليل الذكي وتحديث القوانين."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ هذا الأمر للمسؤول فقط.")
+        return
+
+    await update.message.reply_text("🔍 جاري تحليل قاعدة البيانات بواسطة الذكاء الاصطناعي...")
+    suggestions = ai_agent.analyze_and_suggest()
+    if suggestions:
+        ai_agent.apply_suggestions(suggestions)
+        await update.message.reply_text(f"✅ تم تحديث الإعدادات بناءً على توصيات AI:\n{json.dumps(suggestions, indent=2)}")
+    else:
+        await update.message.reply_text("⚠️ لم يتمكن الذكاء الاصطناعي من تقديم توصيات (بيانات غير كافية أو خطأ).")
+
+# ==================== 9. خدمة الذكاء الاصطناعي للمحادثة (كما كانت) ====================
 class NVIDIAService:
     def __init__(self):
         self.client = OpenAI(
@@ -316,7 +517,7 @@ class NVIDIAService:
 
 nvidia_ai = NVIDIAService()
 
-# ==================== 8. أوامر البوت ====================
+# ==================== 10. أوامر البوت (مع تعديلات طفيفة) ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -349,7 +550,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def ai_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """الدخول في وضع المحادثة مع الذكاء الاصطناعي."""
     context.user_data['mode'] = AI_MODE
     await update.message.reply_text(
         "🤖 أنت الآن في وضع الدردشة مع الذكاء الاصطناعي.\n"
@@ -358,7 +558,6 @@ async def ai_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def end_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """الخروج من وضع المحادثة."""
     if 'mode' in context.user_data:
         del context.user_data['mode']
     await update.message.reply_text("✅ تم الخروج من وضع الدردشة. استخدم /start للعودة.")
@@ -574,11 +773,13 @@ async def download_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         history_df = pd.read_sql("SELECT * FROM history ORDER BY id", conn)
         keys_df = pd.read_sql("SELECT * FROM subscription_keys ORDER BY id", conn)
+        settings_df = pd.read_sql("SELECT * FROM ai_settings ORDER BY id", conn)
         conn.close()
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             history_df.to_excel(writer, sheet_name='history', index=False)
             keys_df.to_excel(writer, sheet_name='subscription_keys', index=False)
+            settings_df.to_excel(writer, sheet_name='ai_settings', index=False)
         output.seek(0)
         await update.message.reply_document(
             document=output,
@@ -588,33 +789,28 @@ async def download_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ في تحميل قاعدة البيانات: {e}")
 
-# ==================== 9. المعالجات الأساسية ====================
+# ==================== 11. المعالجات الأساسية ====================
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
-    # التحقق من الاشتراك أولاً (لأي عملية)
     subscribed, _, _ = is_user_subscribed(user_id)
     if not subscribed and user_id != ADMIN_ID:
-        # إذا لم يكن مشتركًا وليس أدمن، نتعامل مع الرسالة كمحاولة اشتراك
         await subscribe(update, context)
         return
 
-    # إذا كان المستخدم في وضع الدردشة مع AI
     if context.user_data.get('mode') == AI_MODE:
         await update.message.reply_chat_action("typing")
         answer = nvidia_ai.ask(text)
         await update.message.reply_text(answer)
         return
 
-    # التحقق من التباعد الزمني (للمستخدمين العاديين) إذا كان في وضع التنبؤ
     allowed, msg = can_user_play(user_id, context)
     if not allowed:
         await update.message.reply_text(msg)
         return
 
-    # إذا كان في وضع التنبؤ (افتراضي)
     if text.isdigit() and len(text) >= 7:
         if 'suit' not in context.user_data:
             await update.message.reply_text("⚠️ اختر البذلة أولاً عبر /start.")
@@ -690,7 +886,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             conn = psycopg2.connect(DATABASE_URL, sslmode='require')
             cur = conn.cursor()
-            # تأكد من وجود عمود user_id (سيتم إنشاؤه تلقائياً)
             cur.execute("""
                 INSERT INTO history (b_num, suit, winner, timestamp, prediction, user_id) 
                 VALUES (%s, %s, %s, %s, %s, %s)
@@ -730,20 +925,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "new_round":
         await start(update, context)
 
-# ==================== 10. التشغيل الرئيسي ====================
+# ==================== 12. التشغيل الرئيسي ====================
 def main():
-    # تهيئة جدول الاشتراكات
-    init_subscription_table()
-    # التأكد من وجود عمود user_id في جدول history
-    try:
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-        cur = conn.cursor()
-        cur.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS user_id BIGINT")
-        conn.commit()
-        conn.close()
-    except:
-        pass
-    # توليد مفاتيح أولية إذا لم توجد
+    # تهيئة قاعدة البيانات
+    init_database()
+
+    # تحميل الإعدادات الديناميكية
+    load_dynamic_config()
+
+    # توليد مفاتيح أولية إذا لزم الأمر
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM subscription_keys")
@@ -764,15 +954,16 @@ def main():
     app.add_handler(CommandHandler("download", download_database))
     app.add_handler(CommandHandler("ai", ai_chat_command))
     app.add_handler(CommandHandler("end", end_chat))
+    app.add_handler(CommandHandler("analyze", analyze_and_update))  # الأمر الجديد
 
-    # معالج النصوص (للبونص والمفاتيح والدردشة)
+    # معالج النصوص
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
     # معالج الأزرار
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    print("🚀 HADES V100.2 يعمل... (نظام هجين + NVIDIA AI)")
-    print("📥 أوامر: /start, /performance, /status, /generate_keys, /mysub, /delete, /download, /ai, /end")
+    print("🚀 HADES V100.2 يعمل... (نظام هجين + NVIDIA AI + وكيل ذاتي التحديث)")
+    print("📥 أوامر: /start, /performance, /status, /generate_keys, /mysub, /delete, /download, /ai, /end, /analyze")
     app.run_polling()
 
 if __name__ == "__main__":
