@@ -20,7 +20,7 @@ from typing import Dict, Any, Tuple, Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler,
-    CommandHandler, ContextTypes, ConversationHandler
+    CommandHandler, ContextTypes, ConversationHandler, JobQueue
 )
 from openai import OpenAI
 
@@ -116,7 +116,7 @@ def init_database():
         )
     """)
 
-    # جدول history (كان مفقوداً)
+    # جدول history
     cur.execute("""
         CREATE TABLE IF NOT EXISTS history (
             id SERIAL PRIMARY KEY,
@@ -548,10 +548,15 @@ async def end_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
+
     if activate_subscription(user_id, text):
-        await update.message.reply_text("✅ تم تفعيل اشتراكك بنجاح! يمكنك الآن استخدام /start للبدء.")
+        await update.message.reply_text(
+            "✅ تم تفعيل اشتراكك بنجاح! يمكنك الآن استخدام /start للبدء."
+        )
     else:
-        await update.message.reply_text("❌ المفتاح غير صالح أو مستخدم مسبقًا. تأكد من المفتاح وحاول مرة أخرى.")
+        await update.message.reply_text(
+            "❌ المفتاح غير صالح أو مستخدم مسبقًا. تأكد من المفتاح وحاول مرة أخرى."
+        )
 
 async def generate_keys_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -933,15 +938,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "new_round":
         await start(update, context)
 
-# ==================== حلقة الذكاء الاصطناعي الخلفية ====================
-async def ai_engine_loop():
-    while True:
-        try:
-            ai_engineer.run_cycle()
-        except Exception as e:
-            print("AI LOOP ERROR:", e)
-        await asyncio.sleep(1800)  # كل 30 دقيقة
-
 # ==================== التشغيل الرئيسي ====================
 def main():
     # تهيئة قاعدة البيانات
@@ -959,7 +955,15 @@ def main():
     if count == 0:
         generate_keys()
 
+    # إنشاء التطبيق مع JobQueue
     app = ApplicationBuilder().token(TOKEN).build()
+
+    # جدولة تشغيل AI Engineer كل 30 دقيقة (1800 ثانية)
+    app.job_queue.run_repeating(
+        lambda ctx: ai_engineer.run_cycle(),
+        interval=1800,
+        first=10  # يبدأ بعد 10 ثوانٍ من التشغيل
+    )
 
     # الأوامر
     app.add_handler(CommandHandler("start", start))
@@ -972,14 +976,11 @@ def main():
     app.add_handler(CommandHandler("ai", ai_chat_command))
     app.add_handler(CommandHandler("end", end_chat))
 
-    # معالج النصوص
+    # معالج النصوص (للبونص والمفاتيح)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
     # معالج الأزرار
     app.add_handler(CallbackQueryHandler(callback_handler))
-
-    # تشغيل حلقة الذكاء الاصطناعي في الخلفية (باستخدام create_task)
-    asyncio.create_task(ai_engine_loop())
 
     print("🚀 HADES V101.5 يعمل... (نظام هجين + AI Engineer + Anti-Bias)")
     print("📥 أوامر: /start, /performance, /status, /generate_keys, /mysub, /delete, /download, /ai, /end")
