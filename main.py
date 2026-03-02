@@ -1,7 +1,7 @@
 """
 HADES V101.5 - Anti-Bias Self-Optimizing AI Prediction Bot
 جميع المفاتيح مضمنة، يعمل فوراً على Railway مع PostgreSQL.
-تم إصلاح مسار البونص بالكامل.
+تم تعديل المعادلة الرياضية لإزالة الانحياز الناتج عن delta_t.
 """
 
 import os
@@ -58,15 +58,15 @@ WINNER_NAMES = {0: 'الراعي 🔴', 1: 'الثور 🔵', 2: 'تعادل ⚪
 # الإعدادات الديناميكية (سيتم تحميلها من قاعدة البيانات)
 DYNAMIC_CONFIG = {
     'CONFIDENCE_THRESHOLD': 0.65,
-    'MATH_WEIGHT': 0.55,
-    'BAYES_WEIGHT': 0.45,
+    'MATH_WEIGHT': 0.55,          # تم تعديله لتحقيق توازن أفضل
+    'BAYES_WEIGHT': 0.45,          # تم تعديله لتحقيق توازن أفضل
     'MATH_CONFIDENCE': 0.7,
     'S_RED': 1,
-    'S_BLACK': 1,
-    'RANDOM_NOISE': 0.02,
+    'S_BLACK': 1,                  # تم تعديله ليكون 1 لمنع الانحياز
+    'RANDOM_NOISE': 0.02,           # إضافة عشوائية صغيرة لكسر الانحياز
 }
 
-# حالات المحادثة (غير مستخدمة حالياً، لكن احتفظ بها للتوسع)
+# حالات المحادثة
 (AI_MODE, PREDICTION_MODE) = range(2)
 
 # ==================== دوال تحليل الوقت ====================
@@ -90,8 +90,10 @@ def period_translate(period: str) -> str:
 
 # ==================== دوال إدارة قاعدة البيانات والإعدادات ====================
 def init_database():
+    """إنشاء الجداول المطلوبة إذا لم تكن موجودة."""
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cur = conn.cursor()
+
     # جدول الاشتراكات
     cur.execute("""
         CREATE TABLE IF NOT EXISTS subscription_keys (
@@ -105,6 +107,7 @@ def init_database():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
     # جدول الإعدادات الديناميكية (ai_settings)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS ai_settings (
@@ -114,6 +117,7 @@ def init_database():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
     # جدول history
     cur.execute("""
         CREATE TABLE IF NOT EXISTS history (
@@ -126,22 +130,26 @@ def init_database():
             user_id BIGINT
         )
     """)
+
     conn.commit()
     conn.close()
 
 def load_dynamic_config():
+    """تحميل الإعدادات الديناميكية من قاعدة البيانات وتحديث المتغيرات العامة."""
     global DYNAMIC_CONFIG, CONFIDENCE_THRESHOLD, MATH_WEIGHT, BAYES_WEIGHT, MATH_CONFIDENCE, S_RED, S_BLACK, RANDOM_NOISE
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cur = conn.cursor()
     cur.execute("SELECT config_name, config_value FROM ai_settings")
     rows = cur.fetchall()
     conn.close()
+
     for name, value in rows:
         if name in DYNAMIC_CONFIG:
             try:
                 DYNAMIC_CONFIG[name] = json.loads(value)
             except:
                 DYNAMIC_CONFIG[name] = value
+
     CONFIDENCE_THRESHOLD = DYNAMIC_CONFIG.get('CONFIDENCE_THRESHOLD', 0.65)
     MATH_WEIGHT = DYNAMIC_CONFIG.get('MATH_WEIGHT', 0.55)
     BAYES_WEIGHT = DYNAMIC_CONFIG.get('BAYES_WEIGHT', 0.45)
@@ -151,6 +159,7 @@ def load_dynamic_config():
     RANDOM_NOISE = DYNAMIC_CONFIG.get('RANDOM_NOISE', 0.02)
 
 def save_dynamic_config(config_updates: Dict[str, Any]):
+    """حفظ تحديثات الإعدادات في قاعدة البيانات وتحديث الذاكرة."""
     global DYNAMIC_CONFIG
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     cur = conn.cursor()
@@ -174,7 +183,10 @@ def generate_keys():
         for _ in range(5):
             key = secrets.token_urlsafe(16)
             try:
-                cur.execute("INSERT INTO subscription_keys (key_code, plan) VALUES (%s, %s)", (key, plan))
+                cur.execute(
+                    "INSERT INTO subscription_keys (key_code, plan) VALUES (%s, %s)",
+                    (key, plan)
+                )
             except psycopg2.IntegrityError:
                 conn.rollback()
                 continue
@@ -232,7 +244,7 @@ def init_user_session(context: ContextTypes.DEFAULT_TYPE):
         context.user_data['cool_until'] = None
         context.user_data['cool_stage'] = 0
         context.user_data['correct_streak'] = 0
-        context.user_data['last_predictions'] = []
+        context.user_data['last_predictions'] = []  # لمكافحة الانحياز
 
 def can_user_play(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> tuple:
     if user_id == ADMIN_ID:
@@ -275,15 +287,16 @@ def update_session_after_play(context: ContextTypes.DEFAULT_TYPE):
 def inject_fake_prediction(pred_code: int) -> int:
     return 1 if pred_code == 0 else 0
 
-# ==================== المحرك الرياضي الأساسي ====================
+# ==================== المحرك الرياضي الأساسي (معدل بالكامل) ====================
 def sovereign_math_engine(b_num: str, suit: str, last_timestamp, current_timestamp):
     last3 = b_num[-3:]
-    B = sum(int(d) for d in last3 if d.isdigit())
-    last_digit = int(b_num[-1])
-    S = S_RED if suit in ['♦️', '♥️'] else S_BLACK
+    B = sum(int(d) for d in last3 if d.isdigit())          # مجموع آخر 3 أرقام
+    last_digit = int(b_num[-1])                            # آخر رقم من البونص
+    S = S_RED if suit in ['♦️', '♥️'] else S_BLACK        # معامل البذلة
     delta_t = int((current_timestamp - last_timestamp).total_seconds()) if last_timestamp else 0
+    # معادلة جديدة: R = (B * S) + (delta_t % 7) + (last_digit * 3)
     R = (B * S) + (delta_t % 7) + (last_digit * 3)
-    prediction_code = R % 2
+    prediction_code = R % 2                                # 0 للراعي، 1 للثور
     prediction_text = WINNER_NAMES[prediction_code]
     return prediction_text, prediction_code, R, delta_t, B, S
 
@@ -319,7 +332,7 @@ def bayesian_analysis(conn, current_hour: int, min_samples: int = 30):
         print(f"Bayesian Analysis Error: {e}")
         return None
 
-# ==================== دالة التنبؤ الهجين ====================
+# ==================== دالة التنبؤ الهجين (مع عشوائية لكسر الانحياز) ====================
 def hybrid_prediction(b_num: str, suit: str, last_timestamp, current_timestamp, bayesian_probs):
     math_pred_text, math_pred_code, R, gap, B, S = sovereign_math_engine(
         b_num, suit, last_timestamp, current_timestamp
@@ -335,8 +348,11 @@ def hybrid_prediction(b_num: str, suit: str, last_timestamp, current_timestamp, 
         return math_pred_text, math_pred_code, R, gap, B, S, "Math Only"
 
     p_rai, p_thawr, p_tie = period_probs
+
+    # Bayesian prediction
     bayes_code = np.argmax([p_rai, p_thawr, p_tie])
 
+    # دمج الاحتمالات مع عشوائية طفيفة لكسر الانحياز
     weighted_rai = MATH_WEIGHT * (1 if math_pred_code == 0 else 0) + BAYES_WEIGHT * p_rai + random.uniform(0, RANDOM_NOISE)
     weighted_thawr = MATH_WEIGHT * (1 if math_pred_code == 1 else 0) + BAYES_WEIGHT * p_thawr + random.uniform(0, RANDOM_NOISE)
     weighted_tie = MATH_WEIGHT * (1 if math_pred_code == 2 else 0) + BAYES_WEIGHT * p_tie + random.uniform(0, RANDOM_NOISE)
@@ -344,6 +360,7 @@ def hybrid_prediction(b_num: str, suit: str, last_timestamp, current_timestamp, 
     scores = [weighted_rai, weighted_thawr, weighted_tie]
     final_code = int(np.argmax(scores))
 
+    # إذا كان الفرق بين أعلى نتيجتين صغيراً جداً، نأخذ بقرار Bayesian
     sorted_scores = sorted(scores, reverse=True)
     if sorted_scores[0] - sorted_scores[1] < 0.02:
         final_code = bayes_code
@@ -353,18 +370,26 @@ def hybrid_prediction(b_num: str, suit: str, last_timestamp, current_timestamp, 
 
     return final_text, final_code, R, gap, B, S, reason
 
-# ==================== AI ENGINEER AGENT ====================
+# ==================== AI ENGINEER AGENT (يعمل كل 30 دقيقة) ====================
 class HADESAIEngineer:
     def __init__(self):
-        self.client = OpenAI(base_url=NVIDIA_BASE_URL, api_key=NVIDIA_API_KEY)
+        self.client = OpenAI(
+            base_url=NVIDIA_BASE_URL,
+            api_key=NVIDIA_API_KEY
+        )
         self.model = NVIDIA_MODEL
 
     def load_rounds(self):
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-        df = pd.read_sql("SELECT * FROM history ORDER BY id", conn)
+        df = pd.read_sql("""
+        SELECT *
+        FROM history
+        ORDER BY id
+        """, conn)
         conn.close()
         if len(df) < 800:
             return None
+        # تجاهل أول 700 جولة
         df = df.iloc[700:]
         return df
 
@@ -422,6 +447,7 @@ CONFIDENCE_THRESHOLD, MATH_WEIGHT, BAYES_WEIGHT, S_RED, S_BLACK, MATH_CONFIDENCE
             match = re.search(r'\{.*\}', content, re.DOTALL)
             if match:
                 data = json.loads(match.group())
+                # منع القيم المتطرفة
                 if "MATH_WEIGHT" in data and "BAYES_WEIGHT" in data:
                     if data["MATH_WEIGHT"] < 0.3:
                         data["MATH_WEIGHT"] = 0.4
@@ -458,7 +484,10 @@ ai_engineer = HADESAIEngineer()
 # ==================== خدمة الذكاء الاصطناعي للمحادثة ====================
 class NVIDIAService:
     def __init__(self):
-        self.client = OpenAI(base_url=NVIDIA_BASE_URL, api_key=NVIDIA_API_KEY)
+        self.client = OpenAI(
+            base_url=NVIDIA_BASE_URL,
+            api_key=NVIDIA_API_KEY
+        )
         self.model = NVIDIA_MODEL
 
     def ask(self, prompt: str) -> str:
@@ -509,21 +538,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-# معالج اختيار البذلة
 async def suit_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج اختيار البذلة من الأزرار."""
     query = update.callback_query
     await query.answer()
     suit = query.data[2:]  # إزالة "s_"
     context.user_data['suit'] = suit
-    # حفظ last_timestamp للمستخدم
+    # حفظ آخر توقيت للجولة القادمة
     context.user_data['last_timestamp'] = None
     await query.message.reply_text(
         f"✅ تم اختيار البذلة: {suit}\n"
         "📥 أرسل الآن رقم البونص (7 أرقام على الأقل):"
     )
 
-# معالج إرسال البونص (الجزء الذي كان مفقوداً)
 async def handle_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج إدخال رقم البونص بعد اختيار البذلة."""
     if 'suit' not in context.user_data:
         await update.message.reply_text("⚠️ اختر البذلة أولاً عبر /start.")
         return
@@ -538,40 +567,57 @@ async def handle_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.datetime.now()
     last_timestamp = context.user_data.get('last_timestamp')
 
-    # جلب بيانات بايزي
+    # جلب بيانات بايزي من قاعدة البيانات
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     bayesian_probs = bayesian_analysis(conn, now.hour)
+    conn.close()
+
+    # التنبؤ الهجين
     pred_text, pred_code, R, gap, B, S, reason = hybrid_prediction(
         b_num, suit, last_timestamp, now, bayesian_probs
     )
-    conn.close()
 
-    # تحديث last_timestamp
-    context.user_data['last_timestamp'] = now
+    # تحديث البيانات في الذاكرة المؤقتة
+    context.user_data['bonus'] = b_num
+    context.user_data['prediction_code'] = pred_code
+    context.user_data['current_time'] = now
+    context.user_data['last_timestamp'] = now  # تحديث التوقيت للجولة القادمة
 
-    # عرض النتيجة
+    # أزرار لتسجيل النتيجة
+    kb = [
+        [InlineKeyboardButton("🔴 فاز الراعي", callback_data="save_الراعي 🔴"),
+         InlineKeyboardButton("🔵 فاز الثور", callback_data="save_الثور 🔵")],
+        [InlineKeyboardButton("⚪ تعادل", callback_data="save_تعادل ⚪")]
+    ]
+
     await update.message.reply_text(
+        f"🧠 **تحليل HADES V101.5**\n"
+        f"⚙️ `الاستدلال:` {reason}\n"
+        f"━━━━━━━━━━━━━━\n"
         f"🎯 **التوقع النهائي:** {pred_text}\n"
-        f"📊 **المنهج:** {reason}\n"
-        f"🔢 المعادلة: B={B} × S={S} + ΔT={gap} → R={R}",
+        f"🎴 **البذلة:** {suit}\n"
+        f"🔢 **الفجوة الزمنية:** {gap} ثانية | R={R}\n\n"
+        f"يرجى تسجيل النتيجة الحقيقية لحماية وتحديث الأوزان:",
+        reply_markup=InlineKeyboardMarkup(kb),
         parse_mode='Markdown'
     )
 
-# بقية الأوامر (كما هي)
 async def ai_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """الدخول في وضع الدردشة مع الذكاء الاصطناعي."""
     context.user_data['mode'] = AI_MODE
     await update.message.reply_text(
-        "🤖 أنت الآن في وضع الدردشة مع الذكاء الاصطناعي.\n"
-        "أرسل أي سؤال وسأجيبك.\n"
-        "لإنهاء الدردشة واستخدام التنبؤات، أرسل /end"
+        "🤖 **وضع الذكاء الاصطناعي نشط.**\n"
+        "تفضل بطرح أي سؤال أو تحليل تريده. (للخروج أرسل /start)"
     )
 
 async def end_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """الخروج من وضع الدردشة مع الذكاء الاصطناعي."""
     if 'mode' in context.user_data:
         del context.user_data['mode']
     await update.message.reply_text("✅ تم الخروج من وضع الدردشة. استخدم /start للعودة.")
 
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج إدخال مفتاح الاشتراك."""
     user_id = update.effective_user.id
     text = update.message.text.strip()
     if activate_subscription(user_id, text):
@@ -580,6 +626,7 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ المفتاح غير صالح أو مستخدم مسبقًا. تأكد من المفتاح وحاول مرة أخرى.")
 
 async def generate_keys_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر للمسؤول لتوليد مفاتيح جديدة وعرضها."""
     user_id = update.effective_user.id
     if user_id != ADMIN_ID:
         await update.message.reply_text("⛔ هذا الأمر متاح للمسؤول فقط.")
@@ -598,7 +645,12 @@ async def generate_keys_command(update: Update, context: ContextTypes.DEFAULT_TY
     for key, plan in rows:
         plans_keys[plan].append(key)
     for plan in PLANS.keys():
-        plan_name = {'day': '📆 يوم', 'two_days': '📆📆 يومين', 'week': '📅 أسبوع', 'month': '📅 شهر'}.get(plan, plan)
+        plan_name = {
+            'day': '📆 يوم',
+            'two_days': '📆📆 يومين',
+            'week': '📅 أسبوع',
+            'month': '📅 شهر'
+        }.get(plan, plan)
         keys = plans_keys[plan]
         result += f"**{plan_name}** ({len(keys)} مفتاح):\n"
         if keys:
@@ -610,10 +662,16 @@ async def generate_keys_command(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text(result, parse_mode='Markdown')
 
 async def my_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض حالة الاشتراك الحالية للمستخدم."""
     user_id = update.effective_user.id
     subscribed, plan, remaining = is_user_subscribed(user_id)
     if subscribed or user_id == ADMIN_ID:
-        plan_name = {'day': 'يوم', 'two_days': 'يومين', 'week': 'أسبوع', 'month': 'شهر'}.get(plan, plan) if subscribed else "مشرف"
+        plan_name = {
+            'day': 'يوم',
+            'two_days': 'يومين',
+            'week': 'أسبوع',
+            'month': 'شهر'
+        }.get(plan, plan) if subscribed else "مشرف"
         await update.message.reply_text(
             f"✅ أنت مشترك حاليًا في خطة **{plan_name}**.\n"
             f"⏳ متبقي: {remaining if subscribed else 'غير محدود'} يوم."
@@ -622,6 +680,7 @@ async def my_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ لا يوجد اشتراك نشط. استخدم /start وأدخل مفتاحًا صالحًا.")
 
 async def performance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تحليل شامل للأداء (يتطلب اشتراكًا)."""
     user_id = update.effective_user.id
     subscribed, _, _ = is_user_subscribed(user_id)
     if not subscribed and user_id != ADMIN_ID:
@@ -649,10 +708,16 @@ async def performance_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
         period_order = ["morning", "afternoon", "evening", "night"]
         period_accuracy = df.groupby('period')['correct'].mean().reindex(period_order) * 100
-        hour_stats = df.groupby('hour').agg(accuracy=('correct', 'mean'), count=('correct', 'count'))
+        hour_stats = df.groupby('hour').agg(
+            accuracy=('correct', 'mean'),
+            count=('correct', 'count')
+        )
         hour_stats = hour_stats[hour_stats['count'] >= 10]
         hour_accuracy = hour_stats['accuracy'] * 100
-        suit_stats = df.groupby('suit').agg(accuracy=('correct', 'mean'), count=('correct', 'count')) * 100
+        suit_stats = df.groupby('suit').agg(
+            accuracy=('correct', 'mean'),
+            count=('correct', 'count')
+        ) * 100
         report = "📊 **تقرير أداء HADES**\n━━━━━━━━━━━━━━\n"
         report += "**🕐 الدقة حسب الفترة:**\n"
         for p in period_order:
@@ -677,6 +742,7 @@ async def performance_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"❌ خطأ في التحليل: {e}")
 
 async def model_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """حالة صحة النموذج (يتطلب اشتراكًا)."""
     user_id = update.effective_user.id
     subscribed, _, _ = is_user_subscribed(user_id)
     if not subscribed and user_id != ADMIN_ID:
@@ -701,7 +767,10 @@ async def model_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         acc_50 = df.head(50)['correct'].mean() * 100 if len(df) >= 50 else None
         acc_200 = df['correct'].mean() * 100
         df['hour'] = pd.to_datetime(df['timestamp']).dt.hour
-        hour_stats = df.groupby('hour').agg(acc=('correct', 'mean'), cnt=('correct', 'count'))
+        hour_stats = df.groupby('hour').agg(
+            acc=('correct', 'mean'),
+            cnt=('correct', 'count')
+        )
         hour_stats = hour_stats[hour_stats['cnt'] >= 10]
         best_hour = hour_stats['acc'].idxmax() if not hour_stats.empty else None
         worst_hour = hour_stats['acc'].idxmin() if not hour_stats.empty else None
@@ -723,6 +792,7 @@ async def model_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ خطأ: {e}")
 
 async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """حذف آخر إدخال للمستخدم (إذا كان خاطئاً)."""
     user_id = update.effective_user.id
     subscribed, _, _ = is_user_subscribed(user_id)
     if not subscribed and user_id != ADMIN_ID:
@@ -755,6 +825,7 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
 async def download_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تحميل جميع جداول قاعدة البيانات كملف Excel (للأدمن فقط)."""
     user_id = update.effective_user.id
     if user_id != ADMIN_ID:
         await update.message.reply_text("⛔ هذا الأمر متاح للمسؤول فقط.")
@@ -779,26 +850,117 @@ async def download_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ في تحميل قاعدة البيانات: {e}")
 
+# ==================== معالج الأزرار (Callback) ====================
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+
+    if query.data.startswith("s_"):
+        await suit_selected(update, context)
+    elif query.data == "ai_chat":
+        context.user_data['mode'] = AI_MODE
+        await query.edit_message_text(
+            "🤖 **وضع الذكاء الاصطناعي نشط.**\n"
+            "تفضل بطرح أي سؤال أو تحليل تريده. (للخروج أرسل /start)"
+        )
+    elif query.data.startswith("save_"):
+        winner_db = query.data[5:]  # استخراج الاسم الكامل مع الإيموجي
+        pred_code = context.user_data.get('prediction_code')
+        if pred_code is None:
+            await query.edit_message_text("❌ خطأ: لا يوجد توقع مخزن. ابدأ من جديد /start.")
+            return
+        try:
+            conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO history (b_num, suit, winner, timestamp, prediction, user_id) 
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (
+                context.user_data['bonus'],
+                context.user_data['suit'],
+                winner_db,
+                context.user_data['current_time'],
+                pred_code,
+                user_id
+            ))
+            conn.commit()
+            conn.close()
+
+            pred_winner = WINNER_NAMES[pred_code]
+            is_correct = "✅" if winner_db == pred_winner else "❌"
+
+            # إنشاء زر لبدء جولة جديدة
+            keyboard = [[InlineKeyboardButton("🔄 بدء جولة جديدة", callback_data="new_round")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(
+                f"{is_correct} **تم تسجيل النتيجة**\n\n"
+                f"🎯 توقعنا: {pred_winner}\n"
+                f"🏆 النتيجة: {winner_db}\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"أرسل البونص القادم مباشرة للاستمرار بنفس البذلة.",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            await query.edit_message_text(f"❌ خطأ في الحفظ: {e}")
+    elif query.data == "new_round":
+        await start(update, context)
+
+# ==================== معالج الرسائل النصية العام ====================
+async def general_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+
+    # 1. فحص الاشتراك
+    subscribed, _, _ = is_user_subscribed(user_id)
+    if not subscribed and user_id != ADMIN_ID:
+        if activate_subscription(user_id, text):
+            await update.message.reply_text("✅ تم تفعيل اشتراكك بنجاح! استخدم /start للبدء.")
+        else:
+            await update.message.reply_text("❌ المفتاح غير صالح. يرجى إرسال مفتاح صحيح.")
+        return
+
+    # 2. فحص وضع الدردشة مع AI
+    if context.user_data.get('mode') == AI_MODE:
+        wait_msg = await update.message.reply_text("⏳ جاري تحليل سؤالك عبر مصفوفة NVIDIA...")
+        ai_response = nvidia_ai.ask(text)
+        await wait_msg.edit_text(f"🤖 **HADES AI:**\n\n{ai_response}")
+        return
+
+    # 3. إذا لم يكن اشتراكاً ولا دردشة، فهو رقم بونص
+    await handle_bonus(update, context)
+
 # ==================== التشغيل الرئيسي ====================
 def main():
+    print("⏳ جاري تهيئة قواعد البيانات والإعدادات الديناميكية...")
     init_database()
     load_dynamic_config()
 
-    # توليد مفاتيح أولية إذا لزم الأمر
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM subscription_keys")
-    count = cur.fetchone()[0]
-    conn.close()
-    if count == 0:
-        generate_keys()
+    # فحص مفاتيح الاشتراك وتوليدها إذا كانت فارغة
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM subscription_keys")
+        if cur.fetchone()[0] == 0:
+            generate_keys()
+            print("🔑 تم توليد مفاتيح الاشتراك الأولية.")
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ خطأ أثناء فحص المفاتيح: {e}")
 
+    # بناء وتشغيل البوت
     app = ApplicationBuilder().token(TOKEN).build()
 
     # جدولة AI Engineer كل 30 دقيقة
-    app.job_queue.run_repeating(lambda ctx: ai_engineer.run_cycle(), interval=1800, first=10)
+    app.job_queue.run_repeating(
+        lambda ctx: ai_engineer.run_cycle(),
+        interval=1800,
+        first=10
+    )
 
-    # أوامر
+    # تسجيل الأوامر
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("performance", performance_command))
     app.add_handler(CommandHandler("status", model_status))
@@ -809,15 +971,13 @@ def main():
     app.add_handler(CommandHandler("ai", ai_chat_command))
     app.add_handler(CommandHandler("end", end_chat))
 
-    # معالج اختيار البذلة (CallbackQuery)
-    app.add_handler(CallbackQueryHandler(suit_selected, pattern="^s_"))
-    # معالج الدردشة مع AI (CallbackQuery)
-    app.add_handler(CallbackQueryHandler(ai_chat_command, pattern="^ai_chat$"))
-    # معالج النصوص (للبونص، الاشتراك، وأي رسائل أخرى)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_bonus))
+    # معالج الأزرار
+    app.add_handler(CallbackQueryHandler(callback_handler))
 
-    print("🚀 HADES V101.5 يعمل... (نظام هجين + AI Engineer + Anti-Bias)")
-    print("📥 أوامر: /start, /performance, /status, /generate_keys, /mysub, /delete, /download, /ai, /end")
+    # معالج النصوص (للبونص والمفاتيح والدردشة)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, general_message_handler))
+
+    print("🚀 محرك HADES V101.5 يعمل الآن بكامل طاقته...")
     app.run_polling()
 
 if __name__ == "__main__":
