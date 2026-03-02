@@ -1,7 +1,7 @@
 """
 HADES V101.5 - Anti-Bias Self-Optimizing AI Prediction Bot
 جميع المفاتيح مضمنة، يعمل فوراً على Railway مع PostgreSQL.
-تم تحديث النموذج إلى GLM-5 مع تفعيل التفكير الظاهر.
+تم تحديث النموذج إلى GLM-5 مع تفعيل التفكير الظاهر، وإصلاح مشكلة الاتصال بقاعدة البيانات.
 """
 
 import os
@@ -27,7 +27,8 @@ from openai import OpenAI
 
 # ==================== الإعدادات والثوابت (مضمنة) ====================
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
-DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@postgres.railway.internal:5432/railway"
+# استخدام الرابط العام الصحيح لقاعدة البيانات (بدون internal)
+DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 ADMIN_ID = 6033203084
 
 # تحديث إلى GLM-5 مع المفتاح الجديد
@@ -93,7 +94,7 @@ def period_translate(period: str) -> str:
 # ==================== دوال إدارة قاعدة البيانات والإعدادات ====================
 def init_database():
     """إنشاء الجداول المطلوبة إذا لم تكن موجودة."""
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    conn = psycopg2.connect(DATABASE_URL)  # بدون sslmode
     cur = conn.cursor()
 
     # جدول الاشتراكات
@@ -139,7 +140,7 @@ def init_database():
 def load_dynamic_config():
     """تحميل الإعدادات الديناميكية من قاعدة البيانات وتحديث المتغيرات العامة."""
     global DYNAMIC_CONFIG, CONFIDENCE_THRESHOLD, MATH_WEIGHT, BAYES_WEIGHT, MATH_CONFIDENCE, S_RED, S_BLACK, RANDOM_NOISE
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
     cur.execute("SELECT config_name, config_value FROM ai_settings")
     rows = cur.fetchall()
@@ -163,7 +164,7 @@ def load_dynamic_config():
 def save_dynamic_config(config_updates: Dict[str, Any]):
     """حفظ تحديثات الإعدادات في قاعدة البيانات وتحديث الذاكرة."""
     global DYNAMIC_CONFIG
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
     for name, value in config_updates.items():
         json_value = json.dumps(value)
@@ -179,7 +180,7 @@ def save_dynamic_config(config_updates: Dict[str, Any]):
 
 # ==================== دوال إدارة الاشتراكات ====================
 def generate_keys():
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
     for plan in PLANS.keys():
         for _ in range(5):
@@ -196,7 +197,7 @@ def generate_keys():
     conn.close()
 
 def is_user_subscribed(user_id: int) -> tuple:
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
     cur.execute("""
         SELECT plan, expires_at FROM subscription_keys 
@@ -213,7 +214,7 @@ def is_user_subscribed(user_id: int) -> tuple:
     return False, None, 0
 
 def activate_subscription(user_id: int, key_code: str) -> bool:
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
     cur.execute("SELECT id, plan, is_used FROM subscription_keys WHERE key_code = %s", (key_code,))
     row = cur.fetchone()
@@ -382,7 +383,7 @@ class HADESAIEngineer:
         self.model = NVIDIA_MODEL
 
     def load_rounds(self):
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        conn = psycopg2.connect(DATABASE_URL)
         df = pd.read_sql("""
         SELECT *
         FROM history
@@ -506,7 +507,6 @@ class NVIDIAService:
                 extra_body={"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}},
                 stream=False
             )
-            # نستطيع هنا معالجة التفكير إذا أردنا فصله، لكن سنعيد المحتوى الكامل
             return response.choices[0].message.content
         except Exception as e:
             return f"⚠️ خطأ في الاتصال بالذكاء الاصطناعي: {str(e)}"
@@ -575,7 +575,7 @@ async def handle_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last_timestamp = context.user_data.get('last_timestamp')
 
     # جلب بيانات بايزي من قاعدة البيانات
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    conn = psycopg2.connect(DATABASE_URL)
     bayesian_probs = bayesian_analysis(conn, now.hour)
     conn.close()
 
@@ -639,7 +639,7 @@ async def generate_keys_command(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("⛔ هذا الأمر متاح للمسؤول فقط.")
         return
     generate_keys()
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
     cur.execute("SELECT key_code, plan FROM subscription_keys WHERE is_used = FALSE ORDER BY plan, id")
     rows = cur.fetchall()
@@ -694,7 +694,7 @@ async def performance_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("🔐 يجب أن يكون لديك اشتراك صالح لاستخدام هذا الأمر.")
         return
     try:
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        conn = psycopg2.connect(DATABASE_URL)
         df = pd.read_sql("""
             SELECT winner, prediction, timestamp, suit 
             FROM history 
@@ -756,7 +756,7 @@ async def model_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔐 يجب أن يكون لديك اشتراك صالح لاستخدام هذا الأمر.")
         return
     try:
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        conn = psycopg2.connect(DATABASE_URL)
         df = pd.read_sql("""
             SELECT winner, prediction, timestamp 
             FROM history 
@@ -805,7 +805,7 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not subscribed and user_id != ADMIN_ID:
         await update.message.reply_text("🔐 يجب أن يكون لديك اشتراك صالح لاستخدام هذا الأمر.")
         return
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
     if user_id == ADMIN_ID:
         cur.execute("SELECT id FROM history ORDER BY id DESC LIMIT 1")
@@ -838,7 +838,7 @@ async def download_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ هذا الأمر متاح للمسؤول فقط.")
         return
     try:
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        conn = psycopg2.connect(DATABASE_URL)
         history_df = pd.read_sql("SELECT * FROM history ORDER BY id", conn)
         keys_df = pd.read_sql("SELECT * FROM subscription_keys ORDER BY id", conn)
         settings_df = pd.read_sql("SELECT * FROM ai_settings ORDER BY id", conn)
@@ -878,7 +878,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ خطأ: لا يوجد توقع مخزن. ابدأ من جديد /start.")
             return
         try:
-            conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+            conn = psycopg2.connect(DATABASE_URL)
             cur = conn.cursor()
             cur.execute("""
                 INSERT INTO history (b_num, suit, winner, timestamp, prediction, user_id) 
@@ -947,7 +947,7 @@ def main():
 
     # فحص مفاتيح الاشتراك وتوليدها إذا كانت فارغة
     try:
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM subscription_keys")
         if cur.fetchone()[0] == 0:
