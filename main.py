@@ -18,7 +18,7 @@ from telegram.ext import (
 )
 from openai import OpenAI
 
-# ==================== 🛡️ الإعدادات الأساسية (كما طلبت - دون تغيير) ====================
+# ==================== 🛡️ الإعدادات الأساسية ====================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -27,12 +27,10 @@ TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 ADMIN_ID = 6033203084
 
-# 🔄 المفاتيح المحدثة للنموذج الجديد
 NVIDIA_API_KEY = "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"
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_MODEL = "minimaxai/minimax-m2.5"
 
-# ثوابت النظام
 WARMUP_ROUNDS = 700
 WINNER_MAP = {'الراعي 🔴': 0, 'راعي': 0, 'الثور 🔵': 1, 'ثور': 1, 'تعادل ⚪': 2, 'تعادل': 2, '🔴': 0, '🔵': 1, '⚪': 2}
 WINNER_NAMES = {0: 'الراعي 🔴', 1: 'الثور 🔵', 2: 'تعادل ⚪'}
@@ -47,9 +45,9 @@ def load_filtered_history(min_id: int = WARMUP_ROUNDS + 1) -> pd.DataFrame:
         conn = get_db_connection()
         query = f"""
             SELECT id, b_num, suit, winner, timestamp, prediction, user_id,
-                   final_prediction, gap_pred, math_pred, file_pred, created_at            FROM history 
-            WHERE winner IS NOT NULL AND id >= {min_id}
-            ORDER BY id ASC
+                   final_prediction, gap_pred, math_pred, file_pred, created_at
+            FROM history 
+            WHERE winner IS NOT NULL AND id >= {min_id}            ORDER BY id ASC
         """
         df = pd.read_sql(query, conn)
         conn.close()
@@ -96,9 +94,9 @@ def get_latest_stats(df: pd.DataFrame) -> Dict[str, Any]:
             top = subset['winner'].value_counts().idxmax()
             digit_winner[str(digit)] = {'top_winner': top, 'count': len(subset)}
     stats['patterns']['last_digit'] = digit_winner
-    if 'timestamp' in df.columns and df['timestamp'].notna().any():        df['hour'] = df['timestamp'].dt.hour
-        hourly = df.groupby('hour')['winner'].value_counts().unstack(fill_value=0)
-        stats['time_analysis']['hourly'] = hourly.to_dict() if not hourly.empty else {}
+    if 'timestamp' in df.columns and df['timestamp'].notna().any():
+        df['hour'] = df['timestamp'].dt.hour
+        hourly = df.groupby('hour')['winner'].value_counts().unstack(fill_value=0)        stats['time_analysis']['hourly'] = hourly.to_dict() if not hourly.empty else {}
     return stats
 
 # ==================== 🤖 محرك الذكاء الاصطناعي ====================
@@ -145,9 +143,9 @@ class AdvancedAIEngine:
                 model=self.model,
                 messages=[
                     {"role": "system", "content": "أجب بصيغة JSON صالحة فقط. لا تضيف أي نص إضافي."},
-                    {"role": "user", "content": prompt}                ],
-                temperature=temperature,
-                max_tokens=2000
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=temperature,                max_tokens=2000
             )
             content = response.choices[0].message.content
             match = re.search(r'\{.*\}', content, re.DOTALL)
@@ -183,39 +181,41 @@ class AdvancedAIEngine:
             }
         return {'prediction': '⚠️ تعذر', 'reason': 'خطأ في التحليل', 'confidence': 0}
 
-# ==================== 🎮 معالجات البوت الأساسية (واجهة أزرار) ====================
+# ==================== 🎮 معالجات البوت الأساسية ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """أمر البداية - واجهة أزرار رئيسية"""
-    user_id = update.effective_user.id
-    df = load_filtered_history()
-    stats = get_latest_stats(df) if not df.empty else {}
-    
-    # زر رئيسي مع ملخص سريع
-    kb = [
-        [InlineKeyboardButton("🎴 اختيار البذلة", callback_data="choose_suit")],
-        [InlineKeyboardButton("📊 تحليل البيانات", callback_data="view_stats")],        [InlineKeyboardButton("🤖 تنبؤ AI", callback_data="ai_predict")],
-        [InlineKeyboardButton("📜 القوانين المكتشفة", callback_data="view_laws")]
-    ]
-    
-    if user_id == ADMIN_ID:
-        kb.append([
-            InlineKeyboardButton("🎛️ لوحة الأدمن", callback_data="admin_panel"),
-            InlineKeyboardButton("📤 تصدير", callback_data="admin_export")
-        ])
-    
-    summary = f"🏛️ **HADES V103**\n📊 جولات: {stats.get('total_rounds', 0)} | 🎯 دقة: {stats.get('accuracy', 'N/A') if stats.get('accuracy') else 'جاري التعلم'}"
-    
-    await update.message.reply_text(summary, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    try:
+        user_id = update.effective_user.id
+        df = load_filtered_history()
+        stats = get_latest_stats(df) if not df.empty else {}
+        
+        kb = [
+            [InlineKeyboardButton("🎴 اختيار البذلة", callback_data="choose_suit")],
+            [InlineKeyboardButton("📊 تحليل البيانات", callback_data="view_stats")],
+            [InlineKeyboardButton("🤖 تنبؤ AI", callback_data="ai_predict")],
+            [InlineKeyboardButton("📜 القوانين المكتشفة", callback_data="view_laws")]        ]
+        
+        if user_id == ADMIN_ID:
+            kb.append([
+                InlineKeyboardButton("🎛️ لوحة الأدمن", callback_data="admin_panel"),
+                InlineKeyboardButton("📤 تصدير", callback_data="admin_export")
+            ])
+        
+        summary = f"🏛️ **HADES V103**\n📊 جولات: {stats.get('total_rounds', 0)} | 🎯 دقة: {stats.get('accuracy', 'جاري التعلم') if stats.get('accuracy') else 'جاري التعلم'}"
+        
+        await update.message.reply_text(summary, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"❌ خطأ في /start: {e}")
+        await update.message.reply_text("⚠️ حدث خطأ، حاول مرة أخرى")
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج الأزرار التفاعلية - النظام المركزي"""
+    """معالج الأزرار التفاعلية"""
     query = update.callback_query
     await query.answer()
     data = query.data
     user_id = update.effective_user.id
     
-    # === اختيار البذلة ===
     if data == "choose_suit":
         kb = [[InlineKeyboardButton(s, callback_data=f"s_{s}") for s in SUITS[:2]],
               [InlineKeyboardButton(s, callback_data=f"s_{s}") for s in SUITS[2:]],
@@ -228,33 +228,28 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [[InlineKeyboardButton("🔙 رجوع للبذلات", callback_data="choose_suit")]]
         await query.edit_message_text(f"✅ البذلة: {suit}\n📥 أرسل رقم البونص (7+ أرقام) للتحليل:", reply_markup=InlineKeyboardMarkup(kb))
     
-    # === عرض الإحصائيات ===
     elif data == "view_stats":
         df = load_filtered_history()
         stats = get_latest_stats(df)
         if not stats:
             await query.answer("❌ لا توجد بيانات", show_alert=True)
             return
-        
         report = f"""📊 **إحصائيات HADES V103**
 🔢 جولات: {stats.get('total_rounds', 0)}
 🏆 توزيع:
 • 🔴: {stats['bias'].get('red', 0):.1%}
 • 🔵: {stats['bias'].get('blue', 0):.1%}
 • ⚪: {stats['bias'].get('tie', 0):.1%}"""
-        
-        kb = [[InlineKeyboardButton("🔄 تحديث", callback_data="view_stats")],              [InlineKeyboardButton("🔙 الرئيسية", callback_data="start_back")]]
+        kb = [[InlineKeyboardButton("🔄 تحديث", callback_data="view_stats")],
+              [InlineKeyboardButton("🔙 الرئيسية", callback_data="start_back")]]
         await query.edit_message_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
-    # === التنبؤ بالذكاء الاصطناعي ===
-    elif data == "ai_predict":
+        elif data == "ai_predict":
         if 'suit' not in context.user_data:
             await query.answer("⚠️ اختر بذلة أولاً", show_alert=True)
             return
         await query.answer("📥 أرسل رقم البونص الآن", show_alert=True)
         context.user_data['awaiting_bonus'] = True
     
-    # === عرض القوانين ===
     elif data == "view_laws":
         try:
             conn = get_db_connection()
@@ -262,25 +257,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cur.execute("SELECT law_name, confidence_score FROM ai_laws WHERE is_active=TRUE ORDER BY confidence_score DESC LIMIT 5")
             laws = cur.fetchall()
             conn.close()
-            
             if not laws:
                 await query.answer("لا توجد قوانين مكتشفة بعد", show_alert=True)
                 return
-            
             report = "📜 **أهم 5 قوانين مكتشفة:**\n"
             kb = []
             for i, (name, conf) in enumerate(laws, 1):
                 report += f"{i}. {name} (ثقة: {conf:.0%})\n"
-                kb.append([InlineKeyboardButton(f"🔍 تفاصيل #{i}", callback_data=f"law_detail_{i}")])
-            
             kb.append([InlineKeyboardButton("🔙 الرئيسية", callback_data="start_back")])
             await query.edit_message_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-            
         except Exception as e:
             logger.error(f"❌ خطأ عرض القوانين: {e}")
             await query.answer("خطأ في جلب القوانين", show_alert=True)
     
-    # === لوحة الأدمن ===
     elif data == "admin_panel" and user_id == ADMIN_ID:
         kb = [
             [InlineKeyboardButton("📊 تحليل شامل", callback_data="admin_analyze")],
@@ -292,47 +281,34 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "admin_analyze" and user_id == ADMIN_ID:
         await query.edit_message_text("🔄 جاري التحليل...")
         df = load_filtered_history()
-        stats = get_latest_stats(df)        ai_engine = AdvancedAIEngine()
-        
+        stats = get_latest_stats(df)
         if stats:
             report = f"""📊 **تحليل شامل**
 • جولات: {stats.get('total_rounds', 0)}
 • دقة: {stats.get('accuracy', 'N/A')}
 • انحياز 🔴: {stats['bias'].get('red', 0):.1%}"""
-            
-            # تحليل AI إضافي
-            ai_prompt = ai_engine.generate_analysis_prompt(stats, df)
-            ai_result = ai_engine.ask_json(ai_prompt)
-            if ai_result and ai_result.get('next_round_strategy'):
-                report += f"\n\n🤖 **توصية AI:**\n{ai_result['next_round_strategy']}"
-            
             kb = [[InlineKeyboardButton("🔄 تحديث", callback_data="admin_analyze")],
                   [InlineKeyboardButton("🔙 لوحة الأدمن", callback_data="admin_panel")]]
             await query.message.reply_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     
     elif data == "admin_export" and user_id == ADMIN_ID:
-        await export_laws_command(update, context)
-        await query.answer("✅ تم بدء التصدير", show_alert=True)
+        await export_laws_command(update, context)        await query.answer("✅ تم بدء التصدير", show_alert=True)
     
     elif data == "admin_reload" and user_id == ADMIN_ID:
-        # إعادة تحميل البيانات من القاعدة
         context.user_data.pop('suit', None)
         context.user_data.pop('last_b', None)
         await query.answer("✅ تم إعادة التحميل", show_alert=True)
         await start(update, context)
     
-    # === الرجوع ===
     elif data == "start_back":
         await start(update, context)
     
-    # === حفظ النتيجة (من أزرار التنبؤ) ===
     elif data.startswith("save_"):
         parts = data.split("_")
         if len(parts) >= 4:
             b_num = parts[1]
             suit = parts[2]
             winner = "_".join(parts[3:])
-            
             try:
                 conn = get_db_connection()
                 cur = conn.cursor()
@@ -341,60 +317,48 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     VALUES (%s, %s, %s, %s, %s, %s)
                 """, (b_num, suit, winner, datetime.datetime.now(), 
                       WINNER_MAP.get(winner.split()[0], -1), user_id))
-                conn.commit()                conn.close()
-                
+                conn.commit()
+                conn.close()
                 kb = [[InlineKeyboardButton("🔄 جولة جديدة", callback_data="choose_suit")]]
                 await query.edit_message_text(f"✅ سُجّل: {winner}\n🔄 جاهز للجولة التالية:", reply_markup=InlineKeyboardMarkup(kb))
-                
             except Exception as e:
                 logger.error(f"❌ خطأ الحفظ: {e}")
                 await query.answer("❌ خطأ في الحفظ", show_alert=True)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج الرسائل - يحول المدخلات إلى تفاعل بالأزرار"""
+    """معالج الرسائل النصية"""
     text = update.message.text.strip()
     user_id = update.effective_user.id
     
-    # === حالة انتظار رقم البونص ===
     if context.user_data.get('awaiting_bonus') and text.isdigit() and len(text) >= 7:
         if 'suit' not in context.user_data:
             await update.message.reply_text("⚠️ اختر البذلة أولاً عبر /start")
             return
-        
         suit = context.user_data['suit']
         await update.message.reply_text(f"🔄 جاري تحليل {text} | {suit}...")
-        
         df = load_filtered_history()
         if df.empty:
             await update.message.reply_text("❌ لا توجد بيانات كافية")
             return
-        
         ai_engine = AdvancedAIEngine()
-        result = ai_engine.generate_prediction_command(df, text, suit)
-        
-        # عرض التنبؤ كأزرار بدلاً من نص
-        prediction = result['prediction']
+        result = ai_engine.generate_prediction_command(df, text, suit)        prediction = result['prediction']
         reason = result['reason']
         confidence = result['confidence']
-        
         report = f"""🎯 **تنبؤ HADES V103**
 🏆 النتيجة: **{prediction}**
 📋 السبب: {reason}
 📊 الثقة: {confidence:.0%}
 🎴 البذلة: {suit}"""
-        
-        # أزرار تسجيل النتيجة
         kb = [
             [InlineKeyboardButton("🔴 راعي", callback_data=f"save_{text}_{suit}_الراعي 🔴"),
              InlineKeyboardButton("🔵 ثور", callback_data=f"save_{text}_{suit}_الثور 🔵")],
             [InlineKeyboardButton("⚪ تعادل", callback_data=f"save_{text}_{suit}_تعادل ⚪")],
             [InlineKeyboardButton("🔄 تحليل جديد", callback_data="ai_predict")]
         ]
-                await update.message.reply_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        await update.message.reply_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
         context.user_data['awaiting_bonus'] = False
         return
     
-    # === أوامر سريعة عبر نص ===
     if text.lower() in ['تحليل', 'stats', '/analyze']:
         if user_id == ADMIN_ID:
             await analyze_command(update, context)
@@ -407,7 +371,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start(update, context)
         return
     
-    # === رد افتراضي بأزرار التوجيه ===
     kb = [
         [InlineKeyboardButton("🎴 البدء", callback_data="choose_suit")],
         [InlineKeyboardButton("📊 الإحصائيات", callback_data="view_stats")],
@@ -415,23 +378,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text("🏛️ **HADES V103**\nاختر من القائمة للبدء:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
-# ==================== 📊 أوامر الأدمن (تبقى نصية للإدارة) ====================
+# ==================== 📊 أوامر الأدمن ====================
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("❌ للأدمن فقط")
         return
-    
     df = load_filtered_history()
     if df.empty:
         await update.message.reply_text("❌ لا توجد بيانات")
         return
-    
     stats = get_latest_stats(df)
     report = f"""📊 **تقرير HADES V103**
 🔢 جولات: {stats.get('total_rounds', 0)}
-🏆 🔴:{stats['bias'].get('red',0):.1%} 🔵:{stats['bias'].get('blue',0):.1%} ⚪:{stats['bias'].get('tie',0):.1%}
-🎯 دقة: {stats.get('accuracy', 'N/A')}"""
-    
+🏆 🔴:{stats['bias'].get('red',0):.1%} 🔵:{stats['bias'].get('blue',0):.1%} ⚪:{stats['bias'].get('tie',0):.1%}🎯 دقة: {stats.get('accuracy', 'N/A')}"""
     kb = [[InlineKeyboardButton("🔙 الرئيسية", callback_data="start_back")]]
     await update.message.reply_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
@@ -439,12 +398,12 @@ async def export_laws_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("❌ للأدمن فقط")
         return
-    try:        conn = get_db_connection()
+    try:
+        conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("SELECT law_name, confidence_score FROM ai_laws WHERE is_active=TRUE ORDER BY confidence_score DESC LIMIT 10")
         laws = cur.fetchall()
         conn.close()
-        
         report = "📜 **القوانين النشطة:**\n" + "\n".join([f"• {name} ({conf:.0%})" for name, conf in laws])
         await update.message.reply_text(report)
     except Exception as e:
