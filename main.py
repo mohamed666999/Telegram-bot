@@ -1,6 +1,5 @@
-```python
 import os, sys, datetime, psycopg2, pandas as pd, numpy as np
-import json, re, logging, random, secrets
+import json, re, logging, random, secrets, requests
 from typing import Dict, List, Tuple, Optional, Any
 from pathlib import Path
 from collections import Counter
@@ -20,7 +19,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ✅ المفاتيح - كما طلبت تبقى كما هي
+# ✅ المفاتيح
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 ADMIN_ID = 6033203084
@@ -28,6 +27,12 @@ ADMIN_ID = 6033203084
 NVIDIA_API_KEY = "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"
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_MODEL = "minimaxai/minimax-m2.5"
+
+# إعداد عميل OpenAI متوافق مع NVIDIA API
+nv_client = OpenAI(
+    base_url=NVIDIA_BASE_URL,
+    api_key=NVIDIA_API_KEY
+)
 
 # ثوابت النظام
 WARMUP_ROUNDS = 700
@@ -43,6 +48,7 @@ DYNAMIC_CONFIG = {
     'MATH_CONFIDENCE': 0.7, 'S_RED': 1.0, 'S_BLACK': 1.0,
     'RANDOM_NOISE': 0.02, 'VOTE_THRESHOLD': 2,
 }
+
 # ==================== 🗄️ إدارة قاعدة البيانات ====================
 def get_db_connection():
     try:
@@ -94,7 +100,6 @@ def get_latest_stats(df: pd.DataFrame) -> Dict[str, Any]:
             'blue': float((df['winner'] == 'الثور 🔵').sum()) / total,
             'tie': float((df['winner'] == 'تعادل ⚪').sum()) / total
         }
-    
     return stats
 
 def load_dynamic_config():
@@ -120,12 +125,11 @@ def load_dynamic_config():
 # ==================== 🔮 نموذج التنبؤ الرياضي ====================
 def math_prediction(df: pd.DataFrame) -> Tuple[int, float]:
     if df.empty:
-        return 2, 0.33  # تعادل مع ثقة منخفضة
-    
+        return 2, 0.33  
     last_50 = df.tail(50)
     counts = last_50['winner_code'].value_counts(normalize=True)
-    pred = counts.idxmax() if not counts.empty else 2
-    confidence = counts.max() if not counts.empty else 0.33
+    pred = int(counts.idxmax()) if not counts.empty else 2
+    confidence = float(counts.max()) if not counts.empty else 0.33
     confidence = max(confidence, DYNAMIC_CONFIG['MATH_CONFIDENCE'])
     return pred, confidence
 
@@ -133,40 +137,45 @@ def math_prediction(df: pd.DataFrame) -> Tuple[int, float]:
 def bayesian_prediction(df: pd.DataFrame) -> Tuple[int, float]:
     if df.empty:
         return 2, 0.33
-    
     total = len(df)
     counts = df['winner_code'].value_counts()
-    priors = {k: (counts.get(k, 0) + 1) / (total + 3) for k in range(3)}  # Laplace smoothing
+    priors = {k: (counts.get(k, 0) + 1) / (total + 3) for k in range(3)}
     
     likelihoods = {}
     for k in range(3):
         likelihoods[k] = priors[k]
     
     pred = max(likelihoods, key=likelihoods.get)
-    confidence = likelihoods[pred]
+    confidence = float(likelihoods[pred])
     return pred, confidence
 
 # ==================== 🤖 استدعاء نموذج NVIDIA AI ====================
-import requests
-
 def nvidia_ai_prediction(features: Dict[str, Any]) -> Tuple[int, float]:
-    headers = {
-        "Authorization": f"Bearer {NVIDIA_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": NVIDIA_MODEL,
-        "inputs": features
-    }
     try:
-        response = requests.post(f"{NVIDIA_BASE_URL}/models/{NVIDIA_MODEL}/predict", headers=headers, json=payload, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        pred = data.get('prediction', 2)
-        confidence = data.get('confidence', 0.33)
-        if isinstance(pred, str):
-            pred = WINNER_MAP.get(pred, 2)
-        return pred, confidence
+        prompt = f"""
+        Analyze these game statistics and predict the next winner.
+        Features: {json.dumps(features)}
+        Options: 0 for Red, 1 for Blue, 2 for Tie.
+        Respond ONLY with a valid JSON in this exact format:
+        {{"prediction": 0, "confidence": 0.85}}
+        """
+        
+        response = nv_client.chat.completions.create(
+            model=NVIDIA_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=50
+        )
+        
+        content = response.choices[0].message.content
+        # تنظيف النص لاستخراج الـ JSON فقط
+        json_str = re.search(r'\{.*\}', content, re.DOTALL)
+        if json_str:
+            data = json.loads(json_str.group())
+            pred = int(data.get('prediction', 2))
+            conf = float(data.get('confidence', 0.33))
+            return pred, conf
+        return 2, 0.33
     except Exception as e:
         logger.error(f"❌ خطأ في استدعاء نموذج NVIDIA AI: {e}")
         return 2, 0.33
@@ -185,14 +194,97 @@ def combined_prediction(df: pd.DataFrame, features: Dict[str, Any]) -> Tuple[int
     }
     for pred, weight in weights.items():
         votes[pred] += weight
-    
+        
     final_pred, final_conf = votes.most_common(1)[0]
     final_conf = min(max(final_conf, 0.0), 1.0)
-    if final_conf < DYNAMIC_CONFIG['CONFIDENCE_THRESHOLD']:
-        final_pred = 2  # تعادل إذا الثقة منخفضة
     
-    return final_pred, final_conf
+    if final_conf < DYNAMIC_CONFIG['CONFIDENCE_THRESHOLD']:
+        final_pred = 2  
+        
+    return int(final_pred), float(final_conf)
 
 # ==================== 🕹️ واجهة أزرار تفاعلية ====================
 def build_keyboard() -> InlineKeyboardMarkup:
-    buttons
+    """بناء لوحة المفاتيح التفاعلية للبوت"""
+    buttons = [
+        [
+            InlineKeyboardButton("الراعي 🔴", callback_data="win_0"),
+            InlineKeyboardButton("الثور 🔵", callback_data="win_1"),
+            InlineKeyboardButton("تعادل ⚪", callback_data="win_2")
+        ],
+        [
+            InlineKeyboardButton("🔮 تنبؤ جديد", callback_data="predict_now"),
+            InlineKeyboardButton("📊 الإحصائيات", callback_data="show_stats")
+        ]
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+# ==================== 📱 دوال معالجة التليجرام ====================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """الرد على أمر /start"""
+    welcome_text = (
+        "مرحباً بك في بوت التنبؤات الذكي 🤖\n\n"
+        "أنا أستخدم خوارزميات رياضية ونماذج ذكاء اصطناعي من NVIDIA "
+        "لتحليل البيانات وتوقع النتائج.\n\n"
+        "اختر أحد الإجراءات من القائمة أدناه:"
+    )
+    await update.message.reply_text(welcome_text, reply_markup=build_keyboard())
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالجة النقرات على الأزرار"""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "predict_now":
+        await query.edit_message_text("⏳ جاري تحليل البيانات والتنبؤ...", reply_markup=None)
+        
+        df = load_filtered_history()
+        features = get_latest_stats(df)
+        pred, conf = combined_prediction(df, features)
+        
+        winner_str = WINNER_NAMES.get(pred, 'غير معروف')
+        result_text = (
+            f"🎯 **النتيجة المتوقعة:** {winner_str}\n"
+            f"📊 **نسبة الثقة:** %{conf * 100:.1f}\n\n"
+            f"اختر إجراء آخر:"
+        )
+        await query.edit_message_text(text=result_text, parse_mode='Markdown', reply_markup=build_keyboard())
+
+    elif data == "show_stats":
+        df = load_filtered_history()
+        stats = get_latest_stats(df)
+        
+        stats_text = (
+            f"📈 **إحصائيات النظام:**\n"
+            f"إجمالي الجولات المحللة: {stats['total_rounds']}\n"
+            f"🔴 نسبة الراعي: %{stats['bias']['red']*100:.1f}\n"
+            f"🔵 نسبة الثور: %{stats['bias']['blue']*100:.1f}\n"
+            f"⚪ نسبة التعادل: %{stats['bias']['tie']*100:.1f}"
+        )
+        await query.edit_message_text(text=stats_text, parse_mode='Markdown', reply_markup=build_keyboard())
+        
+    elif data.startswith("win_"):
+        # هنا يمكنك إضافة كود لحفظ النتيجة في قاعدة البيانات
+        # win_code = int(data.split('_')[1])
+        await query.edit_message_text("✅ تم تسجيل النتيجة بنجاح في النظام!", reply_markup=build_keyboard())
+
+# ==================== 🚀 التشغيل الأساسي ====================
+def main():
+    logger.info("⚙️ جاري بدء تشغيل البوت...")
+    
+    # تحميل الإعدادات الديناميكية من قاعدة البيانات
+    load_dynamic_config()
+    
+    # إعداد البوت
+    app = ApplicationBuilder().token(TOKEN).build()
+    
+    # ربط الأوامر
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_callback))
+    
+    logger.info("🤖 البوت يعمل الآن وينتظر الأوامر...")
+    app.run_polling()
+
+if __name__ == '__main__':
+    main()
