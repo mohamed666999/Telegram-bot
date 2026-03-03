@@ -1,7 +1,7 @@
 python-telegram-bot[job-queue]==20.7
-psycopg2-binary
-pandas
-numpy
+psycopg2-binary==2.9.9
+pandas==2.0.3
+numpy==1.24.3
 openai==1.6.1
-python-dotenv
-openpyxl
+python-dotenv==1.0.0
+openpyxl==3.1.2
