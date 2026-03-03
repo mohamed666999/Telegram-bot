@@ -21,13 +21,15 @@ from openai import OpenAI
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ⚠️ استبدل هذه القيم بمتغيرات بيئة في الإنتاج
-TOKEN = os.getenv("TELEGRAM_TOKEN", "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s")
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway")
+# ✅ تم إدخال المفاتيح مباشرة كما طلبت
+TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
+DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 ADMIN_ID = 6033203084
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "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")
+
+# 🔄 تم التحديث إلى المفتاح والنموذج الجديدين (minimax-m2.5)
+NVIDIA_API_KEY = "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"
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-NVIDIA_MODEL = "stepfun-ai/step-3.5-flash"
+NVIDIA_MODEL = "minimaxai/minimax-m2.5"
 
 # ثوابت النظام
 WARMUP_ROUNDS = 700  # عدد الجولات التي سيتم تجاهلها
@@ -47,7 +49,8 @@ def load_filtered_history(min_id: int = WARMUP_ROUNDS + 1) -> pd.DataFrame:
             SELECT id, b_num, suit, winner, timestamp, prediction, user_id,
                    final_prediction, gap_pred, math_pred, file_pred, created_at
             FROM history 
-            WHERE winner IS NOT NULL AND id >= {min_id}            ORDER BY id ASC
+            WHERE winner IS NOT NULL AND id >= {min_id}
+            ORDER BY id ASC
         """
         df = pd.read_sql(query, conn)
         conn.close()
@@ -96,7 +99,8 @@ def get_latest_stats(df: pd.DataFrame) -> Dict[str, Any]:
     suit_winner = {}
     for suit in SUITS:
         subset = df[df['suit'] == suit]
-        if len(subset) >= 10:            top = subset['winner'].value_counts().idxmax()
+        if len(subset) >= 10:
+            top = subset['winner'].value_counts().idxmax()
             freq = subset['winner'].value_counts().max() / len(subset)
             suit_winner[suit] = {'top_winner': top, 'frequency': round(freq, 3)}
     stats['patterns']['suit_winner'] = suit_winner
@@ -292,7 +296,8 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🎯 **تنبؤ HADES V103**\n\n{prediction}", parse_mode='Markdown')
 
 async def export_laws_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/export_laws - تصدير القوانين المكتشفة كملف JSON"""    if update.effective_user.id != ADMIN_ID:
+    """/export_laws - تصدير القوانين المكتشفة كملف JSON"""
+    if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("❌ للأدمن فقط")
         return
     
@@ -341,7 +346,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     status_msg = f"""🏛️ **HADES V103 - نظام التحليل المتقدم**
 
-📊 حالة البيانات:• جولات محللة: {stats.get('total_rounds', 0)} (بعد استبعاد أول {WARMUP_ROUNDS})
+📊 حالة البيانات:
+• جولات محللة: {stats.get('total_rounds', 0)} (بعد استبعاد أول {WARMUP_ROUNDS})
 • دقة النظام: {stats.get('accuracy', 'N/A') if stats.get('accuracy') else 'جاري التعلم'}
 
 🎮 الأوامر المتاحة:
@@ -388,8 +394,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         summary = f"📈 **ملخص سريع**\n• جولات: {stats.get('total_rounds', 0)}\n• انحياز أحمر: {stats.get('bias', {}).get('red', 0):.1%}\n• انحياز أزرق: {stats.get('bias', {}).get('blue', 0):.1%}"
         await query.message.reply_text(summary, parse_mode='Markdown')
     
+    elif query.data == "admin_export" and update.effective_user.id == ADMIN_ID:
+        await export_laws_command(update, context)
+    
     elif query.data == "start_back":
         await start(update, context)
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """معالج الرسائل النصية"""
     text = update.message.text.strip()
@@ -439,7 +449,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         suit = context.user_data['suit']
         await update.message.reply_text(f"🔄 جاري تحليل {text} | {suit}...")
-                df = load_filtered_history()
+        
+        df = load_filtered_history()
         if df.empty:
             await update.message.reply_text("❌ لا توجد بيانات كافية")
             return
@@ -478,13 +489,11 @@ if __name__ == "__main__":
     
     # تسجيل المعالجات
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("analyze", analyze_command))      # 🆕 تحليل شامل
-    app.add_handler(CommandHandler("predict", predict_command))       # 🆕 تنبؤ دقيق
-    app.add_handler(CommandHandler("export_laws", export_laws_command)) # 🆕 تصدير القوانين
+    app.add_handler(CommandHandler("analyze", analyze_command))
+    app.add_handler(CommandHandler("predict", predict_command))
+    app.add_handler(CommandHandler("export_laws", export_laws_command))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("✅ البوت جاهز. نظام التحليل V103 نشط.")
-    logger.info(f"📌 يتم تجاهل أول {WARMUP_ROUNDS} جولة تلقائياً")
-    
+    logger.info("✅ البوت جاهز للاستقبال")
     app.run_polling(drop_pending_updates=True)
