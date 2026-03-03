@@ -1,6 +1,7 @@
 """
-HADES V106 - Ultimate Hybrid AI System
-النظام المتكامل: ذكاء اصطناعي بخلفية ذاتية التطور + ميزة تصحيح الجولات الخاطئة (Undo)
+HADES V107 - Ultimate Stable Version
+تم إصلاح مشكلة تجميد الأزرار، دعم أرقام البونص الطويلة،
+والاحتفاظ بالبذلة للعب المتواصل دون إعادة اختيارها.
 """
 
 import os, sys, datetime, psycopg2, pandas as pd, numpy as np
@@ -32,7 +33,13 @@ NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_MODEL = "minimaxai/minimax-m2.5"
 
 WARMUP_ROUNDS = 700
-WINNER_MAP = {'الراعي 🔴': 0, 'راعي': 0, 'الثور 🔵': 1, 'ثور': 1, 'تعادل ⚪': 2, 'تعادل': 2, '🔴': 0, '🔵': 1, '⚪': 2}
+# خريطة موسعة تمنع أي خطأ في قراءة الفائز
+WINNER_MAP = {
+    'الراعي 🔴': 0, 'راعي': 0, 'الراعي': 0, '🔴': 0,
+    'الثور 🔵': 1, 'ثور': 1, 'الثور': 1, '🔵': 1,
+    'تعادل ⚪': 2, 'تعادل': 2, '⚪': 2,
+    0: 0, 1: 1, 2: 2
+}
 WINNER_NAMES = {0: 'الراعي 🔴', 1: 'الثور 🔵', 2: 'تعادل ⚪'}
 SUITS = ['♦️', '♥️', '♠️', '♣️']
 
@@ -43,19 +50,14 @@ def get_db_connection():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
 def ensure_columns():
-    """التأكد من وجود الأعمدة من الكود القديم (مثل user_id) وجداول الـ AI الجديدة"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        
-        # إضافة user_id لو لم يكن موجوداً
         cur.execute("""
             DO $$ BEGIN
                 ALTER TABLE history ADD COLUMN user_id BIGINT;
             EXCEPTION WHEN duplicate_column THEN NULL; END $$;
         """)
-        
-        # جداول الـ AI
         cur.execute("""CREATE TABLE IF NOT EXISTS ai_laws (
             law_name VARCHAR(100) PRIMARY KEY,
             law_pattern JSONB,
@@ -63,7 +65,6 @@ def ensure_columns():
             fail_count INT DEFAULT 0,
             is_active BOOLEAN DEFAULT TRUE,
             last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
-            
         conn.commit()
         conn.close()
     except Exception as e:
@@ -79,7 +80,7 @@ def load_history(limit: int = 1000) -> pd.DataFrame:
     except:
         return pd.DataFrame()
 
-# ==================== 🤖 محرك الذكاء الاصطناعي (Async) ====================
+# ==================== 🤖 محرك الذكاء الاصطناعي ====================
 class AsyncAIEngine:
     def __init__(self):
         self.client = AsyncOpenAI(api_key=NVIDIA_API_KEY, base_url=NVIDIA_BASE_URL, timeout=10.0)
@@ -98,18 +99,16 @@ class AsyncAIEngine:
             content = response.choices[0].message.content
             match = re.search(r'\{.*\}', content, re.DOTALL)
             if match: return json.loads(match.group())
-        except Exception as e:
-            logger.error(f"❌ AI API Error: {e}")
-        return None
+        except Exception:
+            return None
 
 ai_engine = AsyncAIEngine()
 
-# ==================== ⚙️ مهام الخلفية الذاتية (Background Jobs) ====================
+# ==================== ⚙️ المهام الذاتية (Background Jobs) ====================
 async def task_5m_quick_sync(context: ContextTypes.DEFAULT_TYPE):
     df = load_history(50)
     if len(df) < 20: return
     red_ratio = df['winner_code'].value_counts(normalize=True).to_dict().get(0, 0.5)
-    
     global DYNAMIC_CONFIG
     if red_ratio > 0.6: DYNAMIC_CONFIG['S_RED'], DYNAMIC_CONFIG['S_BLACK'] = 1.2, 0.8
     elif red_ratio < 0.4: DYNAMIC_CONFIG['S_RED'], DYNAMIC_CONFIG['S_BLACK'] = 0.8, 1.2
@@ -126,7 +125,7 @@ async def task_15m_pattern_discovery(context: ContextTypes.DEFAULT_TYPE):
     for (suit, digit), winner_code in grouped.items():
         law_name = f"Auto_{suit}_{digit}"
         pattern = {"suit": suit, "last_digit": digit, "winner": int(winner_code)}
-        cur.execute("""INSERT INTO ai_laws (law_name, law_pattern) VALUES (%s, %s) ON CONFLICT (law_name) DO NOTHING""", (law_name, json.dumps(pattern)))
+        cur.execute("INSERT INTO ai_laws (law_name, law_pattern) VALUES (%s, %s) ON CONFLICT (law_name) DO NOTHING", (law_name, json.dumps(pattern)))
     conn.commit()
     conn.close()
 
@@ -135,15 +134,12 @@ async def task_60m_ai_master_audit(context: ContextTypes.DEFAULT_TYPE):
     cur = conn.cursor()
     cur.execute("SELECT law_name, law_pattern, success_count, fail_count FROM ai_laws")
     current_laws = [{"name": r[0], "pattern": r[1], "success": r[2], "fails": r[3]} for r in cur.fetchall()]
-    
     df = load_history(300)
     recent_winners = df['winner_code'].tolist()[:50] if not df.empty else []
-    
     prompt = f"""
-    You are the Master AI. Recent 50 outcomes (0=Red, 1=Blue, 2=Tie): {recent_winners}
+    You are Master AI. Recent 50 outcomes (0=Red, 1=Blue, 2=Tie): {recent_winners}
     Current Laws: {json.dumps(current_laws)}
-    Respond in JSON:
-    {{"delete_laws": ["bad_law_1"], "new_laws": [{{"law_name": "AI_Law_1", "pattern": {{"suit": "♥️", "last_digit": "5", "winner": 0}}}}]}}
+    Respond JSON: {{"delete_laws": ["bad_law_1"], "new_laws": [{{"law_name": "AI_Law_1", "pattern": {{"suit": "♥️", "last_digit": "5", "winner": 0}}}}]}}
     """
     decision = await ai_engine.ask_json(prompt)
     if decision:
@@ -151,14 +147,13 @@ async def task_60m_ai_master_audit(context: ContextTypes.DEFAULT_TYPE):
             cur.execute("DELETE FROM ai_laws WHERE law_name = %s", (bad_law,))
         for new_law in decision.get("new_laws", []):
             if new_law.get("law_name") and new_law.get("pattern"):
-                cur.execute("""INSERT INTO ai_laws (law_name, law_pattern, success_count, fail_count) VALUES (%s, %s, 0, 0) ON CONFLICT (law_name) DO UPDATE SET law_pattern = EXCLUDED.law_pattern""", (new_law["law_name"], json.dumps(new_law["pattern"])))
+                cur.execute("INSERT INTO ai_laws (law_name, law_pattern, success_count, fail_count) VALUES (%s, %s, 0, 0) ON CONFLICT (law_name) DO UPDATE SET law_pattern = EXCLUDED.law_pattern", (new_law["law_name"], json.dumps(new_law["pattern"])))
         conn.commit()
     conn.close()
 
-# ==================== ⚡ محرك التوقع الفوري السريع ====================
+# ==================== ⚡ محرك التوقع الفوري ====================
 def fast_hybrid_predict(b_num: str, suit: str) -> Tuple[int, str]:
     last_digit = b_num[-1] if b_num[-1].isdigit() else '0'
-    
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT law_name, law_pattern FROM ai_laws WHERE is_active = TRUE")
@@ -174,7 +169,6 @@ def fast_hybrid_predict(b_num: str, suit: str) -> Tuple[int, str]:
     return math_result, "🧮 تحليل رياضي ديناميكي"
 
 def update_law_stats(b_num: str, suit: str, actual_winner: int, revert: bool = False):
-    """تحديث ذاكرة الـ AI (إضافة نجاح/فشل، أو خصمها في حالة تصحيح الجولة)"""
     last_digit = b_num[-1] if b_num[-1].isdigit() else '0'
     conn = get_db_connection()
     cur = conn.cursor()
@@ -197,10 +191,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🎴 بدء جولة جديدة", callback_data="choose_suit")],
         [InlineKeyboardButton("📜 القوانين النشطة", callback_data="view_laws")]
     ]
-    await update.message.reply_text("🏛️ **HADES V106 - AI Engine**\n\nاختر للبدء:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    await update.message.reply_text("🏛️ **HADES V107 - AI Engine**\nاختر للبدء:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
 async def delete_last_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
-    """ميزة حذف الجولة الخاطئة وتنظيف ذاكرة الـ AI (مقتبسة من الكود القديم ومطورة)"""
     user_id = update.effective_user.id
     try:
         conn = get_db_connection()
@@ -210,22 +203,25 @@ async def delete_last_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         
         if row:
             entry_id, b_num, suit, winner_str = row
-            winner_code = WINNER_MAP.get(winner_str.split()[0], 2)
+            winner_code = WINNER_MAP.get(winner_str, 2)
             
-            # مسح النتيجة من ذاكرة الـ AI لكي لا يتعلم بالخطأ
+            # مسح التأثير من ذاكرة الـ AI
             update_law_stats(b_num, suit, winner_code, revert=True)
             
-            # مسح النتيجة من قاعدة البيانات
             cur.execute("DELETE FROM history WHERE id = %s", (entry_id,))
             conn.commit()
-            msg = "🗑️ **تم الحذف بنجاح!**\nتم مسح الجولة الخاطئة وتنظيف ذاكرة الذكاء الاصطناعي منها."
+            msg = "🗑️ **تم التصحيح!** تم مسح الجولة الخاطئة وتنظيف ذاكرة الذكاء الاصطناعي."
         else:
             msg = "⚠️ لا يوجد إدخال سابق لك لحذفه."
         conn.close()
         
         if is_callback:
-            kb = [[InlineKeyboardButton("🔄 جولة جديدة", callback_data="choose_suit")]]
-            await update.callback_query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+            kb = [[InlineKeyboardButton("🔄 تغيير البذلة", callback_data="choose_suit")]]
+            suit_saved = context.user_data.get('suit', 'غير محدد')
+            await update.callback_query.edit_message_text(
+                f"{msg}\n\n📥 **البذلة المحفوظة حالياً:** {suit_saved}\nيمكنك إرسال الرقم الصحيح مباشرة.", 
+                reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
+            )
         else:
             await update.message.reply_text(msg, parse_mode='Markdown')
             
@@ -246,7 +242,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("s_"):
         suit = data[2:]
         context.user_data['suit'] = suit
-        await query.edit_message_text(f"✅ البذلة: {suit}\n\n📥 **أرسل رقم البونص الآن (7 أرقام):**")
+        await query.edit_message_text(f"✅ البذلة محفوظة: {suit}\n\n📥 **أرسل أرقام البونص الآن (يمكنك إرسال الأرقام وراء بعضها متى شئت):**")
     
     elif data == "view_laws":
         conn = get_db_connection()
@@ -264,13 +260,23 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "delete_last":
         await delete_last_entry(update, context, is_callback=True)
 
+    # 🔴 التحديث الجذري للأزرار لمنع التجميد 🔴
     elif data.startswith("save_"):
-        parts = data.split("_")
-        b_num, suit, winner_name = parts[1], parts[2], "_".join(parts[3:])
-        winner_code = WINNER_MAP.get(winner_name.split()[0], 2)
+        # Format: save_0, save_1, save_2
+        winner_code = int(data.split("_")[1])
+        winner_name = WINNER_NAMES.get(winner_code, "تعادل ⚪")
         
-        # حفظ النتيجة لتعليم الـ AI
+        # استرجاع البيانات من الذاكرة الداخلية بدلاً من الزر
+        b_num = context.user_data.get('last_b_num')
+        suit = context.user_data.get('last_suit')
+        
+        if not b_num or not suit:
+            await query.edit_message_text("⚠️ الجلسة منتهية. يرجى إرسال الرقم مرة أخرى.")
+            return
+            
+        # تعليم الـ AI
         update_law_stats(b_num, suit, winner_code)
+        
         try:
             conn = get_db_connection()
             cur = conn.cursor()
@@ -281,51 +287,60 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Save error: {e}")
         
-        # الأزرار الهجينة (تكملة + تصحيح)
         kb = [
-            [InlineKeyboardButton("🔄 بدء جولة جديدة", callback_data="choose_suit")],
-            [InlineKeyboardButton("🗑️ تصحيح (حذف الجولة المضافة)", callback_data="delete_last")]
+            [InlineKeyboardButton("🗑️ تصحيح الجولة (تراجع)", callback_data="delete_last")],
+            [InlineKeyboardButton("🔄 تغيير البذلة", callback_data="choose_suit")]
         ]
-        await query.edit_message_text(f"✅ تم التدريب والتسجيل: ({winner_name})\nماذا تريد أن تفعل الآن؟", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(
+            f"✅ تم التدريب والتسجيل: ({winner_name})\n\n"
+            f"📥 **البذلة الحالية ({suit}) محفوظة.**\nأرسل الرقم التالي مباشرة لمواصلة اللعب.", 
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
+    # يقبل 5 أرقام، 7 أرقام، 8 أرقام أو أكثر دون مشاكل
     if text.isdigit() and len(text) >= 5:
         suit = context.user_data.get('suit')
         if not suit:
-            await update.message.reply_text("⚠️ **اختر البذلة أولاً عبر /start**")
+            await update.message.reply_text("⚠️ **الرجاء اختيار البذلة أولاً عبر /start**")
             return
             
         pred_code, reason = fast_hybrid_predict(text, suit)
         prediction = WINNER_NAMES[pred_code]
         
-        report = f"""🎯 **التوقع اللحظي (V106)**
+        # حفظ المتغيرات في الذاكرة لكي يعمل زر الـ Save بدون تعليق
+        context.user_data['last_b_num'] = text
+        context.user_data['last_suit'] = suit
+        
+        report = f"""🎯 **التوقع اللحظي (V107)**
 ━━━━━━━━━━━━━━━
 🏆 **النتيجة:** {prediction}
 ⚙️ **الأساس:** {reason}
 ━━━━━━━━━━━━━━━
 اختر الفائز الفعلي لتسجيل النتيجة:"""
         
+        # الأزرار أصبحت قصيرة جداً (save_0) لمنع انهيار التليجرام
         kb = [
-            [InlineKeyboardButton("🔴 راعي", callback_data=f"save_{text}_{suit}_الراعي 🔴"),
-             InlineKeyboardButton("🔵 ثور", callback_data=f"save_{text}_{suit}_الثور 🔵")],
-            [InlineKeyboardButton("⚪ تعادل", callback_data=f"save_{text}_{suit}_تعادل ⚪")]
+            [InlineKeyboardButton("🔴 راعي", callback_data="save_0"),
+             InlineKeyboardButton("🔵 ثور", callback_data="save_1")],
+            [InlineKeyboardButton("⚪ تعادل", callback_data="save_2")]
         ]
         
         await update.message.reply_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-        context.user_data.pop('suit', None) 
+        # ملاحظة: لم نقم بمسح البذلة هنا لكي يستطيع المستخدم إرسال أرقام متتالية
         return
 
-# ==================== 🚀 التشغيل الأساسي ====================
+# ==================== 🚀 التشغيل ====================
 if __name__ == "__main__":
-    logger.info("🚀 تشغيل HADES V106...")
+    logger.info("🚀 تشغيل HADES V107...")
     ensure_columns()
 
     app = ApplicationBuilder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("delete", delete_last_entry))  # أمر الحذف القديم موجود أيضاً
+    app.add_handler(CommandHandler("delete", delete_last_entry)) 
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
