@@ -1,7 +1,7 @@
 """
 HADES V101.5 - Anti-Bias Self-Optimizing AI Prediction Bot
 جميع المفاتيح مضمنة، يعمل فوراً على Railway مع PostgreSQL.
-تم تحديث النموذج إلى GLM-5 مع تفعيل التفكير الظاهر، وإصلاح مشكلة الاتصال بقاعدة البيانات.
+تم تحديث النموذج إلى GLM-5 مع تفعيل التفكير الظاهر.
 تحسينات السرعة: استعلامات بايزي سريعة، توقع < 3 ثوانٍ.
 """
 
@@ -962,12 +962,17 @@ def main():
     # بناء وتشغيل البوت
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # جدولة AI Engineer كل 30 دقيقة (عملية طويلة)
-    app.job_queue.run_repeating(
-        lambda ctx: ai_engineer.run_cycle(),
-        interval=1800,
-        first=10
-    )
+    # التأكد من أن job_queue موجود قبل استخدامه (بعد التثبيت الصحيح)
+    if app.job_queue:
+        # جدولة AI Engineer كل 30 دقيقة (عملية طويلة)
+        app.job_queue.run_repeating(
+            lambda ctx: ai_engineer.run_cycle(),
+            interval=1800,
+            first=10
+        )
+        print("✅ JobQueue تم تفعيله، AI Engineer سيعمل كل 30 دقيقة.")
+    else:
+        print("⚠️ JobQueue غير متاح، لن يعمل AI Engineer التلقائي. تأكد من تثبيت python-telegram-bot[job-queue]")
 
     # تسجيل الأوامر
     app.add_handler(CommandHandler("start", start))
