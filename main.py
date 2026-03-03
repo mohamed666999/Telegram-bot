@@ -1,6 +1,6 @@
 """
-HADES V108 - Ultimate Stable AI & Admin DB Extraction
-تم إصلاح الأزرار، دعم سحب قاعدة البيانات، والتعلم العميق من التاريخ
+HADES V108.1 - Ultimate Stable AI & Admin DB Extraction
+تم حل مشكلة قواعد البيانات القديمة (Auto Schema Migration)
 """
 
 import os, sys, datetime, psycopg2, pandas as pd, numpy as np
@@ -43,15 +43,36 @@ def get_db_connection():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
 def ensure_columns():
+    """تحديث الجداول القديمة وإضافة الأعمدة الناقصة برمجياً لتجنب أخطاء التعلم"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        
+        # 1. إضافة user_id لجدول history إن لم يكن موجوداً
+        cur.execute("""
+            DO $$ BEGIN
+                ALTER TABLE history ADD COLUMN user_id BIGINT;
+            EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+        """)
+        
+        # 2. إنشاء جدول القوانين لو لم يكن موجوداً نهائياً
         cur.execute("""CREATE TABLE IF NOT EXISTS ai_laws (
-            law_name VARCHAR(100) PRIMARY KEY, law_pattern JSONB,
-            success_count INT DEFAULT 0, fail_count INT DEFAULT 0,
-            is_active BOOLEAN DEFAULT TRUE, last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+            law_name VARCHAR(100) PRIMARY KEY, law_pattern JSONB)""")
+            
+        # 3. إجبار إضافة الأعمدة الجديدة الخاصة بالذكاء الاصطناعي للجدول القديم
+        alter_queries = [
+            "ALTER TABLE ai_laws ADD COLUMN success_count INT DEFAULT 0;",
+            "ALTER TABLE ai_laws ADD COLUMN fail_count INT DEFAULT 0;",
+            "ALTER TABLE ai_laws ADD COLUMN is_active BOOLEAN DEFAULT TRUE;",
+            "ALTER TABLE ai_laws ADD COLUMN last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP;"
+        ]
+        
+        for q in alter_queries:
+            cur.execute(f"DO $$ BEGIN {q} EXCEPTION WHEN duplicate_column THEN NULL; END $$;")
+            
         conn.commit()
         conn.close()
+        logger.info("✅ تم تحديث هيكل قاعدة البيانات بنجاح.")
     except Exception as e:
         logger.error(f"DB Init Error: {e}")
 
@@ -147,7 +168,6 @@ async def force_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
         df = df.dropna(subset=['winner_code', 'b_num', 'suit'])
         df['last_digit'] = df['b_num'].astype(str).str[-1]
         
-        # استخراج الأنماط
         grouped = df.groupby(['suit', 'last_digit'])['winner_code'].agg(lambda x: x.value_counts().index[0] if x.value_counts().max() >= 5 else None).dropna()
         
         cur = conn.cursor()
@@ -172,12 +192,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🎴 بدء جولة جديدة", callback_data="choose_suit")],
         [InlineKeyboardButton("📜 القوانين النشطة", callback_data="view_laws")]
     ]
-    text = "🏛️ **HADES V108 - AI Engine**\n\nأوامر الأدمن المتاحة:\n`/download` - سحب قاعدة البيانات\n`/force_learn` - تدريب الذكاء الاصطناعي\n\nاختر للبدء:"
+    text = "🏛️ **HADES V108.1 - AI Engine**\n\nأوامر الأدمن المتاحة:\n`/download` - سحب قاعدة البيانات\n`/force_learn` - تدريب الذكاء الاصطناعي\n\nاختر للبدء:"
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()  # منع الزر من التعليق
+    await query.answer()
     data = query.data
     user_id = update.effective_user.id
     
@@ -264,7 +284,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⚪ تعادل", callback_data="save_2")]
         ]
         
-        report = f"""🎯 **التوقع اللحظي (V108)**
+        report = f"""🎯 **التوقع اللحظي (V108.1)**
 ━━━━━━━━━━━━━━━
 🏆 **النتيجة:** {WINNER_NAMES[pred_code]}
 ⚙️ **الأساس:** {reason}
@@ -275,7 +295,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== 🚀 التشغيل ====================
 if __name__ == "__main__":
-    ensure_columns()
+    ensure_columns()  # هذه الدالة ستقوم بإصلاح المشكلة وإضافة العمود الناقص تلقائياً
     app = ApplicationBuilder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
@@ -284,5 +304,5 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("✅ النظام جاهز.")
+    logger.info("✅ النظام جاهز - تم تحديث الهيكل بنجاح.")
     app.run_polling(drop_pending_updates=True)
