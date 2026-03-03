@@ -311,7 +311,16 @@ def bayesian_analysis(conn, current_hour: int, min_samples: int = 30):
     """
     try:
         period = get_time_period(current_hour)
-        # استعلام سريع: عدد مرات كل فائز في الفترة الحالية
+        # تحديد نطاق الساعات للفترة الحالية
+        if period == "morning":
+            start, end = 6, 11
+        elif period == "afternoon":
+            start, end = 12, 17
+        elif period == "evening":
+            start, end = 18, 23
+        else:  # night
+            start, end = 0, 5
+
         cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         cur.execute("""
             SELECT winner, COUNT(*) as cnt 
@@ -319,24 +328,12 @@ def bayesian_analysis(conn, current_hour: int, min_samples: int = 30):
             WHERE winner IS NOT NULL 
               AND EXTRACT(HOUR FROM timestamp) BETWEEN %s AND %s
             GROUP BY winner
-        """, (current_hour, current_hour+1) if period == "night" else (current_hour, current_hour))  # تبسيط: نجلب لكل ساعة
-        # لكن الأفضل جلب الفترة كاملة، لذا نستخدم استعلام بالفترة بدلاً من الساعة.
-        # لتجنب التعقيد، سنبقي الاستعلام السابق الذي يجلب كل الفترة. لكن يمكننا تحسينه بفهرسة.
-        # نستخدم استعلامًا أسرع:
-        cur.execute("""
-            SELECT winner, COUNT(*) as cnt 
-            FROM history 
-            WHERE winner IS NOT NULL 
-              AND EXTRACT(HOUR FROM timestamp) IN (
-                  SELECT generate_series(%s, %s)
-              )
-            GROUP BY winner
-        """, (6,11) if period=="morning" else (12,17) if period=="afternoon" else (18,23) if period=="evening" else (0,5))
+        """, (start, end))
         rows = cur.fetchall()
         total = sum(row['cnt'] for row in rows)
         if total < min_samples:
             return None
-        probs = {0:0,1:0,2:0}
+        probs = {0:0, 1:0, 2:0}
         for row in rows:
             code = WINNER_MAP.get(row['winner'])
             if code is not None:
@@ -581,7 +578,7 @@ async def handle_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # جلب بيانات بايزي (سريعة)
     conn = psycopg2.connect(DATABASE_URL)
-    period_probs = bayesian_analysis(conn, now.hour)  # تحليل سريع للفترة الحالية فقط
+    period_probs = bayesian_analysis(conn, now.hour)
     conn.close()
 
     # التنبؤ الهجين (سريع جداً)
