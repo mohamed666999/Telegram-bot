@@ -2,6 +2,7 @@
 HADES V101.5 - Anti-Bias Self-Optimizing AI Prediction Bot
 تم تحديث النموذج إلى stepfun-ai/step-3.5-flash من NVIDIA.
 الكود كامل وجاهز للتشغيل على Railway مع PostgreSQL.
+(تمت إزالة زر الدردشة مع AI)
 """
 
 import os
@@ -109,10 +110,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔐 **HADES V101.5**\nنظام التنبؤ مغلق. يرجى إرسال مفتاح الاشتراك للتفعيل.")
         return
 
+    # إزالة زر الدردشة مع AI، مع إبقاء أزرار البذلات فقط
     kb = [
         [InlineKeyboardButton("♦️ ديناري", callback_data="s_♦️"), InlineKeyboardButton("♥️ قلب", callback_data="s_♥️")],
-        [InlineKeyboardButton("♠️ سبايد", callback_data="s_♠️"), InlineKeyboardButton("♣️ كلبة", callback_data="s_♣️")],
-        [InlineKeyboardButton("🤖 دردشة AI", callback_data="ai_chat")]
+        [InlineKeyboardButton("♠️ سبايد", callback_data="s_♠️"), InlineKeyboardButton("♣️ كلبة", callback_data="s_♣️")]
     ]
     await update.message.reply_text(
         f"🏛️ **الكيان السيادي HADES**\nالخطة: {plan} | المتبقي: {rem} يوم\n\nاختر نوع البذلة للبدء:",
@@ -127,10 +128,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['suit'] = query.data[2:]
         await query.edit_message_text(f"✅ تم اختيار {query.data[2:]}\n📥 أرسل رقم البونص (7 أرقام على الأقل):")
     
-    elif query.data == "ai_chat":
-        context.user_data['mode'] = "AI"
-        await query.edit_message_text("🤖 **وضع الذكاء الاصطناعي نشط**\nتفضل بطرح سؤالك:")
-
+    # تمت إزالة معالج ai_chat، ولكن قد يبقى في الكود – لن يتم استدعاؤه بعد الآن.
     elif query.data.startswith("save_"):
         # حفظ النتيجة في تاريخ البيانات
         winner_name = query.data[5:]
@@ -164,14 +162,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ مفتاح خاطئ أو مستخدم مسبقاً.")
         return
 
-    # 2. وضع الدردشة
-    if context.user_data.get('mode') == "AI":
-        client = OpenAI(api_key=NVIDIA_API_KEY, base_url=NVIDIA_BASE_URL)
-        resp = client.chat.completions.create(model=NVIDIA_MODEL, messages=[{"role":"user", "content":text}])
-        await update.message.reply_text(f"🤖 **HADES AI:**\n\n{resp.choices[0].message.content}")
-        return
-
-    # 3. معالجة البونص والتوقع
+    # 2. معالجة البونص والتوقع (تمت إزالة وضع الدردشة)
     if text.isdigit() and len(text) >= 7:
         if 'suit' not in context.user_data:
             await update.message.reply_text("⚠️ اختر البذلة أولاً عبر /start")
@@ -228,5 +219,5 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("🚀 HADES V101.5 (Step-3.5-Flash) is running...")
+    print("🚀 HADES V101.5 (Step-3.5-Flash) is running... (AI chat button removed)")
     app.run_polling()
