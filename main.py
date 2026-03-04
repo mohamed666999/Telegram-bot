@@ -1,387 +1,345 @@
 """
-HADES V-TITAN 2.1 - Gap-Aware Adaptive Algorithm
+HADES V-TITAN 2.0 - Gap-Aware Trading Algorithm
+الميزات: اكتشاف الانقطاع الزمني (مبني على 35 ثانية)، تجاهل السلاسل الكاذبة، الذاكرة الصافية.
 """
-
-import os
-import re
-import datetime
-import psycopg2
-import logging
-
-from typing import Tuple
+import os, re, datetime, psycopg2, logging
+from typing import Tuple, List
 from contextlib import contextmanager
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler, CommandHandler, ContextTypes
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
-
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
-
 ADMIN_ID = 6033203084
 
-WINNER_MAP = {
-'الراعي 🔴':0,'راعي':0,'🔴':0,
-'الثور 🔵':1,'ثور':1,'🔵':1,
-'تعادل ⚪':2,'تعادل':2,'⚪':2,
-0:0,1:1,2:2
-}
+WINNER_MAP = {'الراعي 🔴': 0, 'راعي': 0, 'الثور 🔵': 1, 'ثور': 1, 'تعادل ⚪': 2, 'تعادل': 2, '🔴': 0, '🔵': 1, '⚪': 2, 0: 0, 1: 1, 2: 2}
+WINNER_NAMES = {0: 'الراعي 🔴', 1: 'الثور 🔵', 2: 'تعادل ⚪'}
+SUITS = ['♦️', '♥️', '♠️', '♣️']
+RANK_VALUE = {"A":14, "K":13, "Q":12, "J":11, "10":10, "9":9, "8":8, "7":7, "6":6, "5":5, "4":4, "3":3, "2":2}
+RANKS_LAYOUT = [["A", "K", "Q", "J"], ["10", "9", "8", "7"], ["6", "5", "4", "3", "2"]]
 
-WINNER_NAMES = {
-0:'الراعي 🔴',
-1:'الثور 🔵',
-2:'تعادل ⚪'
-}
-
-SUITS = ['♦️','♥️','♠️','♣️']
-
-RANK_VALUE = {
-"A":14,"K":13,"Q":12,"J":11,
-"10":10,"9":9,"8":8,"7":7,
-"6":6,"5":5,"4":4,"3":3,"2":2
-}
-
-RANKS_LAYOUT = [
-["A","K","Q","J"],
-["10","9","8","7"],
-["6","5","4","3","2"]
-]
-
-# ================= DATABASE =================
-
+# ==================== 🗄️ إدارة قاعدة البيانات ====================
 @contextmanager
 def get_db_cursor():
-    conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     try:
         yield conn, conn.cursor()
     finally:
         conn.close()
 
 def ensure_columns():
-
     try:
-
-        with get_db_cursor() as (conn,cur):
-
+        with get_db_cursor() as (conn, cur):
+            # استخدام IF NOT EXISTS المدعومة في النسخ الحديثة من PostgreSQL لتجنب الأخطاء
+            cur.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS rank VARCHAR(5);")
+            cur.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS bonus_last_digit INT;")
+            cur.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS user_id BIGINT;")
+            
             cur.execute("""
-            CREATE TABLE IF NOT EXISTS history(
-            id SERIAL PRIMARY KEY,
-            b_num VARCHAR(30),
-            suit VARCHAR(5),
-            rank VARCHAR(5),
-            bonus_last_digit INT,
-            winner VARCHAR(20),
-            user_id BIGINT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
+                CREATE TABLE IF NOT EXISTS ai_laws (
+                    law_name VARCHAR(100) PRIMARY KEY, 
+                    law_pattern JSONB, 
+                    success_count INT DEFAULT 0, 
+                    fail_count INT DEFAULT 0, 
+                    is_active BOOLEAN DEFAULT TRUE
+                )
             """)
-
-            cur.execute("""
-            CREATE TABLE IF NOT EXISTS ai_laws(
-            law_name VARCHAR(120) PRIMARY KEY,
-            law_pattern JSONB,
-            success_count INT DEFAULT 0,
-            fail_count INT DEFAULT 0,
-            is_active BOOLEAN DEFAULT TRUE
-            )
-            """)
-
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_history_winner ON history(winner)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_history_time ON history(timestamp)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_laws_name ON ai_laws(law_name)")
-
             conn.commit()
-
     except Exception as e:
-        logger.error(e)
+        logger.error(f"DB Init Error: {e}")
 
-# ================= TOOLS =================
+def clean_digits(text: str) -> str:
+    if not text: return ""
+    return re.sub(r"\D", "", str(text))
 
-def clean_digits(text:str)->str:
+def generate_progress_bar(percentage: int) -> str:
+    filled = int(percentage / 10)
+    return "█" * filled + "░" * (10 - filled)
 
-    if not text:
-        return ""
-
-    return re.sub(r"\D","",str(text))
-
-
-def generate_progress_bar(p):
-
-    filled=int(p/10)
-
-    return "█"*filled+"░"*(10-filled)
-
-# ================= GAP DETECTOR =================
-
-def is_sequence_broken():
-
+# ==================== ⏱️ أداة اكتشاف الانقطاع (Gap Detector) ====================
+def is_sequence_broken() -> bool:
+    """يتحقق هل تم إدخال الجولات بشكل متتالٍ (بناءً على 30-35 ثانية لكل جولة)"""
     try:
-
-        with get_db_cursor() as (conn,cur):
-
+        with get_db_cursor() as (conn, cur):
             cur.execute("SELECT timestamp FROM history ORDER BY id DESC LIMIT 3")
-
-            rows=cur.fetchall()
-
-            if len(rows)<3:
+            rows = cur.fetchall()
+            
+            if len(rows) < 3: 
+                return True # لا يوجد جولات كافية
+            
+            now = datetime.datetime.now()
+            last_round_time = rows[0][0]
+            third_last_round_time = rows[2][0]
+            
+            # 1. إذا مر أكثر من 90 ثانية منذ آخر جولة تم إدخالها، فهناك انقطاع
+            time_since_last = (now - last_round_time).total_seconds()
+            if time_since_last > 90:
                 return True
-
-            diff=(datetime.datetime.utcnow()-rows[2][0]).total_seconds()/60
-
-            if diff>15:
+                
+            # 2. 3 جولات تأخذ حوالي 105 ثواني. إذا كان الفرق بين الجولة الأولى والثالثة أكبر من 130 ثانية، فهناك جولة مفقودة في المنتصف
+            time_span_3_rounds = (last_round_time - third_last_round_time).total_seconds()
+            if time_span_3_rounds > 130:
                 return True
-
-    except:
-
+                
+    except Exception as e:
+        logger.error(f"Gap Detector Error: {e}")
         return True
-
+        
     return False
 
-# ================= MARKOV =================
-
-def get_markov_chain_prediction(sequence_broken):
-
-    if sequence_broken:
-        return 2,0,""
-
+# ==================== ⚙️ المحركات الذكية لـ V-TITAN ====================
+def get_markov_chain_prediction() -> Tuple[int, int, str]:
+    if is_sequence_broken():
+        return 2, 0, "تم تجاهل ماركوف (توقف زمني > 90 ثانية)"
+        
     try:
+        with get_db_cursor() as (conn, cur):
+            cur.execute("SELECT winner FROM history WHERE winner IS NOT NULL ORDER BY id DESC LIMIT 500")
+            rows = cur.fetchall()
+            if len(rows) < 10: return 2, 0, ""
+            
+            history_codes = [WINNER_MAP.get(r[0], 2) for r in rows]
+            history_codes.reverse()
+            
+            current_seq = tuple(history_codes[-3:])
+            
+            next_outcomes = {0: 0, 1: 0, 2: 0}
+            for i in range(len(history_codes) - 3):
+                if tuple(history_codes[i:i+3]) == current_seq:
+                    next_outcomes[history_codes[i+3]] += 1
+                    
+            total_matches = sum(next_outcomes.values())
+            if total_matches >= 3:
+                best_pred = max(next_outcomes, key=next_outcomes.get)
+                conf = int((next_outcomes[best_pred] / total_matches) * 100)
+                return best_pred, conf, f"سلاسل التاريخ (تكرر {total_matches} مرات)"
+    except: pass
+    return 2, 0, ""
 
-        with get_db_cursor() as (conn,cur):
-
-            cur.execute("SELECT winner FROM history ORDER BY id DESC LIMIT 500")
-
-            rows=cur.fetchall()
-
-            if len(rows)<10:
-                return 2,0,""
-
-            hist=[WINNER_MAP.get(r[0],2) for r in rows]
-
-            hist.reverse()
-
-            seq=tuple(hist[-3:])
-
-            counter={0:0,1:0,2:0}
-
-            for i in range(len(hist)-3):
-
-                if tuple(hist[i:i+3])==seq:
-
-                    counter[hist[i+3]]+=1
-
-            total=sum(counter.values())
-
-            if total>=3:
-
-                pred=max(counter,key=counter.get)
-
-                conf=int(counter[pred]/total*100)
-
-                return pred,conf,f"تكرار تسلسل {total}"
-
-    except:
-
-        pass
-
-    return 2,0,""
-
-# ================= MOMENTUM =================
-
-def get_momentum(sequence_broken):
-
-    if sequence_broken:
-        return 2,0,""
-
-    try:
-
-        with get_db_cursor() as (conn,cur):
-
-            cur.execute("SELECT winner FROM history ORDER BY id DESC LIMIT 20")
-
-            rows=cur.fetchall()
-
-            if len(rows)<10:
-                return 2,0,""
-
-            hist=[WINNER_MAP.get(r[0],2) for r in rows]
-
-            red=hist.count(0)
-            blue=hist.count(1)
-
-            if red>=14:
-                return 1,75,"تشبع الراعي"
-
-            if blue>=14:
-                return 0,75,"تشبع الثور"
-
-    except:
-
-        pass
-
-    return 2,0,""
-
-# ================= MEMORY =================
-
-def get_memory_prediction(suit,rank,last_digit):
-
-    queries=[
-    (f"DB_{suit}_{rank}_{last_digit}","تطابق كامل"),
-    (f"DB_{suit}_{rank}","تطابق قوي"),
-    (f"DB_{suit}_ALL_{last_digit}","تطابق متوسط")
+def get_cascading_db_prediction(suit: str, rank: str, last_digit: int) -> Tuple[int, int, str]:
+    """العقل المستقر: يعمل دائماً ولا يتأثر بالانقطاع لأنه يعتمد على الورقة فقط"""
+    queries = [
+        (f"DB_{suit}{rank}{last_digit}", "تطابق دقيق (بذلة+ورقة+رقم)"),
+        (f"DB_{suit}{rank}", "تطابق قوي (بذلة+ورقة)"),
+        (f"DB{suit}ALL{last_digit}", "تطابق متوسط (بذلة+رقم)")
     ]
-
     try:
-
-        with get_db_cursor() as (conn,cur):
-
-            for name,desc in queries:
-
-                cur.execute("SELECT success_count,fail_count,law_pattern->>'winner' FROM ai_laws WHERE law_name LIKE %s",(f"{name}%",))
-
-                row=cur.fetchone()
-
+        with get_db_cursor() as (conn, cur):
+            for q_name, desc in queries:
+                cur.execute("SELECT success_count, fail_count, law_pattern->>'winner' FROM ai_laws WHERE law_name LIKE %s AND is_active = TRUE", (f"{q_name}%",))
+                row = cur.fetchone()
                 if row:
+                    succ, fail, winner = row
+                    if succ > fail:
+                        conf = int((succ / (succ + fail)) * 100)
+                        return int(winner), conf, f"{desc} [✅{succ}]"
+    except: pass
+    return 2, 0, ""
 
-                    s,f,w=row
+def get_momentum_correction() -> Tuple[int, int, str]:
+    if is_sequence_broken():
+        return 2, 0, "تم تجاهل الزخم (الجولات متقطعة)"
+        
+    try:
+        with get_db_cursor() as (conn, cur):
+            cur.execute("SELECT winner FROM history WHERE winner IS NOT NULL ORDER BY id DESC LIMIT 20")
+            rows = cur.fetchall()
+            if len(rows) < 10: return 2, 0, ""
+            
+            recent = [WINNER_MAP.get(r[0], 2) for r in rows]
+            red_count = recent.count(0)
+            blue_count = recent.count(1)
+            
+            if red_count >= 14:
+                return 1, 75, "تصحيح زخم (تشبع الراعي)"
+            elif blue_count >= 14:
+                return 0, 75, "تصحيح زخم (تشبع الثور)"
+    except: pass
+    return 2, 0, ""
 
-                    if s>f:
+# ==================== ⚖️ خوارزمية V-TITAN المجمعة ====================
+def predict_titan(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
+    clean_b = clean_digits(b_num)
+    if not clean_b: return 2, 0, "❌ رقم غير صالح"
+    last_digit = int(clean_b[-1])
+    
+    # استدعاء العقول
+    markov_pred, markov_conf, markov_desc = get_markov_chain_prediction()
+    db_pred, db_conf, db_desc = get_cascading_db_prediction(suit, rank, last_digit)
+    mom_pred, mom_conf, mom_desc = get_momentum_correction()
 
-                        conf=int(s/(s+f)*100)
+    votes = {0: 0.0, 1: 0.0, 2: 0.0}
+    logs = []
+    
+    if markov_conf > 0:
+        votes[markov_pred] += markov_conf * 1.5 
+        logs.append(f"🧬 **ماركوف:** {WINNER_NAMES[markov_pred]} ({markov_desc})")
+        
+    if db_conf > 0:
+        votes[db_pred] += db_conf * 2.0 
+        logs.append(f"💾 **الذاكرة:** {WINNER_NAMES[db_pred]} ({db_desc})")
+        
+    if mom_conf > 0:
+        votes[mom_pred] += mom_conf * 1.0 
+        logs.append(f"⚖️ **الزخم:** {WINNER_NAMES[mom_pred]} ({mom_desc})")
 
-                        return int(w),conf,f"{desc} [{s}]"
+    # المعادلة الرياضية كمنقذ أخير
+    if sum(votes.values()) == 0:
+        last_digits_sum = sum(int(d) for d in clean_b[-3:])
+        card_val = RANK_VALUE.get(str(rank).strip().upper(), 0)
+        math_res = ((last_digits_sum * card_val) + last_digit) % 2
+        votes[math_res] += 60
+        logs.append(f"🧮 **رياضيات:** {WINNER_NAMES[math_res]} (معادلة الورقة)")
 
-    except:
+    final_pred = max(votes, key=votes.get)
+    total_score = sum(votes.values())
+    confidence = min(99, int((votes[final_pred] / total_score) * 100)) if total_score > 0 else 50
+    
+    if is_sequence_broken():
+        logs.append("\n⚠️ *ملاحظة:* تم الاعتماد على خصائص الورقة/الرياضيات فقط بسبب الانقطاع الزمني.")
+        
+    reason_str = "\n".join(logs)
+    return final_pred, confidence, reason_str
 
-        pass
+# ==================== 🛠️ تحديث القوانين ====================
+def update_law_stats(law_name: str, is_success: bool):
+    try:
+        with get_db_cursor() as (conn, cur):
+            if is_success:
+                cur.execute("UPDATE ai_laws SET success_count = success_count + 1 WHERE law_name = %s", (law_name,))
+            else:
+                cur.execute("UPDATE ai_laws SET fail_count = fail_count + 1 WHERE law_name = %s", (law_name,))
+            conn.commit()
+    except: pass
 
-    return 2,0,""
-
-# ================= PREDICT =================
-
-def predict_titan(b_num,suit,rank):
-
-    clean_b=clean_digits(b_num)
-
-    if not clean_b:
-        return 2,0,"رقم غير صالح"
-
-    digits=clean_b.zfill(3)
-
-    last_digit=int(digits[-1])
-
-    sequence_broken=is_sequence_broken()
-
-    markov_pred,markov_conf,markov_desc=get_markov_chain_prediction(sequence_broken)
-
-    mem_pred,mem_conf,mem_desc=get_memory_prediction(suit,rank,last_digit)
-
-    mom_pred,mom_conf,mom_desc=get_momentum(sequence_broken)
-
-    votes={0:0,1:0,2:0}
-
-    logs=[]
-
-    if markov_conf>0:
-        votes[markov_pred]+=markov_conf*1.5
-        logs.append(f"🧬 ماركوف {WINNER_NAMES[markov_pred]}")
-
-    if mem_conf>0:
-        votes[mem_pred]+=mem_conf*2
-        logs.append(f"💾 ذاكرة {WINNER_NAMES[mem_pred]}")
-
-    if mom_conf>0:
-        votes[mom_pred]+=mom_conf
-        logs.append(f"⚖️ زخم {WINNER_NAMES[mom_pred]}")
-
-    if sum(votes.values())==0:
-
-        s=sum(int(d) for d in digits[-3:])
-
-        card_val=RANK_VALUE.get(rank,0)
-
-        math_res=((s*card_val)+last_digit)%2
-
-        votes[math_res]+=60
-
-        logs.append("🧮 معادلة الورقة")
-
-    pred=max(votes,key=votes.get)
-
-    total=sum(votes.values())
-
-    conf=int((votes[pred]/total)*100) if total else 50
-
-    if sequence_broken:
-        logs.append("⚠️ تم تجاهل التسلسل بسبب الانقطاع")
-
-    return pred,conf,"\n".join(logs)
-
-# ================= BOT =================
-
-async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
-
+# ==================== 🎮 الواجهة الآمنة ====================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
+    kb = [[InlineKeyboardButton("🎴 اختيار البذلة", callback_data="choose_suit")]]
+    await update.message.reply_text("<b>🏛️ HADES V-TITAN 2.0 (Gap-Aware)</b>\n\nنظام حساس للوقت (35s) ومقاوم للانقطاعات.\nاضغط للبدء:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
-    kb=[[InlineKeyboardButton("🎴 اختيار البذلة",callback_data="choose_suit")]]
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    
+    try:
+        if data == "choose_suit":
+            context.user_data.pop('suit', None)
+            context.user_data.pop('rank', None)
+            kb = [[InlineKeyboardButton(s, callback_data=f"suit_{s}") for s in SUITS]]
+            await query.edit_message_text("🎴 <b>اختر البذلة:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+            
+        elif data.startswith("suit_"):
+            suit = data.split("_")[1]
+            context.user_data['suit'] = suit
+            kb = [[InlineKeyboardButton(r, callback_data=f"rank_{r}") for r in row] for row in RANKS_LAYOUT]
+            kb.append([InlineKeyboardButton("🔙 رجوع", callback_data="choose_suit")])
+            await query.edit_message_text(f"✅ البذلة: <b>{suit}</b>\n🃏 <b>اختر الورقة:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
-    await update.message.reply_text("🏛️ HADES V-TITAN جاهز للعمل",reply_markup=InlineKeyboardMarkup(kb))
+        elif data.startswith("rank_"):
+            rank = data.split("_")[1]
+            context.user_data['rank'] = rank
+            suit = context.user_data.get('suit', '')
+            kb = [[InlineKeyboardButton("🔄 تغيير الاختيار", callback_data="choose_suit")]]
+            await query.edit_message_text(f"✅ جاهز: <b>{suit} {rank}</b>\n\n📥 <b>أرسل رقم البونص الآن:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
-# ================= MESSAGE =================
+        elif data == "delete_last":
+            try:
+                with get_db_cursor() as (conn, cur):
+                    cur.execute("DELETE FROM history WHERE id = (SELECT max(id) FROM history WHERE user_id = %s)", (update.effective_user.id,))
+                    conn.commit()
+            except: pass
+            
+            suit = context.user_data.get('suit')
+            rank = context.user_data.get('rank')
+            if suit and rank:
+                kb = [[InlineKeyboardButton("🔄 تغيير", callback_data="choose_suit")]]
+                await query.edit_message_text(f"🗑️ تم حذف الجولة الخاطئة.\n\nمستمرون مع: <b>{suit} {rank}</b>\n📥 أرسل الرقم الصحيح:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+            else:
+                kb = [[InlineKeyboardButton("🎴 اختيار البذلة", callback_data="choose_suit")]]
+                await query.edit_message_text("🗑️ تم الحذف. يرجى اختيار الورقة من جديد:", reply_markup=InlineKeyboardMarkup(kb))
 
-async def handle_message(update:Update,context:ContextTypes.DEFAULT_TYPE):
+        elif data.startswith("save_"):
+            w_code = int(data.split("_")[1])
+            b_num = context.user_data.get('last_b_num')
+            suit = context.user_data.get('last_suit')
+            rank = context.user_data.get('last_rank')
+            
+            if b_num and suit and rank:
+                last_digit = int(clean_digits(b_num)[-1])
+                try:
+                    with get_db_cursor() as (conn, cur):
+                        cur.execute("""INSERT INTO history (b_num, suit, rank, bonus_last_digit, winner, user_id) 
+                                       VALUES (%s, %s, %s, %s, %s, %s)""",
+                                    (b_num, suit, rank, last_digit, WINNER_NAMES[w_code], update.effective_user.id))
+                        conn.commit()
+                    
+                    update_law_stats(f"DB_{suit}_{rank}_{last_digit}", context.user_data.get('last_pred_code') == w_code)
+                except: pass
 
-    text=update.message.text
+            kb = [
+                [InlineKeyboardButton("🗑️ تصحيح الخطأ", callback_data="delete_last")],
+                [InlineKeyboardButton("🔄 تغيير البذلة/الورقة", callback_data="choose_suit")]
+            ]
+            await query.edit_message_text(f"✅ تم التسجيل: <b>{WINNER_NAMES[w_code]}</b>\n\n📥 <b>أرسل الرقم التالي لـ ({suit} {rank}):</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Callback Error: {e}")
+        await query.edit_message_text("❌ حدث خطأ، ارسل /start")
 
-    num=clean_digits(text)
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        text = update.message.text
+        clean_text = clean_digits(text)
+        
+        if clean_text:
+            suit = context.user_data.get('suit')
+            rank = context.user_data.get('rank')
+            
+            if not suit or not rank:
+                kb = [[InlineKeyboardButton("🎴 اختيار البذلة", callback_data="choose_suit")]]
+                await update.message.reply_text("⚠️ <b>يجب اختيار البذلة والورقة أولاً!</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+                return
+                
+            pred_code, confidence, reason = predict_titan(clean_text, suit, rank)
+            
+            context.user_data['last_b_num'] = clean_text
+            context.user_data['last_suit'] = suit
+            context.user_data['last_rank'] = rank
+            context.user_data['last_pred_code'] = pred_code
+            
+            kb = [
+                [InlineKeyboardButton("راعي 🔴", callback_data="save_0"), InlineKeyboardButton("ثور 🔵", callback_data="save_1")],
+                [InlineKeyboardButton("تعادل ⚪", callback_data="save_2")]
+            ]
+            
+            bar = generate_progress_bar(confidence)
+            report = f"""🎯 <b>تقرير TITAN 2.0</b>
+━━━━━━━━━━━━━━━
+🃏 الورقة: {suit} {rank} | 📥 البونص: <code>{clean_text}</code>
+🏆 <b>الفائز المتوقع: {WINNER_NAMES[pred_code]}</b>
+📊 الثقة: [{bar}] {confidence}%
 
-    if not num:
-        return
-
-    suit=context.user_data.get("suit")
-    rank=context.user_data.get("rank")
-
-    if not suit or not rank:
-        return
-
-    pred,conf,reason=predict_titan(num,suit,rank)
-
-    bar=generate_progress_bar(conf)
-
-    msg=f"""
-🎯 تقرير TITAN
-
-🃏 {suit} {rank}
-📥 {num}
-
-🏆 {WINNER_NAMES[pred]}
-📊 {bar} {conf}%
-
+<b>🔍 تفاصيل التحليل:</b>
 {reason}
-"""
+━━━━━━━━━━━━━━━
+اختر الفائز لتسجيل النتيجة:"""
+            
+            await update.message.reply_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Handle Msg Error: {e}")
+        await update.message.reply_text("⚠️ حدث خطأ في المعالجة.")
 
-    kb=[
-    [InlineKeyboardButton("راعي 🔴",callback_data="save_0"),
-     InlineKeyboardButton("ثور 🔵",callback_data="save_1")],
-    [InlineKeyboardButton("تعادل ⚪",callback_data="save_2")]
-    ]
-
-    await update.message.reply_text(msg,reply_markup=InlineKeyboardMarkup(kb))
-
-# ================= MAIN =================
-
-if __name__=="__main__":
-
+if __name__ == "__main__":
     ensure_columns()
-
-    app=ApplicationBuilder().token(TOKEN).build()
-
-    app.add_handler(CommandHandler("start",start))
-
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,handle_message))
-
-    logger.info("🚀 HADES TITAN ONLINE")
-
-    app.run_polling()
+    app = ApplicationBuilder().token(TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    logger.info("🚀 HADES V-TITAN 2.0 Is Online!")
+    app.run_polling(drop_pending_updates=True)
