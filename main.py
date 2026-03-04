@@ -1,7 +1,6 @@
-```python
 """
-HADES V108.1 - Ultimate Stable AI & Admin DB Extraction
-تم حل مشكلة قواعد البيانات القديمة (Auto Schema Migration)
+HADES V109 - Deep Dynamic Learning AI
+إصلاح مشكلة تحجر القوانين، تنظيف البيانات المعطوبة، ومسح القوانين الفاشلة تلقائياً.
 """
 
 import os, sys, datetime, psycopg2, pandas as pd, numpy as np
@@ -44,46 +43,27 @@ def get_db_connection():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
 def ensure_columns():
-    """تحديث الجداول القديمة وإضافة الأعمدة الناقصة برمجياً لتجنب أخطاء التعلم"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        
-        # 1. إضافة user_id لجدول history إن لم يكن موجوداً
         cur.execute("""
-            DO $$
-            BEGIN
-                ALTER TABLE history ADD COLUMN user_id BIGINT;
-            EXCEPTION
-                WHEN duplicate_column THEN NULL;
-            END $$;
+            DO $$ BEGIN ALTER TABLE history ADD COLUMN user_id BIGINT; EXCEPTION WHEN duplicate_column THEN NULL; END $$;
         """)
-        
-        # 2. إنشاء جدول القوانين لو لم يكن موجوداً نهائياً
         cur.execute("""CREATE TABLE IF NOT EXISTS ai_laws (
-            law_name VARCHAR(100) PRIMARY KEY, law_pattern JSONB)""")
+            law_name VARCHAR(100) PRIMARY KEY, law_pattern JSONB,
+            success_count INT DEFAULT 0, fail_count INT DEFAULT 0,
+            is_active BOOLEAN DEFAULT TRUE, last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
         
-        # 3. إجبار إضافة الأعمدة الجديدة الخاصة بالذكاء الاصطناعي للجدول القديم
         alter_queries = [
             "ALTER TABLE ai_laws ADD COLUMN success_count INT DEFAULT 0;",
             "ALTER TABLE ai_laws ADD COLUMN fail_count INT DEFAULT 0;",
             "ALTER TABLE ai_laws ADD COLUMN is_active BOOLEAN DEFAULT TRUE;",
             "ALTER TABLE ai_laws ADD COLUMN last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP;"
         ]
-        
         for q in alter_queries:
-            cur.execute(f"""
-                DO $$
-                BEGIN
-                    {q}
-                EXCEPTION
-                    WHEN duplicate_column THEN NULL;
-                END $$;
-            """)
-        
+            cur.execute(f"DO $$ BEGIN {q} EXCEPTION WHEN duplicate_column THEN NULL; END $$;")
         conn.commit()
         conn.close()
-        logger.info("✅ تم تحديث هيكل قاعدة البيانات بنجاح.")
     except Exception as e:
         logger.error(f"DB Init Error: {e}")
 
@@ -101,7 +81,7 @@ class AsyncAIEngine:
                 temperature=0.3, max_tokens=800
             )
             content = response.choices[0].message.content
-            match = re.search(r'{.*}', content, re.DOTALL)
+            match = re.search(r'\{.*\}', content, re.DOTALL)
             if match: return json.loads(match.group())
         except Exception:
             return None
@@ -132,67 +112,108 @@ def fast_hybrid_predict(b_num: str, suit: str) -> Tuple[int, str]:
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("SELECT law_name, law_pattern FROM ai_laws WHERE is_active = TRUE ORDER BY success_count DESC")
+        # جلب القوانين مرتبة حسب فارق النجاح، وتجاهل القوانين التي فشلها أكبر من نجاحها!
+        cur.execute("""
+            SELECT law_name, law_pattern, success_count, fail_count 
+            FROM ai_laws 
+            WHERE is_active = TRUE 
+            ORDER BY (success_count - fail_count) DESC, success_count DESC
+        """)
         laws = cur.fetchall()
         conn.close()
-        for law_name, pattern in laws:
+        
+        for law_name, pattern, succ, fail in laws:
+            # إذا كان الفشل أكبر من النجاح، تجاهل القانون تماماً (الذكاء الاصطناعي لا يثبت على قانون فاشل)
+            if fail > succ and fail > 2:
+                continue
+                
             if pattern.get('suit') == suit and str(pattern.get('last_digit')) == str(last_digit):
-                return pattern.get('winner', 2), f"📜 قانون AI: {law_name}"
+                return pattern.get('winner', 2), f"📜 {law_name} (✅{succ} | ❌{fail})"
     except: pass
     
+    # المحرك الرياضي (في حال عدم وجود قانون قوي)
     last3 = sum(int(d) for d in b_num[-3:] if d.isdigit())
     S = 1.2 if suit in ['♦️', '♥️'] else 0.8
     math_result = int((last3 * S) + (int(last_digit) * 3)) % 2
     return math_result, "🧮 تحليل رياضي ديناميكي"
 
-# ==================== 🛠️ أوامر الإدارة (سحب قاعدة البيانات والتعلم) ====================
+# ==================== 🛠️ أوامر الإدارة ====================
 async def download_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """سحب قاعدة البيانات كملف CSV"""
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ غير مصرح.")
-        return
+    if update.effective_user.id != ADMIN_ID: return
     msg = await update.message.reply_text("⏳ جاري استخراج قاعدة البيانات...")
     try:
         conn = get_db_connection()
         df = pd.read_sql("SELECT * FROM history ORDER BY id DESC", conn)
         conn.close()
-        
         filename = f"DB_Backup_{datetime.datetime.now().strftime('%Y%m%d')}.csv"
         df.to_csv(filename, index=False, encoding='utf-8-sig')
-        
         with open(filename, 'rb') as doc:
-            await update.message.reply_document(document=doc, caption=f"📊 تم السحب بنجاح!\nإجمالي الجولات الموثقة: {len(df)}")
+            await update.message.reply_document(document=doc, caption=f"📊 تم السحب بنجاح!\nإجمالي الجولات: {len(df)}")
         os.remove(filename)
         await msg.delete()
     except Exception as e:
-        await msg.edit_text(f"❌ حدث خطأ أثناء الاستخراج: {e}")
+        await msg.edit_text(f"❌ خطأ: {e}")
 
 async def force_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """جعل البوت يقرأ كل قاعدة البيانات لاستخراج القوانين فوراً"""
-    if update.effective_user.id != ADMIN_ID:
-        return
-    msg = await update.message.reply_text("🧠 جاري قراءة كل تاريخ اللعب واستخراج القوانين...")
+    if update.effective_user.id != ADMIN_ID: return
+    msg = await update.message.reply_text("🧠 جاري التنظيف والتعلم العميق من قاعدة البيانات...")
     try:
         conn = get_db_connection()
-        df = pd.read_sql("SELECT * FROM history WHERE winner IS NOT NULL ORDER BY id DESC LIMIT 3000", conn)
-        df['winner_code'] = df['winner'].map(WINNER_MAP)
-        df = df.dropna(subset=['winner_code', 'b_num', 'suit'])
-        df['last_digit'] = df['b_num'].astype(str).str[-1]
+        # تحميل البيانات
+        df = pd.read_sql("SELECT * FROM history WHERE winner IS NOT NULL", conn)
         
-        grouped = df.groupby(['suit', 'last_digit'])['winner_code'].agg(lambda x: x.value_counts().index[0] if x.value_counts().max() >= 5 else None).dropna()
+        # 1. تنظيف البيانات (استخراج الأرقام فقط وتجاهل النصوص الخاطئة)
+        df['b_num_str'] = df['b_num'].astype(str)
+        # الاحتفاظ فقط بالصفوف التي تحتوي على أرقام في عمود البونص
+        df = df[df['b_num_str'].str.contains(r'\d', regex=True)]
+        # استخراج آخر رقم فعلي
+        df['last_digit'] = df['b_num_str'].apply(lambda x: re.sub(r'\D', '', x)[-1] if re.search(r'\d', x) else None)
+        
+        df['winner_code'] = df['winner'].map(WINNER_MAP)
+        df = df.dropna(subset=['winner_code', 'last_digit', 'suit'])
+        
+        # 2. تحليل الأنماط القوية (نسبة النجاح)
+        grouped = df.groupby(['suit', 'last_digit'])['winner_code'].value_counts().unstack(fill_value=0)
         
         cur = conn.cursor()
-        count = 0
-        for (suit, digit), winner_code in grouped.items():
-            law_name = f"MasterDB_{suit}{digit}"
-            pattern = {"suit": suit, "last_digit": digit, "winner": int(winner_code)}
-            cur.execute("""INSERT INTO ai_laws (law_name, law_pattern, success_count) 
-                            VALUES (%s, %s, 5) ON CONFLICT (law_name) DO NOTHING""", 
-                         (law_name, json.dumps(pattern)))
-            count += cur.rowcount
+        added, updated = 0, 0
+        
+        for (suit, digit), row in grouped.iterrows():
+            total = row.sum()
+            if total >= 5: # يجب أن يكون تكرر النمط 5 مرات على الأقل
+                best_winner = row.idxmax()
+                best_count = row.max()
+                fail_count = total - best_count
+                win_rate = best_count / total
+                
+                # إذا كانت نسبة نجاح هذا النمط أعلى من 60%
+                if win_rate >= 0.60:
+                    law_name = f"DB_{suit}_{digit}"
+                    pattern = {"suit": suit, "last_digit": str(digit), "winner": int(best_winner)}
+                    
+                    # DO UPDATE لتحديث الأرقام بدلاً من تجاهلها!
+                    cur.execute("""
+                        INSERT INTO ai_laws (law_name, law_pattern, success_count, fail_count, is_active) 
+                        VALUES (%s, %s, %s, %s, TRUE) 
+                        ON CONFLICT (law_name) DO UPDATE 
+                        SET success_count = EXCLUDED.success_count, 
+                            fail_count = EXCLUDED.fail_count,
+                            law_pattern = EXCLUDED.law_pattern
+                    """, (law_name, json.dumps(pattern), int(best_count), int(fail_count)))
+                    added += 1
+
+        # 3. مسح القوانين الفاشلة تماماً من الذاكرة
+        cur.execute("DELETE FROM ai_laws WHERE fail_count > success_count OR (success_count = 0 AND fail_count > 2)")
+        deleted_bad_laws = cur.rowcount
+        
         conn.commit()
         conn.close()
-        await msg.edit_text(f"✅ تم التعلم العميق بنجاح!\nتم استخراج وإضافة {count} قانون ثابت جديد للـ AI.")
+        
+        report = (f"✅ **تمت عملية التعلم العميق بنجاح!**\n"
+                  f"📥 تم تحليل: {len(df)} جولة صالحة.\n"
+                  f"➕ قوانين قوية تمت إضافتها/تحديثها: {added}\n"
+                  f"🗑️ قوانين ضعيفة تم تدميرها: {deleted_bad_laws}")
+        await msg.edit_text(report, parse_mode='Markdown')
     except Exception as e:
         await msg.edit_text(f"❌ فشل التعلم: {e}")
 
@@ -203,7 +224,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🎴 بدء جولة جديدة", callback_data="choose_suit")],
         [InlineKeyboardButton("📜 القوانين النشطة", callback_data="view_laws")]
     ]
-    text = "🏛️ HADES V108.1 - AI Engine\n\nأوامر الأدمن المتاحة:\n/download - سحب قاعدة البيانات\n/force_learn - تدريب الذكاء الاصطناعي\n\nاختر للبدء:"
+    text = "🏛️ **HADES V109 - Deep AI Engine**\n\nأوامر الأدمن:\n`/download` - سحب قاعدة البيانات\n`/force_learn` - تنظيف وتدريب الذكاء الاصطناعي\n\nاختر للبدء:"
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -220,8 +241,23 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("s_"):
         suit = data[2:]
         context.user_data['suit'] = suit
-        await query.edit_message_text(f"✅ البذلة محفوظة: {suit}\n\n📥 أرسل أرقام البونص الآن (يمكنك إرسال أرقام متتالية):")
+        await query.edit_message_text(f"✅ البذلة محفوظة: {suit}\n\n📥 **أرسل أرقام البونص الآن (يمكنك إرسال أرقام متتالية):**")
     
+    elif data == "view_laws":
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT law_name, success_count, fail_count FROM ai_laws ORDER BY (success_count - fail_count) DESC LIMIT 10")
+            laws = cur.fetchall()
+            conn.close()
+            text = "📜 **أقوى 10 قوانين للذكاء الاصطناعي:**\n\n" + "".join([f"🔹 {n} (✅ {s} | ❌ {f})\n" for n, s, f in laws])
+            kb = [[InlineKeyboardButton("🔙 رجوع", callback_data="start_back")]]
+            await query.edit_message_text(text if laws else "لم يتم بناء قوانين قوية بعد.", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        except: pass
+
+    elif data == "start_back":
+        await start(update, context)
+
     elif data == "delete_last":
         try:
             conn = get_db_connection()
@@ -234,7 +270,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 update_law_stats(b_num, suit, winner_code, revert=True)
                 cur.execute("DELETE FROM history WHERE id = %s", (entry_id,))
                 conn.commit()
-                msg = "🗑️ تم مسح الجولة الخاطئة وتنظيف ذاكرة الـ AI."
+                msg = "🗑️ **تم مسح الجولة الخاطئة وتنظيف ذاكرة الـ AI.**"
             else:
                 msg = "⚠️ لا يوجد جولة سابقة لحذفها."
             conn.close()
@@ -268,8 +304,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔄 تغيير البذلة", callback_data="choose_suit")]
             ]
             await query.edit_message_text(
-                f"✅ تم التسجيل والتدريب: {winner_name}\n\n"
-                f"📥 البذلة الحالية: {suit}\nأرسل الرقم التالي للمتابعة:", 
+                f"✅ **تم التسجيل والتدريب:** {winner_name}\n\n"
+                f"📥 البذلة الحالية: **{suit}**\nأرسل الرقم التالي للمتابعة:", 
                 reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
             )
         except Exception as e:
@@ -295,18 +331,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⚪ تعادل", callback_data="save_2")]
         ]
         
-        report = f"""🎯 التوقع اللحظي (V108.1)
+        report = f"""🎯 **التوقع اللحظي (V109)**
 ━━━━━━━━━━━━━━━
-🏆 النتيجة: {WINNER_NAMES[pred_code]}
-⚙️ الأساس: {reason}
+🏆 **النتيجة:** {WINNER_NAMES[pred_code]}
+⚙️ **الأساس:** {reason}
 ━━━━━━━━━━━━━━━
-اختر الفائز لتسجيل النتيجة:"""
+اختر الفائز لتسجيل النتيجة وتدريب الـ AI:"""
         
         await update.message.reply_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
 # ==================== 🚀 التشغيل ====================
 if __name__ == "__main__":
-    ensure_columns()  # هذه الدالة ستقوم بإصلاح المشكلة وإضافة العمود الناقص تلقائياً
+    ensure_columns()
     app = ApplicationBuilder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
@@ -317,4 +353,3 @@ if __name__ == "__main__":
     
     logger.info("✅ النظام جاهز - تم تحديث الهيكل بنجاح.")
     app.run_polling(drop_pending_updates=True)
-```
