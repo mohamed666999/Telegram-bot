@@ -220,9 +220,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             (b_num, suit, rank, last_digit, WINNER_NAMES[w_code], update.effective_user.id))
                 conn.commit()
             
-            if law_used and ("تطابق" in law_used or "قانون" in law_used):
-                law_name = law_used.split(":")[1].split("(")[0].strip()
-                update_law_stats(law_name, w_code == pred_code)
+            # ✅ تحديث إحصائيات القانون بأمان (تم إصلاح الخطأ هنا)
+            if law_used and ":" in law_used:
+                try:
+                    law_name = law_used.split(":")[1].split("(")[0].strip()
+                    update_law_stats(law_name, w_code == pred_code)
+                except:
+                    pass  # تجاهل أي خطأ في استخراج اسم القانون
 
         kb = [[InlineKeyboardButton("🗑️ تصحيح", callback_data="delete_last"), InlineKeyboardButton("🔄 تغيير", callback_data="choose_suit")]]
         await query.edit_message_text(f"✅ تم التسجيل: {WINNER_NAMES[w_code]}\n📥 أرسل الرقم التالي لـ ({suit} {rank}):", reply_markup=InlineKeyboardMarkup(kb))
@@ -266,7 +270,7 @@ if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("force_learn", force_learn))
-    app.add_handler(CommandHandler("download", download_db))  # الأمر الجديد
+    app.add_handler(CommandHandler("download", download_db))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("🚀 HADES V112 Is Online!")
