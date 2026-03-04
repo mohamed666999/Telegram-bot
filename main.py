@@ -1,25 +1,20 @@
 """
-HADES V-OMEGA - The Digital Brain Architecture
-الميزات: حدس اصطناعي لحظي، إجماع هرمي (تصويت 3 عقول)، تحليل الزخم، ومؤشر ثقة بشري.
+HADES V-TITAN 2.0 - Gap-Aware Trading Algorithm
+الميزات: اكتشاف الانقطاع الزمني، تجاهل السلاسل الكاذبة، والاعتماد على الذاكرة الصافية.
 """
 
-import os, re, datetime, psycopg2, pandas as pd, json, logging, asyncio
-from typing import Tuple, Dict, Optional
+import os, re, datetime, psycopg2, pandas as pd, logging
+from typing import Tuple, List
 from contextlib import contextmanager
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler, CommandHandler, ContextTypes
-from openai import AsyncOpenAI
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 ADMIN_ID = 6033203084
-
-NVIDIA_API_KEY = "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"
-NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-NVIDIA_MODEL = "minimaxai/minimax-m2.5"
 
 WINNER_MAP = {'الراعي 🔴': 0, 'راعي': 0, 'الثور 🔵': 1, 'ثور': 1, 'تعادل ⚪': 2, 'تعادل': 2, '🔴': 0, '🔵': 1, '⚪': 2, 0: 0, 1: 1, 2: 2}
 WINNER_NAMES = {0: 'الراعي 🔴', 1: 'الثور 🔵', 2: 'تعادل ⚪'}
@@ -28,7 +23,7 @@ SUITS = ['♦️', '♥️', '♠️', '♣️']
 RANK_VALUE = {"A":14, "K":13, "Q":12, "J":11, "10":10, "9":9, "8":8, "7":7, "6":6, "5":5, "4":4, "3":3, "2":2}
 RANKS_LAYOUT = [["A", "K", "Q", "J"], ["10", "9", "8", "7"], ["6", "5", "4", "3", "2"]]
 
-# ==================== 🗄️ إدارة الذاكرة العميقة (Database) ====================
+# ==================== 🗄️ إدارة قاعدة البيانات ====================
 @contextmanager
 def get_db_cursor():
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
@@ -53,121 +48,138 @@ def clean_digits(text: str) -> str:
 
 def generate_progress_bar(percentage: int) -> str:
     filled = int(percentage / 10)
-    empty = 10 - filled
-    return "█" * filled + "░" * empty
+    return "█" * filled + "░" * (10 - filled)
 
-# ==================== 🧠 العقول الثلاثة (The 3 Brains) ====================
-
-class OmegaAI:
-    def __init__(self):
-        self.client = AsyncOpenAI(api_key=NVIDIA_API_KEY, base_url=NVIDIA_BASE_URL, timeout=3.0) # مهلة قصيرة جداً لسرعة الرد
-
-    async def get_human_intuition(self, recent_history: list, current_b_num: str, suit: str, rank: str) -> Tuple[int, int]:
-        """العقل 1: يحلل الزخم وتسلسل الفوز كإنسان محترف"""
-        try:
-            prompt = f"""
-            أنت مقامر محترف تعتمد على الحدس والزخم.
-            آخر 10 نتائج (0=راعي, 1=ثور, 2=تعادل): {recent_history}
-            الجولة الحالية: ورقة {suit}{rank} ورقم البونص {current_b_num}.
-            حلل هل يوجد سلسلة فوز (Streak) يجب ركوبها، أم أن النمط سينكسر؟
-            أعطني النتيجة بصيغة JSON فقط: {{"winner": 0 أو 1, "confidence": من 50 إلى 95}}
-            """
-            response = await self.client.chat.completions.create(
-                model=NVIDIA_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2, max_tokens=100
-            )
-            content = response.choices[0].message.content
-            match = re.search(r'\{.*\}', content, re.DOTALL)
-            if match:
-                data = json.loads(match.group())
-                return int(data.get("winner", 2)), int(data.get("confidence", 50))
-        except: pass
-        return 2, 0 # في حال فشل الاتصال بالسيرفر
-
-async def get_db_experience(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
-    """العقل 2: خبرة التاريخ المتراكمة (القوانين)"""
-    last_digit = int(b_num[-1])
+# ==================== ⏱️ أداة اكتشاف الانقطاع (Gap Detector) ====================
+def is_sequence_broken() -> bool:
+    """يتحقق هل تم إدخال الجولات الـ 3 الأخيرة بشكل متتالٍ (في آخر 15 دقيقة) أم هناك انقطاع"""
     try:
         with get_db_cursor() as (conn, cur):
-            cur.execute("""SELECT law_name, success_count, fail_count, law_pattern->>'winner' 
-                           FROM ai_laws WHERE law_name = %s AND is_active = TRUE""", (f"DB_{suit}_{rank}_{last_digit}",))
-            row = cur.fetchone()
-            if row and row[1] > row[2]:
-                confidence = min(95, 50 + int((row[1] / (row[1] + row[2])) * 40))
-                return int(row[3]), confidence, f"تطابق من الذاكرة العميقة ({row[0]})"
+            cur.execute("SELECT timestamp FROM history ORDER BY id DESC LIMIT 3")
+            rows = cur.fetchall()
+            if len(rows) < 3: return True # لا يوجد جولات كافية
+            
+            # إذا كان الفرق بين الجولة الحالية والتي قبل 3 جولات أكبر من 15 دقيقة، فهو انقطاع
+            time_diff = (datetime.datetime.now() - rows[2][0]).total_seconds() / 60
+            if time_diff > 15:
+                return True
+    except: pass
+    return False
+
+# ==================== ⚙️ المحركات الذكية لـ V-TITAN ====================
+def get_markov_chain_prediction() -> Tuple[int, int, str]:
+    if is_sequence_broken():
+        return 2, 0, "تم تجاهل التسلسل (يوجد انقطاع زمني بين الجولات)"
+        
+    try:
+        with get_db_cursor() as (conn, cur):
+            cur.execute("SELECT winner FROM history WHERE winner IS NOT NULL ORDER BY id DESC LIMIT 500")
+            rows = cur.fetchall()
+            if len(rows) < 10: return 2, 0, ""
+            
+            history_codes = [WINNER_MAP.get(r[0], 2) for r in rows]
+            history_codes.reverse()
+            
+            current_seq = tuple(history_codes[-3:])
+            
+            next_outcomes = {0: 0, 1: 0, 2: 0}
+            for i in range(len(history_codes) - 3):
+                if tuple(history_codes[i:i+3]) == current_seq:
+                    next_outcomes[history_codes[i+3]] += 1
+                    
+            total_matches = sum(next_outcomes.values())
+            if total_matches >= 3:
+                best_pred = max(next_outcomes, key=next_outcomes.get)
+                conf = int((next_outcomes[best_pred] / total_matches) * 100)
+                return best_pred, conf, f"سلاسل التاريخ (تكرر التسلسل {total_matches} مرات)"
     except: pass
     return 2, 0, ""
 
-def get_math_logic(b_num: str, rank: str) -> Tuple[int, int, str]:
-    """العقل 3: المنطق الرياضي الكمي (Dynamic Math)"""
-    try:
-        last_digits_sum = sum(int(d) for d in b_num[-3:])
-        card_val = RANK_VALUE.get(str(rank).strip().upper(), 0)
-        hour_modifier = datetime.datetime.now().hour % 3 + 1 # عامل زمني يتغير كل 3 ساعات
-        math_result = ((last_digits_sum * card_val * hour_modifier) + int(b_num[-1])) % 2
-        return math_result, 60, "معادلة كمية (تفاعل الورقة مع الزمن)" # ثقة متوسطة للرياضيات
-    except:
-        return 2, 0, ""
-
-# ==================== ⚖️ مجلس الحكماء (Neural Consensus) ====================
-async def predict_omega(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
-    """يجمع قرارات العقول الثلاثة ويستخرج القرار النهائي كإنسان"""
-    
-    # جلب آخر 10 جولات للـ AI
-    recent_history = []
+def get_cascading_db_prediction(suit: str, rank: str, last_digit: int) -> Tuple[int, int, str]:
+    """العقل المستقر: يعمل دائماً ولا يتأثر بالانقطاع لأنه يعتمد على الورقة فقط"""
+    queries = [
+        (f"DB_{suit}_{rank}_{last_digit}", "تطابق دقيق (بذلة+ورقة+رقم)"),
+        (f"DB_{suit}_{rank}", "تطابق قوي (بذلة+ورقة)"),
+        (f"DB_{suit}_ALL_{last_digit}", "تطابق متوسط (بذلة+رقم)")
+    ]
     try:
         with get_db_cursor() as (conn, cur):
-            cur.execute("SELECT winner FROM history WHERE winner IS NOT NULL ORDER BY id DESC LIMIT 10")
-            recent_history = [WINNER_MAP.get(r[0], 2) for r in cur.fetchall()]
-            recent_history.reverse()
+            for q_name, desc in queries:
+                cur.execute("SELECT success_count, fail_count, law_pattern->>'winner' FROM ai_laws WHERE law_name LIKE %s AND is_active = TRUE", (f"{q_name}%",))
+                row = cur.fetchone()
+                if row:
+                    succ, fail, winner = row
+                    if succ > fail:
+                        conf = int((succ / (succ + fail)) * 100)
+                        return int(winner), conf, f"{desc} [✅{succ}]"
     except: pass
+    return 2, 0, ""
 
-    # تشغيل العقول الثلاثة في نفس اللحظة (لضمان السرعة)
-    ai_engine = OmegaAI()
-    ai_task = asyncio.create_task(ai_engine.get_human_intuition(recent_history, b_num, suit, rank))
-    db_task = asyncio.create_task(get_db_experience(b_num, suit, rank))
-    
-    # انتظار النتائج
-    ai_pred, ai_conf = await ai_task
-    db_pred, db_conf, db_reason = await db_task
-    math_pred, math_conf, math_reason = get_math_logic(b_num, rank)
-
-    # 🗳️ نظام التصويت (Voting System)
-    votes = {0: 0, 1: 0, 2: 0}
-    reasons_list = []
-
-    if db_conf > 0:
-        votes[db_pred] += db_conf * 1.5 # الذاكرة لها وزن أعلى
-        reasons_list.append(f"🧠 <b>الخبرة السابقة:</b> اختارت {WINNER_NAMES[db_pred]} ({db_reason})")
-    
-    if ai_conf > 0 and ai_pred in [0, 1]:
-        votes[ai_pred] += ai_conf
-        reasons_list.append(f"👁️ <b>حدس الذكاء الاصطناعي:</b> اختار {WINNER_NAMES[ai_pred]} (بناءً على زخم الطاولة)")
+def get_momentum_correction() -> Tuple[int, int, str]:
+    if is_sequence_broken():
+        return 2, 0, "تم تجاهل الزخم (الجولات متقطعة)"
         
-    votes[math_pred] += math_conf
-    reasons_list.append(f"🧮 <b>المنطق الرياضي:</b> رجّح {WINNER_NAMES[math_pred]} ({math_reason})")
+    try:
+        with get_db_cursor() as (conn, cur):
+            cur.execute("SELECT winner FROM history WHERE winner IS NOT NULL ORDER BY id DESC LIMIT 20")
+            rows = cur.fetchall()
+            if len(rows) < 10: return 2, 0, ""
+            
+            recent = [WINNER_MAP.get(r[0], 2) for r in rows]
+            red_count = recent.count(0)
+            blue_count = recent.count(1)
+            
+            if red_count >= 14:
+                return 1, 75, "تصحيح زخم (تشبع الراعي)"
+            elif blue_count >= 14:
+                return 0, 75, "تصحيح زخم (تشبع الثور)"
+    except: pass
+    return 2, 0, ""
 
-    # تحديد الفائز بالنقاط
+# ==================== ⚖️ خوارزمية V-TITAN المجمعة ====================
+def predict_titan(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
+    clean_b = clean_digits(b_num)
+    if not clean_b: return 2, 0, "❌ رقم غير صالح"
+    last_digit = int(clean_b[-1])
+    
+    # استدعاء العقول (ستتوقف العقول المعتمدة على التسلسل تلقائياً إذا كان هناك انقطاع)
+    markov_pred, markov_conf, markov_desc = get_markov_chain_prediction()
+    db_pred, db_conf, db_desc = get_cascading_db_prediction(suit, rank, last_digit)
+    mom_pred, mom_conf, mom_desc = get_momentum_correction()
+    
+    votes = {0: 0.0, 1: 0.0, 2: 0.0}
+    logs = []
+    
+    if markov_conf > 0:
+        votes[markov_pred] += markov_conf * 1.5 
+        logs.append(f"🧬 **ماركوف:** {WINNER_NAMES[markov_pred]} ({markov_desc})")
+        
+    if db_conf > 0:
+        votes[db_pred] += db_conf * 2.0 # الذاكرة تصبح صاحبة الوزن الأعلى دائماً
+        logs.append(f"💾 **الذاكرة:** {WINNER_NAMES[db_pred]} ({db_desc})")
+        
+    if mom_conf > 0:
+        votes[mom_pred] += mom_conf * 1.0 
+        logs.append(f"⚖️ **الزخم:** {WINNER_NAMES[mom_pred]} ({mom_desc})")
+
+    # المعادلة الرياضية كمنقذ أخير
+    if sum(votes.values()) == 0:
+        last_digits_sum = sum(int(d) for d in clean_b[-3:])
+        card_val = RANK_VALUE.get(str(rank).strip().upper(), 0)
+        math_res = ((last_digits_sum * card_val) + last_digit) % 2
+        votes[math_res] += 60
+        logs.append(f"🧮 **رياضيات:** {WINNER_NAMES[math_res]} (معادلة الورقة)")
+
     final_pred = max(votes, key=votes.get)
+    total_score = sum(votes.values())
+    confidence = min(99, int((votes[final_pred] / total_score) * 100)) if total_score > 0 else 50
     
-    # حساب الثقة النهائية
-    total_votes = sum(votes.values())
-    if total_votes == 0: return 2, 50, "تحليل عشوائي"
-    
-    final_confidence = min(99, int((votes[final_pred] / total_votes) * 100))
-    
-    # إذا اتفقت العقول
-    if db_pred == ai_pred == math_pred:
-        final_confidence = 99
-        consensus_text = "🔥 <b>إجماع كامل (إشارة ذهبية)!</b> جميع الأنظمة متفقة."
-    elif final_confidence < 60:
-        consensus_text = "⚠️ <b>حالة تشتت:</b> الأنظمة مختلفة، العب بحذر."
-    else:
-        consensus_text = "✅ <b>قرار الأغلبية:</b> تم الترجيح بناءً على الأوزان."
-
-    final_reason = "\n".join(reasons_list) + f"\n\n{consensus_text}"
-    return final_pred, final_confidence, final_reason
+    # إضافة تنبيه الانقطاع للمستخدم
+    if is_sequence_broken():
+        logs.append("\n⚠️ *ملاحظة:* تم الاعتماد على خصائص الورقة فقط بسبب الانقطاع الزمني.")
+        
+    reason_str = "\n".join(logs)
+    return final_pred, confidence, reason_str
 
 # ==================== 🛠️ تحديث القوانين ====================
 def update_law_stats(law_name: str, is_success: bool):
@@ -180,11 +192,11 @@ def update_law_stats(law_name: str, is_success: bool):
             conn.commit()
     except: pass
 
-# ==================== 🎮 واجهة المستخدم الاستثنائية ====================
+# ==================== 🎮 الواجهة الآمنة ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    kb = [[InlineKeyboardButton("🎴 بدء تحليل V-OMEGA", callback_data="choose_suit")]]
-    await update.message.reply_text("<b>🏛️ HADES V-OMEGA (The Brain)</b>\n\nيستخدم تقنية الإجماع الهرمي وحدس الذكاء الاصطناعي اللحظي.\nاضغط للبدء:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    kb = [[InlineKeyboardButton("🎴 اختيار البذلة", callback_data="choose_suit")]]
+    await update.message.reply_text("<b>🏛️ HADES V-TITAN 2.0 (Gap-Aware)</b>\n\nنظام مقاوم للانقطاعات الزمنية.\nاضغط للبدء:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -193,7 +205,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         if data == "choose_suit":
-            context.user_data.pop('suit', None); context.user_data.pop('rank', None)
+            context.user_data.pop('suit', None)
+            context.user_data.pop('rank', None)
             kb = [[InlineKeyboardButton(s, callback_data=f"suit_{s}") for s in SUITS]]
             await query.edit_message_text("🎴 <b>اختر البذلة:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
             
@@ -217,34 +230,42 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     cur.execute("DELETE FROM history WHERE id = (SELECT max(id) FROM history WHERE user_id = %s)", (update.effective_user.id,))
                     conn.commit()
             except: pass
-            suit = context.user_data.get('suit'); rank = context.user_data.get('rank')
+            
+            suit = context.user_data.get('suit')
+            rank = context.user_data.get('rank')
             if suit and rank:
                 kb = [[InlineKeyboardButton("🔄 تغيير", callback_data="choose_suit")]]
                 await query.edit_message_text(f"🗑️ تم حذف الجولة الخاطئة.\n\nمستمرون مع: <b>{suit} {rank}</b>\n📥 أرسل الرقم الصحيح:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
             else:
-                kb = [[InlineKeyboardButton("🎴 اختيار", callback_data="choose_suit")]]
-                await query.edit_message_text("🗑️ تم الحذف.", reply_markup=InlineKeyboardMarkup(kb))
+                kb = [[InlineKeyboardButton("🎴 اختيار البذلة", callback_data="choose_suit")]]
+                await query.edit_message_text("🗑️ تم الحذف. يرجى اختيار الورقة من جديد:", reply_markup=InlineKeyboardMarkup(kb))
 
         elif data.startswith("save_"):
             w_code = int(data.split("_")[1])
             b_num = context.user_data.get('last_b_num')
             suit = context.user_data.get('last_suit')
             rank = context.user_data.get('last_rank')
-            pred_code = context.user_data.get('last_pred_code')
             
             if b_num and suit and rank:
-                last_digit = int(b_num[-1])
+                last_digit = int(clean_digits(b_num)[-1])
                 try:
                     with get_db_cursor() as (conn, cur):
-                        cur.execute("""INSERT INTO history (b_num, suit, rank, bonus_last_digit, winner, user_id) VALUES (%s, %s, %s, %s, %s, %s)""",
+                        cur.execute("""INSERT INTO history (b_num, suit, rank, bonus_last_digit, winner, user_id) 
+                                       VALUES (%s, %s, %s, %s, %s, %s)""",
                                     (b_num, suit, rank, last_digit, WINNER_NAMES[w_code], update.effective_user.id))
                         conn.commit()
-                    update_law_stats(f"DB_{suit}_{rank}_{last_digit}", w_code == pred_code)
+                    
+                    update_law_stats(f"DB_{suit}_{rank}_{last_digit}", context.user_data.get('last_pred_code') == w_code)
                 except: pass
 
-            kb = [[InlineKeyboardButton("🗑️ تصحيح", callback_data="delete_last")], [InlineKeyboardButton("🔄 تغيير", callback_data="choose_suit")]]
-            await query.edit_message_text(f"✅ تم تسجيل وتعليم النظام: <b>{WINNER_NAMES[w_code]}</b>\n\n📥 <b>أرسل الرقم التالي لـ ({suit} {rank}):</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+            kb = [
+                [InlineKeyboardButton("🗑️ تصحيح", callback_data="delete_last")],
+                [InlineKeyboardButton("🔄 تغيير", callback_data="choose_suit")]
+            ]
+            await query.edit_message_text(f"✅ تم التسجيل: <b>{WINNER_NAMES[w_code]}</b>\n\n📥 <b>أرسل الرقم التالي لـ ({suit} {rank}):</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+            
     except Exception as e:
+        logger.error(f"Callback Error: {e}")
         await query.edit_message_text("❌ حدث خطأ، ارسل /start")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -260,11 +281,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 kb = [[InlineKeyboardButton("🎴 اختيار البذلة", callback_data="choose_suit")]]
                 await update.message.reply_text("⚠️ <b>يجب اختيار البذلة والورقة أولاً!</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
                 return
-            
-            # رسالة انتظار احترافية لأن الذكاء الاصطناعي قد يستغرق ثانية
-            processing_msg = await update.message.reply_text("⏳ <b>يتم الآن استشارة العقول الثلاثة (O.M.E.G.A)...</b>", parse_mode='HTML')
-            
-            pred_code, confidence, reason = await predict_omega(clean_text, suit, rank)
+                
+            pred_code, confidence, reason = predict_titan(clean_text, suit, rank)
             
             context.user_data['last_b_num'] = clean_text
             context.user_data['last_suit'] = suit
@@ -277,22 +295,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             
             bar = generate_progress_bar(confidence)
-            
-            report = f"""🎯 <b>تقرير HADES V-OMEGA</b>
+            report = f"""🎯 <b>تقرير TITAN 2.0</b>
 ━━━━━━━━━━━━━━━
 🃏 الورقة: {suit} {rank} | 📥 البونص: <code>{clean_text}</code>
 
 🏆 <b>الفائز المتوقع: {WINNER_NAMES[pred_code]}</b>
-📊 <b>نسبة الثقة:</b> [{bar}] {confidence}%
+📊 الثقة: [{bar}] {confidence}%
 
+<b>🔍 تفاصيل التحليل:</b>
 {reason}
 ━━━━━━━━━━━━━━━
-اضغط لتأكيد النتيجة وتدريب العقول:"""
+اختر الفائز لتسجيل النتيجة:"""
             
-            await processing_msg.edit_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+            await update.message.reply_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     except Exception as e:
-        logger.error(f"Error: {e}")
-        await update.message.reply_text(f"⚠️ خطأ: `{str(e)}`", parse_mode='Markdown')
+        logger.error(f"Handle Msg Error: {e}")
+        await update.message.reply_text("⚠️ حدث خطأ في المعالجة.")
 
 if __name__ == "__main__":
     ensure_columns()
@@ -300,5 +318,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    logger.info("🚀 HADES V-OMEGA (The Brain) Is Online!")
+    logger.info("🚀 HADES V-TITAN 2.0 Is Online!")
     app.run_polling(drop_pending_updates=True)
