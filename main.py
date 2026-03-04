@@ -22,9 +22,10 @@ TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 ADMIN_ID = 6033203084
 
-NVIDIA_API_KEY = "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"
+# تم تحديث المفتاح والنموذج إلى Mixtral-8x22B
+NVIDIA_API_KEY = "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"
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-NVIDIA_MODEL = "minimaxai/minimax-m2.5"
+NVIDIA_MODEL = "mistralai/mixtral-8x22b-instruct-v0.1"
 
 WINNER_MAP = {
     'الراعي 🔴': 0, 'راعي': 0, 'الراعي': 0, '🔴': 0,
