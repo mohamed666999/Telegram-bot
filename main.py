@@ -1,3 +1,4 @@
+```python
 """
 HADES V108.1 - Ultimate Stable AI & Admin DB Extraction
 تم حل مشكلة قواعد البيانات القديمة (Auto Schema Migration)
@@ -50,15 +51,18 @@ def ensure_columns():
         
         # 1. إضافة user_id لجدول history إن لم يكن موجوداً
         cur.execute("""
-            DO $$ BEGIN
+            DO $$
+            BEGIN
                 ALTER TABLE history ADD COLUMN user_id BIGINT;
-            EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+            EXCEPTION
+                WHEN duplicate_column THEN NULL;
+            END $$;
         """)
         
         # 2. إنشاء جدول القوانين لو لم يكن موجوداً نهائياً
         cur.execute("""CREATE TABLE IF NOT EXISTS ai_laws (
             law_name VARCHAR(100) PRIMARY KEY, law_pattern JSONB)""")
-            
+        
         # 3. إجبار إضافة الأعمدة الجديدة الخاصة بالذكاء الاصطناعي للجدول القديم
         alter_queries = [
             "ALTER TABLE ai_laws ADD COLUMN success_count INT DEFAULT 0;",
@@ -68,8 +72,15 @@ def ensure_columns():
         ]
         
         for q in alter_queries:
-            cur.execute(f"DO $$ BEGIN {q} EXCEPTION WHEN duplicate_column THEN NULL; END $$;")
-            
+            cur.execute(f"""
+                DO $$
+                BEGIN
+                    {q}
+                EXCEPTION
+                    WHEN duplicate_column THEN NULL;
+                END $$;
+            """)
+        
         conn.commit()
         conn.close()
         logger.info("✅ تم تحديث هيكل قاعدة البيانات بنجاح.")
@@ -90,7 +101,7 @@ class AsyncAIEngine:
                 temperature=0.3, max_tokens=800
             )
             content = response.choices[0].message.content
-            match = re.search(r'\{.*\}', content, re.DOTALL)
+            match = re.search(r'{.*}', content, re.DOTALL)
             if match: return json.loads(match.group())
         except Exception:
             return None
@@ -173,11 +184,11 @@ async def force_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = conn.cursor()
         count = 0
         for (suit, digit), winner_code in grouped.items():
-            law_name = f"MasterDB_{suit}_{digit}"
+            law_name = f"MasterDB_{suit}{digit}"
             pattern = {"suit": suit, "last_digit": digit, "winner": int(winner_code)}
             cur.execute("""INSERT INTO ai_laws (law_name, law_pattern, success_count) 
-                           VALUES (%s, %s, 5) ON CONFLICT (law_name) DO NOTHING""", 
-                        (law_name, json.dumps(pattern)))
+                            VALUES (%s, %s, 5) ON CONFLICT (law_name) DO NOTHING""", 
+                         (law_name, json.dumps(pattern)))
             count += cur.rowcount
         conn.commit()
         conn.close()
@@ -192,7 +203,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🎴 بدء جولة جديدة", callback_data="choose_suit")],
         [InlineKeyboardButton("📜 القوانين النشطة", callback_data="view_laws")]
     ]
-    text = "🏛️ **HADES V108.1 - AI Engine**\n\nأوامر الأدمن المتاحة:\n`/download` - سحب قاعدة البيانات\n`/force_learn` - تدريب الذكاء الاصطناعي\n\nاختر للبدء:"
+    text = "🏛️ HADES V108.1 - AI Engine\n\nأوامر الأدمن المتاحة:\n/download - سحب قاعدة البيانات\n/force_learn - تدريب الذكاء الاصطناعي\n\nاختر للبدء:"
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -209,7 +220,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("s_"):
         suit = data[2:]
         context.user_data['suit'] = suit
-        await query.edit_message_text(f"✅ البذلة محفوظة: {suit}\n\n📥 **أرسل أرقام البونص الآن (يمكنك إرسال أرقام متتالية):**")
+        await query.edit_message_text(f"✅ البذلة محفوظة: {suit}\n\n📥 أرسل أرقام البونص الآن (يمكنك إرسال أرقام متتالية):")
     
     elif data == "delete_last":
         try:
@@ -223,14 +234,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 update_law_stats(b_num, suit, winner_code, revert=True)
                 cur.execute("DELETE FROM history WHERE id = %s", (entry_id,))
                 conn.commit()
-                msg = "🗑️ **تم مسح الجولة الخاطئة وتنظيف ذاكرة الـ AI.**"
+                msg = "🗑️ تم مسح الجولة الخاطئة وتنظيف ذاكرة الـ AI."
             else:
                 msg = "⚠️ لا يوجد جولة سابقة لحذفها."
             conn.close()
             kb = [[InlineKeyboardButton("🔄 تغيير البذلة", callback_data="choose_suit")]]
             await query.edit_message_text(f"{msg}\n\nالبذلة المحفوظة: {context.user_data.get('suit', 'غير محدد')}\nأرسل الرقم الصحيح للاستمرار.", reply_markup=InlineKeyboardMarkup(kb))
         except: pass
-
+    
     elif data.startswith("save_"):
         try:
             winner_code = int(data.split("_")[1])
@@ -242,7 +253,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not b_num or not suit:
                 await query.edit_message_text("⚠️ بيانات الجولة مفقودة. أرسل الرقم من جديد.")
                 return
-                
+            
             conn = get_db_connection()
             cur = conn.cursor()
             cur.execute("INSERT INTO history (b_num, suit, winner, timestamp, user_id) VALUES (%s, %s, %s, %s, %s)",
@@ -257,8 +268,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔄 تغيير البذلة", callback_data="choose_suit")]
             ]
             await query.edit_message_text(
-                f"✅ **تم التسجيل والتدريب:** {winner_name}\n\n"
-                f"📥 البذلة الحالية: **{suit}**\nأرسل الرقم التالي للمتابعة:", 
+                f"✅ تم التسجيل والتدريب: {winner_name}\n\n"
+                f"📥 البذلة الحالية: {suit}\nأرسل الرقم التالي للمتابعة:", 
                 reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
             )
         except Exception as e:
@@ -270,9 +281,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.isdigit() and len(text) >= 5:
         suit = context.user_data.get('suit')
         if not suit:
-            await update.message.reply_text("⚠️ **الرجاء اختيار البذلة أولاً عبر /start**")
+            await update.message.reply_text("⚠️ الرجاء اختيار البذلة أولاً عبر /start")
             return
-            
+        
         pred_code, reason = fast_hybrid_predict(text, suit)
         
         context.user_data['last_b_num'] = text
@@ -284,10 +295,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⚪ تعادل", callback_data="save_2")]
         ]
         
-        report = f"""🎯 **التوقع اللحظي (V108.1)**
+        report = f"""🎯 التوقع اللحظي (V108.1)
 ━━━━━━━━━━━━━━━
-🏆 **النتيجة:** {WINNER_NAMES[pred_code]}
-⚙️ **الأساس:** {reason}
+🏆 النتيجة: {WINNER_NAMES[pred_code]}
+⚙️ الأساس: {reason}
 ━━━━━━━━━━━━━━━
 اختر الفائز لتسجيل النتيجة:"""
         
@@ -306,3 +317,4 @@ if __name__ == "__main__":
     
     logger.info("✅ النظام جاهز - تم تحديث الهيكل بنجاح.")
     app.run_polling(drop_pending_updates=True)
+```
