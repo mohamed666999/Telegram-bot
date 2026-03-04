@@ -3,7 +3,7 @@ HADES V112 - The Oracle (3-Layer Architecture & Safe DB Pool)
 تم إصلاح مشكلة طول الرقم، وتطبيق نظام التوقع الهرمي، وحل مشكلة تجميد قاعدة البيانات.
 """
 
-import os, re, datetime, psycopg2, pandas as pd, json, logging
+import os, re, datetime, psycopg2, pandas as pd, json, logging, io
 from typing import Tuple
 from contextlib import contextmanager
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -144,6 +144,30 @@ async def force_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await msg.edit_text(f"✅ **تم التدريب (V112 - 3 Layers)**\n➕ قوانين مبنية: {laws_added}\n🗑️ قوانين فاشلة حُذفت: {deleted}")
 
+# ==================== 📥 أمر تحميل قاعدة البيانات ====================
+async def download_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """سحب قاعدة البيانات كملف Excel (للأدمن فقط)"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ هذا الأمر للمسؤول فقط.")
+        return
+    msg = await update.message.reply_text("⏳ جاري تحضير نسخة احتياطية...")
+    try:
+        with get_db_cursor() as (conn, cur):
+            # جلب جميع الجداول المهمة
+            df_history = pd.read_sql("SELECT * FROM history ORDER BY id", conn)
+            df_laws = pd.read_sql("SELECT * FROM ai_laws ORDER BY law_name", conn)
+        # إنشاء ملف Excel في الذاكرة
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_history.to_excel(writer, sheet_name='history', index=False)
+            df_laws.to_excel(writer, sheet_name='ai_laws', index=False)
+        output.seek(0)
+        filename = f"hades_db_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        await update.message.reply_document(document=output, filename=filename, caption="📥 نسخة احتياطية من قاعدة بيانات HADES")
+        await msg.delete()
+    except Exception as e:
+        await msg.edit_text(f"❌ خطأ: {e}")
+
 # ==================== 🎮 واجهة التليجرام ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
@@ -242,6 +266,7 @@ if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("force_learn", force_learn))
+    app.add_handler(CommandHandler("download", download_db))  # الأمر الجديد
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("🚀 HADES V112 Is Online!")
