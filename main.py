@@ -1,6 +1,7 @@
 """
-HADES TITAN 8.0 - The Apex Predictor
-الهندسة: استعلام أحادي فائق السرعة، محرك SD الذهبي، أوزان محسنة، وتوافق تام لأنواع البيانات (Type Safety).
+HADES TITAN 9.0 - The Singularity Node (Data Science Masterpiece)
+تم إعداده بناءً على التحليل الإحصائي العميق (2500+ جولة).
+الاعتماد الكلي على نمط (Suit + Digit) الذهبي، والتنعيم البايزي ضد الأنماط النادرة.
 """
 
 import os, re, datetime, psycopg2, pandas as pd, json, logging
@@ -10,7 +11,7 @@ from psycopg2.extras import execute_values
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler, CommandHandler, ContextTypes
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s" 
@@ -21,18 +22,17 @@ WINNER_MAP = {'الراعي 🔴': 0, 'راعي': 0, 'الثور 🔵': 1, 'ثو
 WINNER_NAMES = {0: 'الراعي 🔴', 1: 'الثور 🔵', 2: 'تعادل ⚪'}
 SUITS = ['♦️', '♥️', '♠️', '♣️']
 
-# إصلاح الخطأ 1: التأكد من وجود القاموس لحماية المحرك الرياضي
 RANK_VALUE = {"A":14, "K":13, "Q":12, "J":11, "10":10, "9":9, "8":8, "7":7, "6":6, "5":5, "4":4, "3":3, "2":2}
 RANKS_LAYOUT = [["A", "K", "Q", "J"], ["10", "9", "8", "7"], ["6", "5", "4", "3", "2"]]
 
-# ⚡ الأوزان المعمارية الجديدة (كما حددتها من تحليل البيانات) ⚡
+# ⚡ الأوزان المعمارية المهندسة بناءً على تقرير البيانات ⚡
 WEIGHTS = {
-    'EXACT': 2.5,   # Suit + Rank + Digit
-    'SD': 2.2,      # ✨ النمط الذهبي الجديد: Suit + Digit
-    'SUIT': 2.0,    # انحياز قوي جداً للبذلة
-    'DIGIT': 1.1,   # انحياز متوسط
-    'RANK': 0.7,    # تأثير ضعيف
-    'MOMENTUM': 1.2 # كاسر السلاسل
+    'SD': 2.8,       # 🌟 النمط الأسطوري (Suit + Digit) - الأعلى وزناً
+    'SUIT': 1.8,     # انحياز حقيقي وموثوق
+    'DIGIT': 1.2,    # انحياز حقيقي
+    'MOMENTUM': 1.1, # كاسر السلاسل (يعمل بقوة عند التكرار)
+    'RANK': 0.4,     # ضعيف جداً إحصائياً
+    'EXACT': 0.2     # شبه ملغي (وهم إحصائي بسبب قلة التكرار)
 }
 
 # ==================== 🗄️ إدارة قاعدة البيانات ====================
@@ -67,30 +67,42 @@ def generate_progress_bar(percentage: int) -> str:
     filled = int(percentage / 10)
     return "█" * filled + "░" * (10 - filled)
 
-# ==================== 📊 Fast Query Bayesian Engine (V8.0) ====================
+# ==================== 📊 Smart Bayesian Engine (V9.0) ====================
 def fetch_all_patterns(pattern_ids: List[str]) -> Dict[str, dict]:
-    """ 🚀 الخطأ 2 المُصلح: استعلام واحد يجلب كل الأنماط دفعة واحدة! أسرع 4 مرات """
+    """ 🚀 استعلام فائق السرعة مع التنعيم البايزي لمعالجة الأنماط النادرة """
     results = {pid: {'w': 2, 'c': 0.0, 'log': '[No Data]'} for pid in pattern_ids}
     try:
         with get_db_cursor() as (conn, cur):
-            # استخدام ANY(%s) لجلب المصفوفة دفعة واحدة
             cur.execute("SELECT pattern_id, red_count, blue_count FROM pattern_stats WHERE pattern_id = ANY(%s)", (pattern_ids,))
             rows = cur.fetchall()
             
             for pid, red, blue in rows:
-                total = red + blue + 2 # Laplace Smoothing
-                p_red = (red + 1) / total
-                p_blue = (blue + 1) / total
+                total = red + blue
+                # Laplace Smoothing الذكي: 
+                # إذا كان العدد أقل من 4، لا نثق به كثيراً فنعطيه ثقة تقترب من 50%
+                if total == 0: continue
+                
+                smoothed_red = red + 2
+                smoothed_blue = blue + 2
+                smoothed_total = smoothed_red + smoothed_blue
+                
+                p_red = smoothed_red / smoothed_total
+                p_blue = smoothed_blue / smoothed_total
                 
                 winner = 0 if p_red > p_blue else 1
-                confidence = max(p_red, p_blue)
+                
+                # تخفيض الثقة للأنماط التي لم تتكرر كثيراً (مثل EXACT)
+                confidence_penalty = 1.0 if total >= 5 else (total / 5.0)
+                confidence = max(p_red, p_blue) * confidence_penalty
+                
                 results[pid] = {'w': winner, 'c': confidence, 'log': f"[{int(red)}🔴:{int(blue)}🔵]"}
     except Exception as e:
         logger.error(f"Fast Query Error: {e}")
     return results
 
-# ==================== 🔐 Momentum & Streak Breaker ====================
+# ==================== 🔐 Momentum & Drift Detection ====================
 def detect_streak_breaker() -> Tuple[Optional[int], float, str]:
+    """ يعمل ككاسر أمواج (Anti-Streak) بناءً على المتوسط الإحصائي 2.1 للعبة """
     try:
         with get_db_cursor() as (conn, cur):
             cur.execute("SELECT winner, timestamp FROM history WHERE winner IS NOT NULL ORDER BY id DESC LIMIT 4")
@@ -98,47 +110,43 @@ def detect_streak_breaker() -> Tuple[Optional[int], float, str]:
             if len(rows) < 3: return None, 0.0, ""
             
             time_diff = (rows[0][1] - rows[2][1]).total_seconds()
-            if time_diff > 180: return None, 0.0, "" 
+            if time_diff > 180: return None, 0.0, "" # جولات متقطعة = لا تحسب التسلسل
             
             recent = [WINNER_MAP.get(r[0], 2) for r in rows[:3]]
             
             if recent == [0, 0, 0]:
-                return 1, 0.85, "⚠️ كسر السلسلة (توقع الثور 🔵)"
+                return 1, 0.90, "⚠️ كسر السلسلة (3 راعي متتالية)"
             elif recent == [1, 1, 1]:
-                return 0, 0.85, "⚠️ كسر السلسلة (توقع الراعي 🔴)"
+                return 0, 0.90, "⚠️ كسر السلسلة (3 ثور متتالية)"
     except: pass
     return None, 0.0, ""
 
-# ==================== 🧠 TITAN 8.0 Core Engine ====================
-def predict_titan_8(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
+# ==================== 🧠 TITAN 9.0 Core Engine ====================
+def predict_titan_9(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     clean_b = clean_digits(b_num)
     if not clean_b: return 2, 0, "❌ رقم غير صالح"
     
-    # إصلاح الخطأ 3: Type Safety (Integer Strictness)
     last_digit = int(clean_b[-1])
     
-    # بناء مصفوفة الـ IDs
-    p_exact = f"EXACT_{suit}_{rank}_{last_digit}"
-    p_sd    = f"SD_{suit}_{last_digit}" # 🌟 النمط الذهبي الجديد
+    # تعريف الـ 5 أنماط الرئيسية
+    p_sd    = f"SD_{suit}_{last_digit}" 
     p_suit  = f"SUIT_{suit}"
     p_digit = f"DIGIT_{last_digit}"
     p_rank  = f"RANK_{rank}"
+    p_exact = f"EXACT_{suit}_{rank}_{last_digit}"
     
-    # 🚀 سحب كل الأنماط في استعلام واحد (السرعة القصوى)
-    patterns = fetch_all_patterns([p_exact, p_sd, p_suit, p_digit, p_rank])
+    patterns = fetch_all_patterns([p_sd, p_suit, p_digit, p_rank, p_exact])
     
     scores = {0: 0.0, 1: 0.0}
     logs = []
     
-    # 1. كاسر السلاسل (الزخم)
     streak_pred, streak_conf, streak_log = detect_streak_breaker()
     if streak_pred is not None:
         scores[streak_pred] += streak_conf * WEIGHTS['MOMENTUM']
         logs.append(f"⏱️ **الزخم:** {WINNER_NAMES[streak_pred]} ({streak_log})")
 
-    # 2. حساب أوزان الأنماط
+    # الترتيب حسب قوة الوزن لطباعتها بشكل جميل للمستخدم
     logic_map = [
-        ('EXACT', p_exact, '🎯 دقيق جداً'),
         ('SD', p_sd, '✨ بذلة+رقم (الذهبي)'),
         ('SUIT', p_suit, '🎴 البذلة'),
         ('DIGIT', p_digit, '🔢 الرقم'),
@@ -147,23 +155,22 @@ def predict_titan_8(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     
     for weight_key, pid, desc in logic_map:
         res = patterns[pid]
-        if res['w'] != 2 and res['c'] > 0.0: # إذا كان هناك بيانات فعلية (تجاهل الـ No Data)
+        if res['w'] != 2 and res['c'] > 0.0: 
+            # نضرب احتمال النمط في الوزن الخاص به المعرف في الأعلى
             scores[res['w']] += res['c'] * WEIGHTS[weight_key]
-            # إخفاء الـ RANK من الطباعة لتقليل زحمة النص (ولكنه يُحسب في الخلفية)
-            if weight_key != 'RANK': 
-                logs.append(f"{desc}: {WINNER_NAMES[res['w']]} {res['log']}")
+            logs.append(f"{desc}: {WINNER_NAMES[res['w']]} {res['log']}")
 
-    # 3. الحساب النهائي
+    # ==================== حساب القرار النهائي ====================
     final_pred = 0 if scores[0] >= scores[1] else 1
     total_score = scores[0] + scores[1]
     
     if total_score == 0:
-        # المحرك الرياضي في حال غياب البيانات
-        padded_b = clean_b.zfill(3) # الحماية الرياضية التي طلبتها
+        # المحرك الرياضي (Fallback) في حالة نادرة جداً
+        padded_b = clean_b.zfill(3) 
         last_digits_sum = sum(int(d) for d in padded_b[-3:])
         card_val = RANK_VALUE.get(str(rank).strip().upper(), 0)
         math_res = ((last_digits_sum * card_val) + last_digit) % 2
-        return math_res, 60, f"🧮 **تحليل رياضي (الورقة: {card_val})**"
+        return math_res, 60, f"🧮 **تحليل رياضي احتياطي**"
         
     raw_conf = (scores[final_pred] / total_score) * 100
     confidence = int(min(99, max(50, raw_conf)))
@@ -171,10 +178,10 @@ def predict_titan_8(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     reason_str = "\n".join(logs)
     return final_pred, confidence, reason_str
 
-# ==================== 🚀 Bulk Learning & Admin Commands ====================
+# ==================== 🚀 Fast Bulk Learning (Pandas Fix) ====================
 async def force_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
-    msg = await update.message.reply_text("🧠 جاري التدريب الاستراتيجي (TITAN 8.0)...")
+    msg = await update.message.reply_text("🧠 جاري تشغيل خوارزميات TITAN 9.0...")
     try:
         with get_db_cursor() as (conn, cur):
             df = pd.read_sql("SELECT suit, rank, bonus_last_digit, b_num, winner FROM history WHERE winner IS NOT NULL", conn)
@@ -182,7 +189,7 @@ async def force_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
         df['clean_b'] = df['b_num'].astype(str).apply(clean_digits)
         df = df[df['clean_b'] != ""]
         
-        # 🌟 إصلاح Pandas الحقيقي: فرض Integer للـ Digits لمنع 7.0
+        # 🌟 إصلاح الـ Float (7.0 vs 7) 🌟
         df['final_digit'] = df['bonus_last_digit'].fillna(df['clean_b'].str[-1])
         df['final_digit'] = pd.to_numeric(df['final_digit'], errors='coerce').fillna(0).astype(int)
         
@@ -195,14 +202,13 @@ async def force_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if w not in [0, 1, 2]: continue
             
             s = row['suit']
-            d = row['final_digit'] # Integer now
+            d = row['final_digit'] 
             r = row['rank'] if pd.notna(row['rank']) else ""
             
-            # بناء الـ 5 أنماط المعمارية
             pats = [
                 (f"SUIT_{s}", "SUIT"),
                 (f"DIGIT_{d}", "DIGIT"),
-                (f"SD_{s}_{d}", "SD") # 🌟 النمط الذهبي الجديد
+                (f"SD_{s}_{d}", "SD") 
             ]
             if r:
                 pats.append((f"RANK_{r}", "RANK"))
@@ -212,7 +218,6 @@ async def force_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if pid not in stats: stats[pid] = {'type': ptype, 0:0, 1:0, 2:0}
                 stats[pid][w] += 1
                 
-        # Bulk Data Prep
         data_to_insert = [(pid, v['type'], v[0], v[1], v[2]) for pid, v in stats.items()]
             
         if data_to_insert:
@@ -224,41 +229,44 @@ async def force_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 execute_values(cur, insert_query, data_to_insert)
                 conn.commit()
                 
-        await msg.edit_text(f"✅ **تم التدريب (TITAN 8.0)**\nتم ضخ {len(data_to_insert)} نمط بدقة (شامل النمط الذهبي SD).")
+        await msg.edit_text(f"✅ **اكتمل التدريب (TITAN 9.0)**\nتم ضخ {len(data_to_insert)} نمط. (التركيز على النمط الذهبي SD).")
     except Exception as e:
         await msg.edit_text(f"❌ حدث خطأ: {e}")
 
 async def download_db_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
-    msg = await update.message.reply_text("⏳ جاري سحب قاعدة البيانات...")
+    
+    message = update.message if update.message else update.callback_query.message
+    msg = await message.reply_text("⏳ جاري سحب قاعدة البيانات...")
+    
     try:
         with get_db_cursor() as (conn, cur):
             df_history = pd.read_sql("SELECT * FROM history ORDER BY id DESC LIMIT 5000", conn)
             df_patterns = pd.read_sql("SELECT * FROM pattern_stats ORDER BY (red_count + blue_count) DESC", conn)
             
-        filename = f"hades_db_v8_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        filename = f"hades_db_v9_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         
         with open(filename, "w", encoding="utf-8") as f:
-            f.write("=== HADES TITAN 8.0 DB BACKUP ===\n\n--- PATTERN STATS ---\n")
+            f.write("=== HADES TITAN 9.0 DB BACKUP ===\n\n--- PATTERN STATS ---\n")
             df_patterns.to_csv(f, sep='\t', index=False)
             f.write("\n\n--- HISTORY ---\n")
             df_history.to_csv(f, sep='\t', index=False)
 
         with open(filename, "rb") as f:
-            await update.message.reply_document(document=f, caption="📥 نسخة V8 (شاملة الـ Suit+Digit)")
+            await message.reply_document(document=f, caption="📥 نسخة V9 (Apex Architecture)")
         os.remove(filename)
         await msg.delete()
     except Exception as e:
         await msg.edit_text(f"❌ خطأ: {e}")
 
-# ==================== 🎮 الواجهة ====================
+# ==================== 🎮 الواجهة والمراقبة الحية ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     kb = [
         [InlineKeyboardButton("🎴 اختيار البذلة", callback_data="choose_suit")],
         [InlineKeyboardButton("📥 تحميل قاعدة البيانات (TXT)", callback_data="download_txt")]
     ]
-    await update.message.reply_text("<b>🏛️ HADES TITAN 8.0 (The Apex)</b>\n\nاضغط للبدء:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    await update.message.reply_text("<b>🏛️ HADES TITAN 9.0 (Singularity Node)</b>\n\nنظام التداول المبني على Bayesian Smoothing.\nاضغط للبدء:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -304,7 +312,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rank = context.user_data.get('last_rank')
             
             if b_num and suit and rank:
-                last_digit = int(clean_digits(b_num)[-1]) # Safe INT conversion
+                last_digit = int(clean_digits(b_num)[-1]) 
                 try:
                     with get_db_cursor() as (conn, cur):
                         cur.execute("""INSERT INTO history (b_num, suit, rank, bonus_last_digit, winner, user_id) 
@@ -347,7 +355,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("⚠️ <b>يجب اختيار البذلة والورقة أولاً!</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
                 return
                 
-            pred_code, confidence, reason = predict_titan_8(clean_text, suit, rank)
+            pred_code, confidence, reason = predict_titan_9(clean_text, suit, rank)
             
             context.user_data['last_b_num'] = clean_text
             context.user_data['last_suit'] = suit
@@ -359,7 +367,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             
             bar = generate_progress_bar(confidence)
-            report = f"""🎯 <b>تقرير TITAN 8.0</b>
+            report = f"""🎯 <b>تقرير TITAN 9.0</b>
 ━━━━━━━━━━━━━━━
 🃏 الورقة: {suit} {rank} | 📥 البونص: <code>{clean_text}</code>
 
@@ -375,7 +383,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Handle Msg Error: {e}")
 
-# ==================== 🚀 التشغيل ====================
 if __name__ == "__main__":
     ensure_columns()
     app = ApplicationBuilder().token(TOKEN).build()
@@ -387,5 +394,5 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("🚀 HADES TITAN 8.0 RUNNING...")
+    print("🚀 HADES TITAN 9.0 RUNNING...")
     app.run_polling(drop_pending_updates=True)
