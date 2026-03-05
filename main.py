@@ -3,8 +3,13 @@ HADES TITAN 9.0 - The Singularity Node (Data Science Masterpiece)
 تم إعداده بناءً على التحليل الإحصائي العميق (2500+ جولة).
 الاعتماد الكلي على نمط (Suit + Digit) الذهبي، والتنعيم البايزي ضد الأنماط النادرة.
 """
-
-import os, re, datetime, psycopg2, pandas as pd, json, logging
+import os
+import re
+import datetime
+import psycopg2
+import pandas as pd
+import json
+import logging
 from typing import Tuple, Dict, List, Optional
 from contextlib import contextmanager
 from psycopg2.extras import execute_values
@@ -14,6 +19,7 @@ from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQu
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# ⚠️ تحذير أمني: يرجى تغيير التوكن وكلمة مرور قاعدة البيانات لاحقاً
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s" 
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 ADMIN_ID = 6033203084
@@ -278,7 +284,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await download_db_txt(update, context)
             
         elif data == "choose_suit":
-            context.user_data.pop('suit', None); context.user_data.pop('rank', None)
+            context.user_data.pop('suit', None)
+            context.user_data.pop('rank', None)
             kb = [[InlineKeyboardButton(s, callback_data=f"suit_{s}") for s in SUITS]]
             await query.edit_message_text("🎴 <b>اختر البذلة:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
             
@@ -374,8 +381,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🏆 <b>التوقع: {WINNER_NAMES[pred_code]}</b>
 📊 الثقة: [{bar}] {confidence}%
 
-<b>🔍 محركات التحليل:</b>
-{reason}
+<b>🔍 محركات التحليل:</b>\n{reason}
 ━━━━━━━━━━━━━━━
 اختر الفائز لتسجيل النتيجة:"""
             
