@@ -15,9 +15,9 @@ from telegram.ext import (
 from openai import OpenAI
 
 # ---------------------------
-# بياناتك مباشرة
+# بياناتك
 # ---------------------------
-TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"  # بوت تيليجرام
+TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 ADMIN_ID = 6033203084
 OPENAI_API_KEY = "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"
@@ -149,21 +149,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("HADES TITAN\nابدأ التحليل", reply_markup=InlineKeyboardMarkup(kb))
 
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q=update.callback_query
-    await q.answer()
-    data=q.data
-    if data=="suit":
-        kb=[[InlineKeyboardButton(s,callback_data=f"s_{s}") for s in SUITS]]
-        await q.edit_message_text("اختر البذلة", reply_markup=InlineKeyboardMarkup(kb))
-    elif data.startswith("s_"):
-        suit=data.split("_")[1]
-        context.user_data["suit"]=suit
-        kb=[[InlineKeyboardButton(r,callback_data=f"r_{r}") for r in row] for row in RANK_LAYOUT]
-        await q.edit_message_text(f"{suit} اختر الورقة", reply_markup=InlineKeyboardMarkup(kb))
-    elif data.startswith("r_"):
-        rank=data.split("_")[1]
-        context.user_data["rank"]=rank
-        await q.edit_message_text("ارسل رقم البونص")
+    q = update.callback_query
+    try:
+        await q.answer(cache_time=0)  # مهم لتجنب تعليق الزر
+        data = q.data
+
+        if data == "suit":
+            kb = [[InlineKeyboardButton(s, callback_data=f"s_{s}") for s in SUITS]]
+            await q.edit_message_text("اختر البذلة", reply_markup=InlineKeyboardMarkup(kb))
+
+        elif data.startswith("s_"):
+            suit = data.split("_")[1]
+            context.user_data["suit"] = suit
+            kb = [[InlineKeyboardButton(r, callback_data=f"r_{r}") for r in row] for row in RANK_LAYOUT]
+            await q.edit_message_text(f"{suit} اختر الورقة", reply_markup=InlineKeyboardMarkup(kb))
+
+        elif data.startswith("r_"):
+            rank = data.split("_")[1]
+            context.user_data["rank"] = rank
+            await q.edit_message_text("ارسل رقم البونص")
+
+    except Exception as e:
+        logger.error(f"Callback error: {e}")
+        await q.edit_message_text("حدث خطأ، حاول مرة أخرى.")
 
 async def message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text=update.message.text
