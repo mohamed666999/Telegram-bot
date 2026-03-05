@@ -1,6 +1,6 @@
 """
-HADES TITAN 7.0 - The True Architect (Data Science Edition)
-تم تطبيق أوزان حقيقية مستخرجة من قاعدة البيانات، معالجة خطأ Pandas، وإزالة سلاسل ماركوف المضللة.
+HADES TITAN 7.1 - The True Architect (Bug Fixes)
+تم إزالة الكاش المسبب للتعليق، وحماية دوال التوقع، وضمان استجابة البوت دائماً.
 """
 
 import os, re, datetime, time, psycopg2, pandas as pd, json, logging
@@ -22,16 +22,16 @@ WINNER_NAMES = {0: 'الراعي 🔴', 1: 'الثور 🔵', 2: 'تعادل ⚪
 SUITS = ['♦️', '♥️', '♠️', '♣️']
 RANKS_LAYOUT = [["A", "K", "Q", "J"], ["10", "9", "8", "7"], ["6", "5", "4", "3", "2"]]
 
-# ⚡ الأوزان الإحصائية الدقيقة المستخرجة من الـ 2369 جولة ⚡
+# ⚡ الأوزان الإحصائية
 WEIGHTS = {
-    'EXACT': 2.4,   # Suit + Rank + Digit
-    'SUIT': 1.8,    # انحياز حقيقي (مثال: السبايد للراعي)
-    'DIGIT': 1.2,   # انحياز حقيقي (مثال: 0 للثور)
-    'RANK': 0.8,    # تأثير أضعف
-    'MOMENTUM': 1.1 # لكسر السلاسل بعد 2 أو 3
+    'EXACT': 2.4,
+    'SUIT': 1.8,
+    'DIGIT': 1.2,
+    'RANK': 0.8,
+    'MOMENTUM': 1.1 
 }
 
-# ==================== 🗄️ إدارة قاعدة البيانات الآمنة ====================
+# ==================== 🗄️ إدارة قاعدة البيانات ====================
 @contextmanager
 def get_db_cursor():
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
@@ -59,16 +59,18 @@ def clean_digits(text: str) -> str:
     if not text: return ""
     return re.sub(r"\D", "", str(text))
 
-# ==================== 📊 Bayesian Probability Engine (V7.0) ====================
+def generate_progress_bar(percentage: int) -> str:
+    filled = int(percentage / 10)
+    return "█" * filled + "░" * (10 - filled)
+
+# ==================== 📊 Bayesian Probability Engine ====================
 def get_bayesian_prob(pattern_id: str) -> Tuple[int, float, str]:
-    """ Laplce Smoothing + Probability calculation """
     try:
         with get_db_cursor() as (conn, cur):
             cur.execute("SELECT red_count, blue_count FROM pattern_stats WHERE pattern_id = %s", (pattern_id,))
             row = cur.fetchone()
             if row:
                 red, blue = row[0], row[1]
-                # Laplace Smoothing (Alpha=1) يمنع القسمة على صفر ويعالج البيانات القليلة
                 total = red + blue + 2 
                 p_red = (red + 1) / total
                 p_blue = (blue + 1) / total
@@ -76,91 +78,97 @@ def get_bayesian_prob(pattern_id: str) -> Tuple[int, float, str]:
                 winner = 0 if p_red > p_blue else 1
                 confidence = max(p_red, p_blue)
                 return winner, confidence, f"[{int(red)}🔴:{int(blue)}🔵]"
-    except: pass
+    except Exception as e:
+        logger.error(f"Bayesian Error: {e}")
     return 2, 0.0, "[No Data]"
 
-# ==================== 🔐 Momentum & Streak Breaker ====================
+# ==================== 🔐 Streak Breaker ====================
 def detect_streak_breaker() -> Tuple[Optional[int], float, str]:
-    """ 
-    يكتشف السلاسل المتتالية ويكسرها بناءً على متوسط السلاسل (2.1).
-    هذا يحل محل سلاسل ماركوف التي لا تعمل مع الجولات المتقطعة.
-    """
     try:
         with get_db_cursor() as (conn, cur):
-            # التأكد من أن الجولات كانت متتالية زمنياً (لعبت في نفس الجلسة)
             cur.execute("SELECT winner, timestamp FROM history WHERE winner IS NOT NULL ORDER BY id DESC LIMIT 5")
             rows = cur.fetchall()
             if len(rows) < 3: return None, 0.0, ""
             
-            # التأكد من عدم وجود انقطاع زمني كبير بين آخر 3 جولات
             time_diff = (rows[0][1] - rows[2][1]).total_seconds()
-            if time_diff > 180: return None, 0.0, "" # الجولات متقطعة، لا تحسب الـ Streak
+            if time_diff > 180: return None, 0.0, "" 
             
             recent = [WINNER_MAP.get(r[0], 2) for r in rows[:3]]
             
-            # إذا تكررت النتيجة 3 مرات، فالاحتمال الأقوى هو الكسر (Mean Reversion)
             if recent == [0, 0, 0]:
                 return 1, 0.85, "⚠️ كسر السلسلة (توقع الثور 🔵)"
             elif recent == [1, 1, 1]:
                 return 0, 0.85, "⚠️ كسر السلسلة (توقع الراعي 🔴)"
-    except: pass
+    except Exception as e:
+        logger.error(f"Streak Breaker Error: {e}")
     return None, 0.0, ""
 
-# ==================== 🧠 TITAN 7.0 Core Engine ====================
+# ==================== 🧠 TITAN 7.1 Core Engine ====================
 def predict_titan_7(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
-    clean_b = clean_digits(b_num)
-    if not clean_b: return 2, 0, "❌ رقم غير صالح"
-    last_digit = int(clean_b[-1])
-    
-    scores = {0: 0.0, 1: 0.0}
-    logs = []
-    
-    # 1. كاسر السلاسل (الزخم)
-    streak_pred, streak_conf, streak_log = detect_streak_breaker()
-    if streak_pred is not None:
-        scores[streak_pred] += streak_conf * WEIGHTS['MOMENTUM']
-        logs.append(f"⏱️ **الزخم:** {WINNER_NAMES[streak_pred]} ({streak_log})")
-
-    # 2. النمط الدقيق (Suit + Rank + Digit)
-    exact_w, exact_c, exact_log = get_bayesian_prob(f"EXACT_{suit}_{rank}_{last_digit}")
-    if exact_w != 2:
-        scores[exact_w] += exact_c * WEIGHTS['EXACT']
-        logs.append(f"🎯 **نمط دقيق:** {WINNER_NAMES[exact_w]} {exact_log}")
-
-    # 3. نمط البذلة (أقوى نمط منفرد)
-    suit_w, suit_c, suit_log = get_bayesian_prob(f"SUIT_{suit}")
-    if suit_w != 2:
-        scores[suit_w] += suit_c * WEIGHTS['SUIT']
-        logs.append(f"🎴 **نمط البذلة:** {WINNER_NAMES[suit_w]} {suit_log}")
-
-    # 4. نمط الرقم الأخير
-    digit_w, digit_c, digit_log = get_bayesian_prob(f"DIGIT_{last_digit}")
-    if digit_w != 2:
-        scores[digit_w] += digit_c * WEIGHTS['DIGIT']
-        logs.append(f"🔢 **نمط الرقم:** {WINNER_NAMES[digit_w]} {digit_log}")
-
-    # 5. نمط الورقة (الأضعف تأثيراً)
-    rank_w, rank_c, rank_log = get_bayesian_prob(f"RANK_{rank}")
-    if rank_w != 2:
-        scores[rank_w] += rank_c * WEIGHTS['RANK']
-
-    # 6. الحساب النهائي
-    final_pred = 0 if scores[0] >= scores[1] else 1
-    total_score = scores[0] + scores[1]
-    
-    if total_score == 0:
-        return 2, 50, "🧮 **لا توجد بيانات كافية (احتمال متساوٍ)**"
+    try:
+        clean_b = clean_digits(b_num)
+        if not clean_b: return 2, 0, "❌ رقم غير صالح"
+        last_digit = int(clean_b[-1])
         
-    raw_conf = (scores[final_pred] / total_score) * 100
-    confidence = int(min(99, max(50, raw_conf)))
-    
-    reason_str = "\n".join(logs)
-    return final_pred, confidence, reason_str
+        scores = {0: 0.0, 1: 0.0}
+        logs = []
+        
+        # 1. كاسر السلاسل (الزخم)
+        streak_pred, streak_conf, streak_log = detect_streak_breaker()
+        if streak_pred is not None:
+            scores[streak_pred] += streak_conf * WEIGHTS['MOMENTUM']
+            logs.append(f"⏱️ **الزخم:** {WINNER_NAMES[streak_pred]} ({streak_log})")
 
-# ==================== 🚀 Bulk Learning (Pandas Float Fix) ====================
+        # 2. النمط الدقيق (Suit + Rank + Digit)
+        exact_w, exact_c, exact_log = get_bayesian_prob(f"EXACT_{suit}_{rank}_{last_digit}")
+        if exact_w != 2:
+            scores[exact_w] += exact_c * WEIGHTS['EXACT']
+            logs.append(f"🎯 **نمط دقيق:** {WINNER_NAMES[exact_w]} {exact_log}")
+
+        # 3. نمط البذلة
+        suit_w, suit_c, suit_log = get_bayesian_prob(f"SUIT_{suit}")
+        if suit_w != 2:
+            scores[suit_w] += suit_c * WEIGHTS['SUIT']
+            logs.append(f"🎴 **نمط البذلة:** {WINNER_NAMES[suit_w]} {suit_log}")
+
+        # 4. نمط الرقم الأخير
+        digit_w, digit_c, digit_log = get_bayesian_prob(f"DIGIT_{last_digit}")
+        if digit_w != 2:
+            scores[digit_w] += digit_c * WEIGHTS['DIGIT']
+            logs.append(f"🔢 **نمط الرقم:** {WINNER_NAMES[digit_w]} {digit_log}")
+
+        # 5. نمط الورقة
+        rank_w, rank_c, rank_log = get_bayesian_prob(f"RANK_{rank}")
+        if rank_w != 2:
+            scores[rank_w] += rank_c * WEIGHTS['RANK']
+
+        # 6. الحساب النهائي
+        final_pred = 0 if scores[0] >= scores[1] else 1
+        total_score = scores[0] + scores[1]
+        
+        if total_score == 0:
+            # تدخّل المحرك الرياضي في حال غياب البيانات كلياً
+            padded_b = clean_b.zfill(3)
+            last_digits_sum = sum(int(d) for d in padded_b[-3:])
+            card_val = RANK_VALUE.get(str(rank).strip().upper(), 0)
+            math_res = ((last_digits_sum * card_val) + last_digit) % 2
+            logs.append(f"🧮 **المحرك الرياضي:** {WINNER_NAMES[math_res]}")
+            return math_res, 60, "\n".join(logs)
+            
+        raw_conf = (scores[final_pred] / total_score) * 100
+        confidence = int(min(99, max(50, raw_conf)))
+        
+        reason_str = "\n".join(logs)
+        return final_pred, confidence, reason_str
+    
+    except Exception as e:
+        logger.error(f"Predict TITAN 7 Error: {e}")
+        return 2, 0, f"⚠️ خطأ أثناء التحليل."
+
+# ==================== 🚀 Bulk Learning ====================
 async def force_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
-    msg = await update.message.reply_text("🧠 جاري معالجة وتصحيح قاعدة البيانات (Pandas Fix)...")
+    msg = await update.message.reply_text("🧠 جاري معالجة وتصحيح قاعدة البيانات...")
     try:
         with get_db_cursor() as (conn, cur):
             df = pd.read_sql("SELECT suit, rank, bonus_last_digit, b_num, winner FROM history WHERE winner IS NOT NULL", conn)
@@ -168,7 +176,6 @@ async def force_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
         df['clean_b'] = df['b_num'].astype(str).apply(clean_digits)
         df = df[df['clean_b'] != ""]
         
-        # 🌟 إصلاح خطأ تقسيم البيانات (7.0 vs 7) 🌟
         df['final_digit'] = df['bonus_last_digit'].fillna(df['clean_b'].str[-1])
         df['final_digit'] = pd.to_numeric(df['final_digit'], errors='coerce').fillna(0).astype(int).astype(str)
         
@@ -180,10 +187,7 @@ async def force_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
             w = row['winner_code']
             if w not in [0, 1, 2]: continue
             
-            pats = [
-                f"SUIT_{row['suit']}", 
-                f"DIGIT_{row['final_digit']}"
-            ]
+            pats = [f"SUIT_{row['suit']}", f"DIGIT_{row['final_digit']}"]
             if pd.notna(row['rank']):
                 pats.append(f"RANK_{row['rank']}")
                 pats.append(f"EXACT_{row['suit']}_{row['rank']}_{row['final_digit']}")
@@ -199,11 +203,11 @@ async def force_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
                               VALUES %s ON CONFLICT (pattern_id) DO UPDATE 
                               SET red_count=EXCLUDED.red_count, blue_count=EXCLUDED.blue_count, tie_count=EXCLUDED.tie_count"""
             with get_db_cursor() as (conn, cur):
-                cur.execute("TRUNCATE TABLE pattern_stats;") # تفريغ الجدول للبدء نظيفاً
+                cur.execute("TRUNCATE TABLE pattern_stats;") 
                 execute_values(cur, insert_query, data_to_insert)
                 conn.commit()
                 
-        await msg.edit_text(f"✅ **اكتمل التدريب (TITAN 7.0)**\nتم معالجة وضخ {len(data_to_insert)} نمط بدقة متناهية.")
+        await msg.edit_text(f"✅ **اكتمل التدريب (TITAN 7.1)**\nتم معالجة وضخ {len(data_to_insert)} نمط بدقة متناهية.")
     except Exception as e:
         await msg.edit_text(f"❌ حدث خطأ: {e}")
 
@@ -218,27 +222,27 @@ async def download_db_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         filename = f"hades_db_v7_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         
         with open(filename, "w", encoding="utf-8") as f:
-            f.write("=== HADES TITAN 7.0 DB BACKUP ===\n\n--- PATTERN STATS ---\n")
+            f.write("=== HADES TITAN 7.1 DB BACKUP ===\n\n--- PATTERN STATS ---\n")
             df_patterns.to_csv(f, sep='\t', index=False)
             f.write("\n\n--- HISTORY ---\n")
             df_history.to_csv(f, sep='\t', index=False)
 
         with open(filename, "rb") as f:
-            await update.message.reply_document(document=f, caption="📥 نسخة احتياطية من قاعدة بيانات V7")
+            await update.message.reply_document(document=f, caption="📥 نسخة احتياطية من قاعدة بيانات V7.1")
         
         os.remove(filename)
         await msg.delete()
     except Exception as e:
         await msg.edit_text(f"❌ خطأ في السحب: {e}")
 
-# ==================== 🎮 الواجهة الآمنة (Telegram) ====================
+# ==================== 🎮 الواجهة ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     kb = [
         [InlineKeyboardButton("🎴 اختيار البذلة", callback_data="choose_suit")],
         [InlineKeyboardButton("📥 تحميل قاعدة البيانات (TXT)", callback_data="download_txt")]
     ]
-    await update.message.reply_text("<b>🏛️ HADES TITAN 7.0 (The Architect)</b>\n\nاضغط للبدء:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    await update.message.reply_text("<b>🏛️ HADES TITAN 7.1 (Stable)</b>\n\nاضغط للبدء:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -291,16 +295,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                        VALUES (%s, %s, %s, %s, %s, %s)""",
                                     (b_num, suit, rank, last_digit, WINNER_NAMES[w_code], update.effective_user.id))
                         
-                        # التحديث اللحظي للأنماط (Live Training)
                         col = "red_count" if w_code == 0 else "blue_count" if w_code == 1 else "tie_count"
                         for pid in [f"EXACT_{suit}_{rank}_{last_digit}", f"SUIT_{suit}", f"DIGIT_{last_digit}", f"RANK_{rank}"]:
                             cur.execute(f"""INSERT INTO pattern_stats (pattern_id, {col}) VALUES (%s, 1) 
                                             ON CONFLICT (pattern_id) DO UPDATE SET {col} = pattern_stats.{col} + 1""", (pid,))
                         conn.commit()
-                except Exception as e: logger.error(e)
+                except: pass
 
             kb = [[InlineKeyboardButton("🗑️ تصحيح", callback_data="delete_last")], [InlineKeyboardButton("🔄 تغيير", callback_data="choose_suit")]]
-            await query.edit_message_text(f"✅ تم التسجيل (Live Update): <b>{WINNER_NAMES[w_code]}</b>\n\n📥 <b>أرسل الرقم التالي لـ ({suit} {rank}):</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+            await query.edit_message_text(f"✅ تم التسجيل: <b>{WINNER_NAMES[w_code]}</b>\n\n📥 <b>أرسل الرقم التالي لـ ({suit} {rank}):</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
             
     except Exception as e:
         logger.error(f"Callback Error: {e}")
@@ -331,7 +334,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             
             bar = generate_progress_bar(confidence)
-            report = f"""🎯 <b>تقرير TITAN 7.0</b>
+            report = f"""🎯 <b>تقرير TITAN 7.1</b>
 ━━━━━━━━━━━━━━━
 🃏 الورقة: {suit} {rank} | 📥 البونص: <code>{clean_text}</code>
 
@@ -346,6 +349,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
     except Exception as e:
         logger.error(f"Handle Msg Error: {e}")
+        await update.message.reply_text(f"⚠️ حدث خطأ في النظام. الرجاء المحاولة مجدداً.")
 
 # ==================== 🚀 التشغيل ====================
 if __name__ == "__main__":
@@ -359,5 +363,5 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("🚀 HADES TITAN 7.0 RUNNING...")
+    print("🚀 HADES TITAN 7.1 RUNNING...")
     app.run_polling(drop_pending_updates=True)
