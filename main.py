@@ -96,6 +96,7 @@ def load_filtered_history(min_id: int = WARMUP_ROUNDS + 1) -> pd.DataFrame:
     except Exception as e:
         logger.error(f"❌ خطأ في تحميل البيانات: {e}")
         return pd.DataFrame()
+
 def get_latest_stats(df: pd.DataFrame) -> Dict[str, Any]:
     if df.empty:
         return {'total_rounds': 0, 'bias': {'red': 0, 'blue': 0, 'tie': 0}}
@@ -145,7 +146,8 @@ def get_active_laws() -> List[Dict]:
             FROM ai_laws 
             WHERE is_active=TRUE AND confidence_score>=0.6 
             ORDER BY confidence_score DESC 
-            LIMIT 10        """)
+            LIMIT 10
+        """)
         laws = []
         for row in cur.fetchall():
             laws.append({
@@ -243,7 +245,8 @@ class AIObserver:
                 WHERE winner IS NOT NULL AND prediction IS NOT NULL
                 ORDER BY id DESC 
                 LIMIT {limit}
-            """, conn)            conn.close()
+            """, conn)
+            conn.close()
             return df
         except Exception as e:
             logger.error(f"❌ خطأ في جلب التاريخ: {e}")
@@ -259,7 +262,7 @@ class AIObserver:
             sub = df[df['winner'] == w]
             if len(sub) >= 5 and 'b_num' in sub.columns:
                 sub_copy = sub.copy()
-                sub_copy['last_digit'] = sub_copy['b_num'].astype(str).str[-1].str.extract('(\d)')
+                sub_copy['last_digit'] = sub_copy['b_num'].astype(str).str[-1].str.extract(r'(\d)')
                 freq = sub_copy['last_digit'].value_counts()
                 if not freq.empty and freq.iloc[0] >= 3:
                     patterns.append({
@@ -292,7 +295,8 @@ class AIObserver:
             if not conn:
                 return
             cur = conn.cursor()
-            cur.execute("""                INSERT INTO ai_laws (law_name, law_description, law_pattern, confidence_score)
+            cur.execute("""
+                INSERT INTO ai_laws (law_name, law_description, law_pattern, confidence_score)
                 VALUES (%s, %s, %s, %s)
                 ON CONFLICT (law_name) DO UPDATE
                 SET confidence_score = EXCLUDED.confidence_score, 
@@ -390,7 +394,8 @@ class AIObserver:
         
         jq.run_repeating(
             self.quick_review,
-            interval=600,            first=60,
+            interval=600,
+            first=60,
             name="observer_quick"
         )
         logger.info("⏰ [Observer] تم جدولة المراجعة السريعة كل 10 دقائق")
@@ -439,7 +444,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             summary,
             reply_markup=InlineKeyboardMarkup(kb),
-            parse_mode='Markdown'        )
+            parse_mode='Markdown'
+        )
         logger.info(f"✅ استجابة /start ناجحة للمستخدم {user_id}")
         
     except Exception as e:
@@ -488,7 +494,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔢 جولات: {stats.get('total_rounds', 0)}
 🏆 توزيع:
 • 🔴: {stats['bias'].get('red', 0):.1%}
-• 🔵: {stats['bias'].get('blue', 0):.1%}• ⚪: {stats['bias'].get('tie', 0):.1%}
+• 🔵: {stats['bias'].get('blue', 0):.1%}
+• ⚪: {stats['bias'].get('tie', 0):.1%}
 """
             except:
                 report = "📊 **إحصائيات HADES V103**\n⏳ جاري التحميل..."
@@ -537,7 +544,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 report = f"""📊 **تحليل شامل**
 • جولات: {stats.get('total_rounds', 0)}
 • انحياز 🔴: {stats['bias'].get('red', 0):.1%}
-"""            except:
+"""
+            except:
                 report = "📊 **تحليل شامل**\n⏳ جاري التحميل..."
             
             kb = [
@@ -586,7 +594,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.error(f"❌ خطأ الحفظ: {e}")
                     await query.answer("❌ خطأ في الحفظ", show_alert=True)
     
-    except Exception as e:        logger.error(f"❌ خطأ في handle_callback: {e}")
+    except Exception as e:
+        logger.error(f"❌ خطأ في handle_callback: {e}")
         try:
             await query.answer("⚠️ حدث خطأ، حاول مرة أخرى", show_alert=True)
         except:
@@ -635,7 +644,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("⚪ تعادل", callback_data=f"save_تعادل ⚪")],
                 [InlineKeyboardButton("🔄 تحليل جديد", callback_data="ai_predict")]
             ]
-                        await update.message.reply_text(
+            
+            await update.message.reply_text(
                 report,
                 reply_markup=InlineKeyboardMarkup(kb),
                 parse_mode='Markdown'
@@ -684,7 +694,8 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔢 جولات: {stats.get('total_rounds', 0)}
 🏆 🔴:{stats['bias'].get('red',0):.1%} 🔵:{stats['bias'].get('blue',0):.1%} ⚪:{stats['bias'].get('tie',0):.1%}
 🎯 دقة: {stats.get('accuracy', 'N/A')}
-"""    kb = [[InlineKeyboardButton("🔙 الرئيسية", callback_data="start_back")]]
+"""
+    kb = [[InlineKeyboardButton("🔙 الرئيسية", callback_data="start_back")]]
     await update.message.reply_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
 async def export_laws_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
