@@ -1,390 +1,729 @@
+# -*- coding: utf-8 -*-
+"""
+HADES V103 - Autonomous Self-Evolving AI Prediction System
+نظام تنبؤ هجين: معادلة رياضية + تحليل بايزي + NVIDIA AI + قوانين ذكية
+يعمل على Railway مع PostgreSQL - واجهة أزرار تفاعلية كاملة
+"""
+
+import os
+import sys
+import datetime
+import psycopg2
+import pandas as pd
+import numpy as np
+import json
 import re
 import logging
-import psycopg2
-import asyncio
-from contextlib import contextmanager
-from typing import Tuple, Optional
+import random
+from typing import Dict, List, Tuple, Optional, Any
+from collections import Counter
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder,
-    MessageHandler,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    filters,
+    ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler,
+    CommandHandler, ContextTypes, JobQueue
 )
-from openai import OpenAI
 from telegram.error import BadRequest
+from openai import OpenAI
 
-# ---------------------------
-# بياناتك
-# ---------------------------
-TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
-DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
-ADMIN_ID = 6033203084
-OPENAI_API_KEY = "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"
-OPENAI_BASE_URL = "https://integrate.api.nvidia.com/v1"
-
-# ---------------------------
-# إعدادات البوت و AI
-# ---------------------------
+# ==================== 🛡️ الإعدادات الأساسية ====================
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
-ai_client = OpenAI(
-    base_url=OPENAI_BASE_URL,
-    api_key=OPENAI_API_KEY
-)
+# ✅ المفاتيح - كما طلبت تبقى كما هي
+TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
+DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
+ADMIN_ID = 6033203084
 
-# ---------------------------
-# الثوابت
-# ---------------------------
-WINNER_MAP = {"راعي": 0, "الراعي 🔴": 0, "ثور": 1, "الثور 🔵": 1, "تعادل": 2, "تعادل ⚪": 2}
-WINNER_NAMES = {0: "الراعي 🔴", 1: "الثور 🔵", 2: "تعادل ⚪"}
-SUITS = ["♦️", "♥️", "♠️", "♣️"]
-CARD_VALUES = {"A": 14, "K": 13, "Q": 12, "J": 11, "10": 10, "9": 9, "8": 8, "7": 7, "6": 6, "5": 5, "4": 4, "3": 3, "2": 2}
-RANK_LAYOUT = [["A", "K", "Q", "J"], ["10", "9", "8", "7"], ["6", "5", "4", "3", "2"]]
-# ---------------------------
-# قاعدة البيانات
-# ---------------------------
-@contextmanager
-def db_cursor():
-    conn = None
+NVIDIA_API_KEY = "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"
+NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+NVIDIA_MODEL = "minimaxai/minimax-m2.5"
+
+# ثوابت النظام
+WARMUP_ROUNDS = 700
+WINNER_MAP = {
+    'الراعي 🔴': 0, 'راعي': 0, 'الثور 🔵': 1, 'ثور': 1,
+    'تعادل ⚪': 2, 'تعادل': 2, '🔴': 0, '🔵': 1, '⚪': 2}
+WINNER_NAMES = {0: 'الراعي 🔴', 1: 'الثور 🔵', 2: 'تعادل ⚪'}
+SUITS = ['♦️', '♥️', '♠️', '♣️']
+
+# الإعدادات الديناميكية الافتراضية
+DYNAMIC_CONFIG = {
+    'CONFIDENCE_THRESHOLD': 0.65,
+    'MATH_WEIGHT': 0.55,
+    'BAYES_WEIGHT': 0.45,
+    'MATH_CONFIDENCE': 0.7,
+    'S_RED': 1.0,
+    'S_BLACK': 1.0,
+    'RANDOM_NOISE': 0.02,
+    'VOTE_THRESHOLD': 2,
+}
+
+# ==================== 🗄️ إدارة قاعدة البيانات ====================
+def get_db_connection():
     try:
-        conn = psycopg2.connect(DATABASE_URL, sslmode="require", connect_timeout=10)
-        yield conn, conn.cursor()
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require', connect_timeout=10)
+        return conn
     except Exception as e:
-        logger.error(f"❌ خطأ قاعدة البيانات: {e}")
-        if conn:
-            conn.rollback()
-        yield None, None
-    finally:
-        if conn:
-            conn.close()
+        logger.error(f"❌ فشل الاتصال بقاعدة البيانات: {e}")
+        return None
 
-def ensure_tables():
+def load_filtered_history(min_id: int = WARMUP_ROUNDS + 1) -> pd.DataFrame:
     try:
-        with db_cursor() as (conn, cur):
-            if cur:
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS history(
-                        id SERIAL PRIMARY KEY,
-                        suit TEXT,
-                        rank TEXT,
-                        bonus TEXT,
-                        digit INT,
-                        winner TEXT,
-                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                conn.commit()
-                logger.info("✅ الجداول جاهزة")
-    except Exception as e:
-        logger.error(f"❌ خطأ في تهيئة الجداول: {e}")
-
-# ---------------------------
-# وظائف مساعدة
-# ---------------------------
-def clean_digits(text: str) -> str:
-    return re.sub(r"\D", "", text)
-
-def digit_engine(digit: int) -> Tuple[int, int]:
-    try:
-        with db_cursor() as (conn, cur):
-            if not cur:
-                return 2, 0
-            cur.execute("SELECT winner FROM history WHERE digit=%s ORDER BY id DESC LIMIT 200", (digit,))            rows = cur.fetchall()
-        if len(rows) < 10:
-            return 2, 0
-        red = sum(1 for r in rows if WINNER_MAP.get(r[0]) == 0)
-        blue = sum(1 for r in rows if WINNER_MAP.get(r[0]) == 1)
-        total = red + blue
-        if total == 0:
-            return 2, 0
-        return (0, int(red/total*100)) if red > blue else (1, int(blue/total*100))
-    except Exception as e:
-        logger.error(f"❌ خطأ في digit_engine: {e}")
-        return 2, 0
-
-def suit_engine(suit: str) -> Tuple[int, int]:
-    try:
-        with db_cursor() as (conn, cur):
-            if not cur:
-                return 2, 0
-            cur.execute("SELECT winner FROM history WHERE suit=%s ORDER BY id DESC LIMIT 300", (suit,))
-            rows = cur.fetchall()
-        if len(rows) < 20:
-            return 2, 0
-        red = sum(1 for r in rows if WINNER_MAP.get(r[0]) == 0)
-        blue = sum(1 for r in rows if WINNER_MAP.get(r[0]) == 1)
-        total = red + blue
-        if total == 0:
-            return 2, 0
-        return (0, int(red/total*100)) if red > blue else (1, int(blue/total*100))
-    except Exception as e:
-        logger.error(f"❌ خطأ في suit_engine: {e}")
-        return 2, 0
-
-def pattern_engine(suit: str, rank: str, digit: int) -> Tuple[int, int]:
-    try:
-        with db_cursor() as (conn, cur):
-            if not cur:
-                return 2, 0
-            cur.execute(
-                "SELECT winner FROM history WHERE suit=%s AND rank=%s AND digit=%s ORDER BY id DESC LIMIT 100",
-                (suit, rank, digit)
-            )
-            rows = cur.fetchall()
-        if len(rows) < 5:
-            return 2, 0
-        red = sum(1 for r in rows if WINNER_MAP.get(r[0]) == 0)
-        blue = sum(1 for r in rows if WINNER_MAP.get(r[0]) == 1)
-        total = red + blue
-        if total == 0:
-            return 2, 0
-        return (0, int(red/total*100)) if red > blue else (1, int(blue/total*100))    except Exception as e:
-        logger.error(f"❌ خطأ في pattern_engine: {e}")
-        return 2, 0
-
-def math_engine(bonus: str, rank: str) -> Tuple[int, int]:
-    try:
-        padded = bonus.zfill(3)
-        s = sum(int(d) for d in padded[-3:])
-        val = CARD_VALUES.get(rank, 5)
-        result = ((s * val) + int(padded[-1])) % 2
-        return result, 50
-    except:
-        return 2, 0
-
-def predict(suit: str, rank: str, bonus: str) -> Tuple[int, int]:
-    try:
-        digits = clean_digits(bonus)
-        if not digits:
-            return 2, 0
-        digit = int(digits[-1])
+        conn = get_db_connection()
+        if not conn:
+            return pd.DataFrame()
+        query = f"""
+            SELECT id, b_num, suit, winner, timestamp, prediction, user_id
+            FROM history 
+            WHERE winner IS NOT NULL AND id >= {min_id}
+            ORDER BY id ASC
+        """
+        df = pd.read_sql(query, conn)
+        conn.close()
         
-        p1, c1 = pattern_engine(suit, rank, digit)
-        p2, c2 = suit_engine(suit)
-        p3, c3 = digit_engine(digit)
-        p4, c4 = math_engine(digits, rank)
+        if not df.empty:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+            df['winner_code'] = df['winner'].map(WINNER_MAP)
+            df = df.dropna(subset=['winner_code'])
         
-        votes = {0: 0, 1: 0, 2: 0}
-        votes[p1] += c1 * 2.2
-        votes[p2] += c2 * 1.2
-        votes[p3] += c3 * 1.1
-        votes[p4] += c4 * 0.7
+        logger.info(f"✅ تم تحميل {len(df)} جولة (بعد تجاهل أول {WARMUP_ROUNDS})")
+        return df
+    except Exception as e:
+        logger.error(f"❌ خطأ في تحميل البيانات: {e}")
+        return pd.DataFrame()
+def get_latest_stats(df: pd.DataFrame) -> Dict[str, Any]:
+    if df.empty:
+        return {'total_rounds': 0, 'bias': {'red': 0, 'blue': 0, 'tie': 0}}
+    
+    stats = {
+        'total_rounds': len(df),
+        'winner_dist': df['winner'].value_counts().to_dict() if 'winner' in df.columns else {},
+        'bias': {'red': 0, 'blue': 0, 'tie': 0}
+    }
+    
+    total = len(df)
+    if total > 0 and 'winner' in df.columns:
+        stats['bias'] = {
+            'red': float((df['winner'] == 'الراعي 🔴').sum()) / total,
+            'blue': float((df['winner'] == 'الثور 🔵').sum()) / total,
+            'tie': float((df['winner'] == 'تعادل ⚪').sum()) / total
+        }
+    
+    return stats
+
+def load_dynamic_config():
+    global DYNAMIC_CONFIG
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        cur = conn.cursor()
+        cur.execute("SELECT config_name, config_value FROM ai_settings")
+        for name, value in cur.fetchall():
+            if name in DYNAMIC_CONFIG:
+                try:
+                    DYNAMIC_CONFIG[name] = json.loads(value)
+                except:
+                    DYNAMIC_CONFIG[name] = value
+        conn.close()
+    except Exception as e:
+        logger.warning(f"⚠️ فشل تحميل الإعدادات: {e}")
+
+def get_active_laws() -> List[Dict]:
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return []
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT law_name, law_description, law_pattern, confidence_score, success_rate 
+            FROM ai_laws 
+            WHERE is_active=TRUE AND confidence_score>=0.6 
+            ORDER BY confidence_score DESC 
+            LIMIT 10        """)
+        laws = []
+        for row in cur.fetchall():
+            laws.append({
+                'name': row[0],
+                'description': row[1],
+                'pattern': row[2],
+                'confidence': row[3],
+                'success_rate': row[4]
+            })
+        conn.close()
+        return laws
+    except Exception as e:
+        logger.error(f"❌ خطأ في جلب القوانين: {e}")
+        return []
+
+# ==================== 🤖 محرك الذكاء الاصطناعي ====================
+class AdvancedAIEngine:
+    def __init__(self):
+        try:
+            self.client = OpenAI(api_key=NVIDIA_API_KEY, base_url=NVIDIA_BASE_URL)
+            self.model = NVIDIA_MODEL
+        except Exception as e:
+            logger.error(f"❌ خطأ في تهيئة AI: {e}")
+            self.client = None
+    
+    def generate_prediction_command(self, df: pd.DataFrame, current_b_num: str, current_suit: str) -> Dict:
+        if not self.client or df.empty:
+            return {'prediction': 'الراعي 🔴', 'reason': 'تحليل افتراضي', 'confidence': 0.5}
         
-        total_votes = sum(votes.values())
-        if total_votes == 0:
-            return 2, 0
+        try:
+            last_20 = df.tail(20) if len(df) >= 20 else df
+            recent_winners = last_20['winner'].tolist() if 'winner' in last_20.columns else []
+            winner_counts = Counter(recent_winners)
+            last_digit = current_b_num[-1] if current_b_num and current_b_num[-1].isdigit() else '0'
             
-        final = max(votes, key=votes.get)
-        conf = int(votes[final] / total_votes * 100)
-        return final, conf
-    except Exception as e:
-        logger.error(f"❌ خطأ في predict: {e}")
-        return 2, 0
+            laws = get_active_laws()
+            law_info = ""
+            if laws:
+                law_info = f"\n📜 القوانين النشطة: {len(laws)}"
+            
+            prompt = f"""أنت نظام تنبؤ ذكي. البيانات المتاحة:
 
-# ---------------------------
-# دالة AI مع مهلة زمنية
-# ---------------------------
-async def ai_predict(suit: str, rank: str, bonus: str) -> dict:
-    try:
-        prompt = f"توقع نتيجة اللعبة للبذلة {suit}, الورقة {rank}, البونص {bonus} مع شرح سبب الاختيار في جملة واحدة مختصرة"
-                # إضافة مهلة زمنية للطلب
-        response = await asyncio.wait_for(
-            asyncio.to_thread(
-                ai_client.chat.completions.create,
-                model="moonshotai/kimi-k2-instruct-0905",
+📈 آخر 20 نتيجة: {recent_winners[-10:] if recent_winners else []}
+📊 التكرار الأخير: {dict(winner_counts)}
+🎯 الجولة الحالية: رقم={current_b_num}, بذلة={current_suit}, آخر_رقم={last_digit}
+{law_info}
+
+المطلوب: أعطِ تنبؤاً واحداً للجولة الحالية مع سبب منطقي مختصر.
+أجب بصيغة JSON:{{"prediction": "الراعي 🔴" أو "الثور 🔵" أو "تعادل ⚪", "reason": "سبب مختصر", "confidence": 0.XX}}"""
+            
+            response = self.client.chat.completions.create(
+                model=self.model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.6,
-                top_p=0.9,
-                max_tokens=200
-            ),
-            timeout=15  # 15 ثانية مهلة
+                temperature=0.5,
+                max_tokens=500
+            )
+            content = response.choices[0].message.content
+            match = re.search(r'\{.*\}', content, re.DOTALL)
+            if match:
+                return json.loads(match.group())
+            return {'prediction': 'الراعي 🔴', 'reason': 'تحليل AI', 'confidence': 0.5}
+        except Exception as e:
+            logger.error(f"❌ خطأ في تنبؤ AI: {e}")
+            return {'prediction': 'الراعي 🔴', 'reason': 'تحليل افتراضي', 'confidence': 0.5}
+
+# ==================== 👁️ مراقب الذكاء الاصطناعي ====================
+class AIObserver:
+    def __init__(self, app):
+        self.app = app
+        self.ai_engine = AdvancedAIEngine()
+        self.is_running = False
+    
+    def _log_action(self, cycle: str, action: str, details: Dict):
+        try:
+            conn = get_db_connection()
+            if not conn:
+                return
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO ai_observer_log (observer_cycle, action_type, details)
+                VALUES (%s, %s, %s)
+            """, (cycle, action, json.dumps(details, default=str, ensure_ascii=False)))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"❌ خطأ في تسجيل سجل المراقب: {e}")
+    
+    def _get_history(self, limit: int = 100) -> pd.DataFrame:
+        try:
+            conn = get_db_connection()
+            if not conn:
+                return pd.DataFrame()
+            df = pd.read_sql(f"""
+                SELECT * FROM history 
+                WHERE winner IS NOT NULL AND prediction IS NOT NULL
+                ORDER BY id DESC 
+                LIMIT {limit}
+            """, conn)            conn.close()
+            return df
+        except Exception as e:
+            logger.error(f"❌ خطأ في جلب التاريخ: {e}")
+            return pd.DataFrame()
+    
+    def _quick_scan(self, df: pd.DataFrame) -> List[Dict]:
+        if len(df) < 20:
+            return []
+        
+        patterns = []
+        
+        for w in ['الراعي 🔴', 'الثور 🔵', 'تعادل ⚪']:
+            sub = df[df['winner'] == w]
+            if len(sub) >= 5 and 'b_num' in sub.columns:
+                sub_copy = sub.copy()
+                sub_copy['last_digit'] = sub_copy['b_num'].astype(str).str[-1].str.extract('(\d)')
+                freq = sub_copy['last_digit'].value_counts()
+                if not freq.empty and freq.iloc[0] >= 3:
+                    patterns.append({
+                        'type': 'last_digit_after_winner',
+                        'winner': w,
+                        'digit': str(freq.index[0]),
+                        'freq': int(freq.iloc[0]),
+                        'confidence': min(0.95, freq.iloc[0] / len(sub) + 0.3)
+                    })
+        
+        if 'suit' in df.columns:
+            for s in SUITS:
+                sub = df[df['suit'] == s]
+                if len(sub) >= 5 and 'winner' in sub.columns:
+                    wf = sub['winner'].value_counts()
+                    if not wf.empty and wf.iloc[0] >= 3:
+                        patterns.append({
+                            'type': 'suit_winner',
+                            'suit': s,
+                            'winner': wf.index[0],
+                            'freq': int(wf.iloc[0]),
+                            'confidence': min(0.95, wf.iloc[0] / len(sub) + 0.25)
+                        })
+        
+        return patterns
+    
+    def _save_law(self, law: Dict):
+        try:
+            conn = get_db_connection()
+            if not conn:
+                return
+            cur = conn.cursor()
+            cur.execute("""                INSERT INTO ai_laws (law_name, law_description, law_pattern, confidence_score)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (law_name) DO UPDATE
+                SET confidence_score = EXCLUDED.confidence_score, 
+                    last_updated = CURRENT_TIMESTAMP
+            """, (
+                law['name'],
+                law.get('description', ''),
+                json.dumps(law['pattern'], default=str, ensure_ascii=False),
+                law['confidence']
+            ))
+            conn.commit()
+            conn.close()
+            logger.info(f"💡 قانون جديد محفوظ: {law['name']}")
+        except Exception as e:
+            logger.error(f"❌ خطأ في حفظ القانون: {e}")
+    
+    async def quick_review(self, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_running:
+            return
+        
+        logger.info("🔍 [Observer] بدء المراجعة السريعة...")
+        
+        df = self._get_history(50)
+        if df.empty:
+            return
+        
+        patterns = self._quick_scan(df)
+        
+        for p in patterns:
+            name = f"{p['type']}_{p.get('winner', p.get('suit', 'x'))}"
+            existing = [l for l in get_active_laws() if l['name'] == name]
+            
+            if not existing:
+                self._save_law({
+                    'name': name,
+                    'description': p['type'],
+                    'pattern': p,
+                    'confidence': p['confidence']
+                })
+                self._log_action('quick', 'new_law', {'law': name})
+        
+        self._log_action('quick', 'review_complete', {'patterns': len(patterns)})
+        logger.info(f"✅ [Observer] انتهت المراجعة السريعة - أنماط: {len(patterns)}")
+    
+    async def deep_review(self, context: ContextTypes.DEFAULT_TYPE):
+        if not self.is_running:
+            return
+        
+        logger.info("🔬 [Observer] بدء المراجعة العميقة...")        
+        df = self._get_history(200)
+        if df.empty:
+            return
+        
+        total = len(df)
+        if total > 0:
+            red = float((df['winner'] == 'الراعي 🔴').sum()) / total
+            blue = float((df['winner'] == 'الثور 🔵').sum()) / total
+            tie = float((df['winner'] == 'تعادل ⚪').sum()) / total
+            
+            if tie < 0.05:
+                self._save_law({
+                    'name': 'قانون التعادل الحذر',
+                    'description': 'التعادلات نادرة جداً ويمكن استبعادها من التنبؤات',
+                    'pattern': {
+                        'action': 'تجاهل التعادل والتنبؤ بين الراعي أو الثور فقط',
+                        'condition': 'في أي جولة'
+                    },
+                    'confidence': 0.85
+                })
+        
+        if 'prediction' in df.columns and 'winner' in df.columns:
+            df['winner_code'] = df['winner'].map(WINNER_MAP)
+            df = df.dropna(subset=['winner_code'])
+            
+            if len(df) >= 20:
+                last_20 = df.tail(20)
+                accuracy = (last_20['winner_code'] == last_20['prediction']).mean()
+                
+                if accuracy > 0.70:
+                    self._save_law({
+                        'name': 'قانون زخم الدقة',
+                        'description': f'دقة آخر 20 جولة: {accuracy:.0%}',
+                        'pattern': {
+                            'action': 'استمر في نفس نهج التنبؤ',
+                            'condition': 'دقة_آخر_20_جولة > 0.70'
+                        },
+                        'confidence': 0.78
+                    })
+        
+        self._log_action('deep', 'review_complete', {'total_rounds': total})
+        logger.info(f"✅ [Observer] انتهت المراجعة العميقة")
+    
+    def start(self, jq: JobQueue):
+        self.is_running = True
+        
+        jq.run_repeating(
+            self.quick_review,
+            interval=600,            first=60,
+            name="observer_quick"
         )
-        result_text = response.choices[0].message.content
-        return {"text": result_text}
-    except asyncio.TimeoutError:
-        logger.warning("⏰ مهلة AI انتهت")
-        return {"text": "⏳ جاري التحليل... (حاول مرة أخرى)"}
-    except Exception as e:
-        logger.error(f"❌ خطأ في AI: {e}")
-        return {"text": "⚠️ تعذر الاتصال بالذكاء الاصطناعي"}
+        logger.info("⏰ [Observer] تم جدولة المراجعة السريعة كل 10 دقائق")
+        
+        jq.run_repeating(
+            self.deep_review,
+            interval=1800,
+            first=120,
+            name="observer_deep"
+        )
+        logger.info("⏰ [Observer] تم جدولة المراجعة العميقة كل 30 دقائق")
+    
+    def stop(self, jq: JobQueue):
+        self.is_running = False
+        logger.info("🛑 [Observer] تم إيقاف المراقب")
 
-# ---------------------------
-# دالة آمنة لتعديل الرسائل
-# ---------------------------
-async def safe_edit_message(query, text: str, reply_markup=None):
-    try:
-        if reply_markup:
-            await query.edit_message_text(text, reply_markup=reply_markup)
-        else:
-            await query.edit_message_text(text)
-    except BadRequest as e:
-        if "Message is not modified" in str(e):
-            pass  # لا شيء نفعله، الرسالة نفسها
-        elif "Message to edit not found" in str(e):
-            # الرسالة اختفت، نرسل رسالة جديدة
-            await query.message.reply_text(text, reply_markup=reply_markup)
-        else:
-            logger.error(f"❌ خطأ في edit_message: {e}")
-    except Exception as e:
-        logger.error(f"❌ خطأ غير متوقع في edit_message: {e}")
-
-# ---------------------------
-# أوامر تيليجرام
-# ---------------------------
+# ==================== 🎮 معالجات البوت ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        # مسح حالة المستخدم السابقة
-        context.user_data.clear()
-        context.user_data["step"] = "start"
-                kb = [[InlineKeyboardButton("🎴 اختيار البذلة", callback_data="suit")]]
-        await update.message.reply_text(
-            "🏛️ **HADES TITAN**\n\nاختر البذلة للبدء:",
-            reply_markup=InlineKeyboardMarkup(kb),
-            parse_mode='Markdown'
-        )
-        logger.info(f"✅ /start من المستخدم {update.effective_user.id}")
-    except Exception as e:
-        logger.error(f"❌ خطأ في start: {e}")
-        await update.message.reply_text("⚠️ حدث خطأ، حاول /start مرة أخرى")
-
-async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not query:
-        return
-    
-    try:
-        # ✅ الإصلاح الرئيسي: answer() بدون cache_time
-        await query.answer()
+        user_id = update.effective_user.id
+        logger.info(f"📥 مستخدم {user_id} أرسل /start")
         
-        data = query.data
-        user_id = query.from_user.id
-        logger.info(f"🔘 زر {data} من المستخدم {user_id}")
-        
-        # === اختيار البذلة ===
-        if data == "suit":
-            kb = [[InlineKeyboardButton(s, callback_data=f"s_{s}") for s in SUITS]]
-            kb.append([InlineKeyboardButton("🔙 رجوع", callback_data="back_start")])
-            await safe_edit_message(query, "🎴 اختر البذلة:", InlineKeyboardMarkup(kb))
-            context.user_data["step"] = "choosing_suit"
-        
-        # === بعد اختيار البذلة ===
-        elif data.startswith("s_"):
-            suit = data.split("_")[1]
-            context.user_data["suit"] = suit
-            context.user_data["step"] = "choosing_rank"
-            
-            kb = [[InlineKeyboardButton(r, callback_data=f"r_{r}") for r in row] for row in RANK_LAYOUT]
-            kb.append([InlineKeyboardButton("🔙 رجوع", callback_data="suit")])
-            await safe_edit_message(query, f"{suit} اختر الورقة:", InlineKeyboardMarkup(kb))
-        
-        # === بعد اختيار الورقة ===
-        elif data.startswith("r_"):
-            rank = data.split("_")[1]
-            context.user_data["rank"] = rank
-            context.user_data["step"] = "waiting_bonus"
-            
-            kb = [[InlineKeyboardButton("🔙 رجوع", callback_data="suit")]]
-            await safe_edit_message(
-                query,                f"✅ الورقة: {context.user_data.get('suit')} {rank}\n\n📥 أرسل رقم البونص الآن:",
-                InlineKeyboardMarkup(kb)
-            )
-        
-        # === زر الرجوع ===
-        elif data == "back_start":
-            context.user_data.clear()
-            context.user_data["step"] = "start"
-            kb = [[InlineKeyboardButton("🎴 اختيار البذلة", callback_data="suit")]]
-            await safe_edit_message(query, "🏛️ **HADES TITAN**\n\nاختر البذلة للبدء:", InlineKeyboardMarkup(kb))
-        
-    except Exception as e:
-        logger.error(f"❌ خطأ في callback: {e}")
         try:
-            await query.answer("⚠️ حدث خطأ", show_alert=True)
+            df = load_filtered_history()
+            stats = get_latest_stats(df) if not df.empty else {'total_rounds': 0, 'bias': {'red': 0, 'blue': 0, 'tie': 0}}
+        except Exception as e:
+            logger.error(f"⚠️ خطأ في تحميل الإحصائيات: {e}")
+            stats = {'total_rounds': 0, 'bias': {'red': 0, 'blue': 0, 'tie': 0}}
+        
+        kb = [
+            [InlineKeyboardButton("🎴 اختيار البذلة", callback_data="choose_suit")],
+            [InlineKeyboardButton("📊 تحليل البيانات", callback_data="view_stats")],
+            [InlineKeyboardButton("🤖 تنبؤ AI", callback_data="ai_predict")],
+            [InlineKeyboardButton("📜 القوانين", callback_data="view_laws")]
+        ]
+        
+        if user_id == ADMIN_ID:
+            kb.append([
+                InlineKeyboardButton("🎛️ لوحة الأدمن", callback_data="admin_panel"),
+                InlineKeyboardButton("📤 تصدير", callback_data="admin_export")
+            ])
+        
+        total = stats.get('total_rounds', 0)
+        summary = f"🏛️ **HADES V103**\n\n📊 جولات محللة: {total}\n🎯 جاهز للتنبؤ!"
+        
+        await update.message.reply_text(
+            summary,
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode='Markdown'        )
+        logger.info(f"✅ استجابة /start ناجحة للمستخدم {user_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ خطأ فادح في /start: {e}")
+        try:
+            kb = [[InlineKeyboardButton("🎴 اختيار البذلة", callback_data="choose_suit")]]
+            await update.message.reply_text(
+                "🏛️ **HADES V103**\n\n⚠️ وضع الصيانة - جاري التحميل...\n\n🎴 اختر البذلة للبدء:",
+                reply_markup=InlineKeyboardMarkup(kb),
+                parse_mode='Markdown'
+            )
         except:
             pass
 
-async def message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        query = update.callback_query
+        await query.answer()
+        data = query.data
+        user_id = update.effective_user.id
+        
+        logger.info(f"🔘 زر {data} من المستخدم {user_id}")
+        
+        if data == "choose_suit":
+            kb = [
+                [InlineKeyboardButton(s, callback_data=f"s_{s}") for s in SUITS[:2]],
+                [InlineKeyboardButton(s, callback_data=f"s_{s}") for s in SUITS[2:]],
+                [InlineKeyboardButton("🔙 رجوع", callback_data="start_back")]
+            ]
+            await query.edit_message_text("🎴 اختر البذلة للبدء:", reply_markup=InlineKeyboardMarkup(kb))
+        
+        elif data.startswith("s_"):
+            suit = data[2:]
+            context.user_data['suit'] = suit
+            kb = [[InlineKeyboardButton("🔙 رجوع للبذلات", callback_data="choose_suit")]]
+            await query.edit_message_text(
+                f"✅ البذلة: {suit}\n📥 أرسل رقم البونص (7+ أرقام) للتحليل:",
+                reply_markup=InlineKeyboardMarkup(kb)
+            )
+        
+        elif data == "view_stats":
+            try:
+                df = load_filtered_history()
+                stats = get_latest_stats(df)
+                report = f"""📊 **إحصائيات HADES V103**
+🔢 جولات: {stats.get('total_rounds', 0)}
+🏆 توزيع:
+• 🔴: {stats['bias'].get('red', 0):.1%}
+• 🔵: {stats['bias'].get('blue', 0):.1%}• ⚪: {stats['bias'].get('tie', 0):.1%}
+"""
+            except:
+                report = "📊 **إحصائيات HADES V103**\n⏳ جاري التحميل..."
+            
+            kb = [
+                [InlineKeyboardButton("🔄 تحديث", callback_data="view_stats")],
+                [InlineKeyboardButton("🔙 الرئيسية", callback_data="start_back")]
+            ]
+            await query.edit_message_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        
+        elif data == "ai_predict":
+            if 'suit' not in context.user_data:
+                await query.answer("⚠️ اختر بذلة أولاً", show_alert=True)
+                return
+            await query.answer("📥 أرسل رقم البونص الآن", show_alert=True)
+            context.user_data['awaiting_bonus'] = True
+        
+        elif data == "view_laws":
+            try:
+                laws = get_active_laws()
+                if laws:
+                    report = "📜 **أهم القوانين المكتشفة:**\n"
+                    for i, law in enumerate(laws[:5], 1):
+                        report += f"{i}. {law['name']} (ثقة: {law['confidence']:.0%})\n"
+                else:
+                    report = "📜 لا توجد قوانين مكتشفة بعد"
+            except:
+                report = "📜 جاري تحميل القوانين..."
+            
+            kb = [[InlineKeyboardButton("🔙 الرئيسية", callback_data="start_back")]]
+            await query.edit_message_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        
+        elif data == "admin_panel" and user_id == ADMIN_ID:
+            kb = [
+                [InlineKeyboardButton("📊 تحليل شامل", callback_data="admin_analyze")],
+                [InlineKeyboardButton("🔄 إعادة تحميل", callback_data="admin_reload")],
+                [InlineKeyboardButton("🔙 الرئيسية", callback_data="start_back")]
+            ]
+            await query.edit_message_text("🎛️ **لوحة تحكم الأدمن**", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        
+        elif data == "admin_analyze" and user_id == ADMIN_ID:
+            await query.edit_message_text("🔄 جاري التحليل...")
+            try:
+                df = load_filtered_history()
+                stats = get_latest_stats(df)
+                report = f"""📊 **تحليل شامل**
+• جولات: {stats.get('total_rounds', 0)}
+• انحياز 🔴: {stats['bias'].get('red', 0):.1%}
+"""            except:
+                report = "📊 **تحليل شامل**\n⏳ جاري التحميل..."
+            
+            kb = [
+                [InlineKeyboardButton("🔄 تحديث", callback_data="admin_analyze")],
+                [InlineKeyboardButton("🔙 لوحة الأدمن", callback_data="admin_panel")]
+            ]
+            await query.message.reply_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        
+        elif data == "admin_export" and user_id == ADMIN_ID:
+            await query.answer("✅ تم بدء التصدير", show_alert=True)
+        
+        elif data == "admin_reload" and user_id == ADMIN_ID:
+            context.user_data.pop('suit', None)
+            context.user_data.pop('last_b', None)
+            await query.answer("✅ تم إعادة التحميل", show_alert=True)
+            await start(update, context)
+        
+        elif data == "start_back":
+            await start(update, context)
+        
+        elif data.startswith("save_"):
+            parts = data.split("_", 1)
+            if len(parts) >= 2:
+                winner = parts[1]
+                b_num = context.user_data.get('last_b', 'unknown')
+                suit = context.user_data.get('suit', 'unknown')
+                
+                try:
+                    conn = get_db_connection()
+                    if conn:
+                        cur = conn.cursor()
+                        cur.execute("""
+                            INSERT INTO history (b_num, suit, winner, timestamp, prediction, user_id)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                        """, (b_num, suit, winner, datetime.datetime.now(), 
+                              WINNER_MAP.get(winner.split()[0], -1), user_id))
+                        conn.commit()
+                        conn.close()
+                    
+                    kb = [[InlineKeyboardButton("🔄 جولة جديدة", callback_data="choose_suit")]]
+                    await query.edit_message_text(
+                        f"✅ سُجّل: {winner}\n🔄 جاهز للجولة التالية:",
+                        reply_markup=InlineKeyboardMarkup(kb)
+                    )
+                except Exception as e:
+                    logger.error(f"❌ خطأ الحفظ: {e}")
+                    await query.answer("❌ خطأ في الحفظ", show_alert=True)
+    
+    except Exception as e:        logger.error(f"❌ خطأ في handle_callback: {e}")
+        try:
+            await query.answer("⚠️ حدث خطأ، حاول مرة أخرى", show_alert=True)
+        except:
+            pass
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         text = update.message.text.strip()
         user_id = update.effective_user.id
         
-        # التحقق من أن المستخدم في مرحلة انتظار البونص
-        if context.user_data.get("step") != "waiting_bonus":
-            kb = [[InlineKeyboardButton("🎴 البدء", callback_data="suit")]]
-            await update.message.reply_text(
-                "🏛️ **HADES TITAN**\nاختر البذلة أولاً:",
+        if context.user_data.get('awaiting_bonus') and text.isdigit() and len(text) >= 7:
+            if 'suit' not in context.user_data:
+                await update.message.reply_text("⚠️ اختر البذلة أولاً عبر /start")
+                return
+            
+            suit = context.user_data['suit']
+            await update.message.reply_text(f"🔄 جاري تحليل {text} | {suit}...")
+            
+            df = load_filtered_history()
+            if df.empty:
+                await update.message.reply_text("❌ لا توجد بيانات كافية")
+                return
+            
+            ai_engine = AdvancedAIEngine()
+            result = ai_engine.generate_prediction_command(df, text, suit)
+            
+            prediction = result['prediction']
+            reason = result['reason']
+            confidence = result['confidence']
+            
+            context.user_data['last_b'] = text
+            
+            report = f"""🎯 **تنبؤ HADES V103**
+
+🏆 النتيجة: **{prediction}**
+📋 السبب: {reason}
+📊 الثقة: {confidence:.0%}
+🎴 البذلة: {suit}
+"""
+            
+            kb = [
+                [
+                    InlineKeyboardButton("🔴 راعي", callback_data=f"save_الراعي 🔴"),
+                    InlineKeyboardButton("🔵 ثور", callback_data=f"save_الثور 🔵")
+                ],
+                [InlineKeyboardButton("⚪ تعادل", callback_data=f"save_تعادل ⚪")],
+                [InlineKeyboardButton("🔄 تحليل جديد", callback_data="ai_predict")]
+            ]
+                        await update.message.reply_text(
+                report,
                 reply_markup=InlineKeyboardMarkup(kb),
                 parse_mode='Markdown'
             )
+            context.user_data['awaiting_bonus'] = False
             return
         
-        digits = clean_digits(text)
-        if len(digits) < 3:
-            await update.message.reply_text("⚠️ أدخل رقم بونص صحيح (3 أرقام على الأقل)")
+        if text.lower() in ['تحليل', 'stats', '/analyze']:
+            if user_id == ADMIN_ID:
+                await analyze_command(update, context)
+            else:
+                await update.message.reply_text("❌ هذا الأمر للأدمن فقط")
             return
         
-        suit = context.user_data.get("suit")
-        rank = context.user_data.get("rank")
-        
-        if not suit or not rank:
-            await update.message.reply_text("⚠️ اختر الورقة أولاً عبر الأزرار")
+        if text.lower() in ['خروج', 'exit', 'back', '/start']:
+            context.user_data.clear()
+            await start(update, context)
             return
         
-        # إرسال رسالة "جاري التحليل"
-        analyzing_msg = await update.message.reply_text("🔄 جاري التحليل...")
-        
-        # الحساب التقليدي
-        pred, conf = predict(suit, rank, digits)        
-        # الذكاء الاصطناعي (مع التعامل مع الأخطاء)
-        ai_result = await ai_predict(suit, rank, digits)
-        
-        # تحديث رسالة التحليل بالنتيجة
-        await analyzing_msg.edit_text(
-            f"""🎯 **نتيجة HADES TITAN**
-
-📊 التحليل التقليدي:
-{WINNER_NAMES[pred]}
-الثقة: {conf}%
-
-🤖 تحليل الذكاء الاصطناعي:
-{ai_result['text']}
-
-🔄 للتحليل مرة أخرى: اختر بذلة جديدة""",
+        kb = [
+            [InlineKeyboardButton("🎴 البدء", callback_data="choose_suit")],
+            [InlineKeyboardButton("📊 الإحصائيات", callback_data="view_stats")],
+            [InlineKeyboardButton("🤖 تنبؤ AI", callback_data="ai_predict")]
+        ]
+        await update.message.reply_text(
+            "🏛️ **HADES V103**\nاختر من القائمة للبدء:",
+            reply_markup=InlineKeyboardMarkup(kb),
             parse_mode='Markdown'
         )
-        
-        # إعادة تعيين الحالة
-        context.user_data.clear()
-        context.user_data["step"] = "start"
-        
-        logger.info(f"✅ تحليل مكتمل للمستخدم {user_id}")
-        
+    
     except Exception as e:
-        logger.error(f"❌ خطأ في message: {e}")
-        try:
-            await update.message.reply_text("⚠️ حدث خطأ أثناء التحليل، حاول مرة أخرى")
-        except:
-            pass
+        logger.error(f"❌ خطأ في handle_message: {e}")
 
-# ---------------------------
-# التشغيل
-# ---------------------------
+async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ للأدمن فقط")
+        return
+    
+    df = load_filtered_history()
+    if df.empty:
+        await update.message.reply_text("❌ لا توجد بيانات")
+        return
+    
+    stats = get_latest_stats(df)
+    report = f"""📊 **تقرير HADES V103**
+🔢 جولات: {stats.get('total_rounds', 0)}
+🏆 🔴:{stats['bias'].get('red',0):.1%} 🔵:{stats['bias'].get('blue',0):.1%} ⚪:{stats['bias'].get('tie',0):.1%}
+🎯 دقة: {stats.get('accuracy', 'N/A')}
+"""    kb = [[InlineKeyboardButton("🔙 الرئيسية", callback_data="start_back")]]
+    await update.message.reply_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+async def export_laws_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ للأدمن فقط")
+        return
+    
+    try:
+        laws = get_active_laws()
+        if laws:
+            report = "📜 **القوانين النشطة:**\n"
+            for law in laws[:10]:
+                report += f"• {law['name']} ({law['confidence']:.0%})\n"
+            await update.message.reply_text(report, parse_mode='Markdown')
+        else:
+            await update.message.reply_text("📜 لا توجد قوانين نشطة")
+    except Exception as e:
+        logger.error(f"❌ خطأ التصدير: {e}")
+        await update.message.reply_text(f"❌ خطأ: {e}")
+
+# ==================== 🚀 التشغيل الرئيسي ====================
 if __name__ == "__main__":
-    logger.info("🚀 بدء HADES TITAN...")
-    ensure_tables()
+    logger.info("🚀 بدء HADES V103 - واجهة الأزرار")
+    
+    load_dynamic_config()
     
     app = ApplicationBuilder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message))
+    app.add_handler(CommandHandler("analyze", analyze_command))
+    app.add_handler(CommandHandler("export_laws", export_laws_command))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("✅ البوت جاهز!")
+    observer = AIObserver(app)
+    observer.start(app.job_queue)
+    
+    logger.info("✅ البوت جاهز - واجهة الأزرار مفعلة")
+    logger.info(f"📌 يتم تجاهل أول {WARMUP_ROUNDS} جولة تلقائياً")
+    logger.info("👁️ مراقب AI يعمل: مراجعة سريعة كل 10د | عميقة كل 30د")
+    
     app.run_polling(drop_pending_updates=True)
