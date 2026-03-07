@@ -6,3 +6,4 @@ openai==1.6.1
 python-dotenv==1.0.0
 openpyxl==3.1.2
 requests
+aiohttp
