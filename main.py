@@ -1,6 +1,6 @@
 """
-HADES V16.7 - Fast Neural Hybrid (Mistral Devstral via NVIDIA)
-تم تحديث الموديل إلى mistralai/devstral-2-123b-instruct-2512 مع إعدادات دقيقة.
+HADES V16.8 - Fast Neural Hybrid مع أمر /force_learn للمشرف
+تمت إضافة أمر force_learn لمسح cache وإعادة تحميل الأنماط يدوياً.
 """
 
 import re
@@ -36,7 +36,7 @@ ADMIN_ID = 6033203084
 AI_BASE_URL = "https://integrate.api.nvidia.com/v1"
 AI_API_KEY = "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"
 AI_MODEL = "mistralai/devstral-2-123b-instruct-2512"
-AI_TIMEOUT = 3.0  # مهلة قصيرة: 3 ثوان فقط (يمكن زيادتها إلى 5 إن لزم)
+AI_TIMEOUT = 3.0  # مهلة قصيرة: 3 ثوان فقط
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -192,14 +192,13 @@ class CustomAIEngine:
         هل سيستمر الاتجاه أم سينعكس؟ أعد فقط JSON بالصيغة التالية:
         {{"winner": 0 أو 1, "confidence": 50-95, "reason": "سبب مختصر بالعربية"}}
         """
-        # استخدام stream=True لجمع الرد بسرعة
         stream = await self.client.chat.completions.create(
             model=AI_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.15,          # كما في الكود المقدم
+            temperature=0.15,
             top_p=0.95,
-            max_tokens=8192,            # الحد الأقصى
-            seed=42,                    # لإعادة الإنتاجية
+            max_tokens=8192,
+            seed=42,
             stream=True
         )
 
@@ -210,7 +209,6 @@ class CustomAIEngine:
             delta = chunk.choices[0].delta
             if delta.content:
                 full_content += delta.content
-            # إذا وجدنا JSON كامل يمكننا التوقف مبكراً
             if "}" in full_content and full_content.strip().startswith("{"):
                 try:
                     json.loads(extract_json_from_text(full_content) or "{}")
@@ -406,12 +404,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     kb = [[InlineKeyboardButton("🎴 اختيار البذلة", callback_data="choose_suit")]]
     await update.message.reply_text(
-        "<b>🏛️ HADES V16.7 (Mistral Devstral)</b>\n"
+        "<b>🏛️ HADES V16.8 (Mistral Devstral)</b>\n"
         "تحليل فائق السرعة مع مهلة 3 ثوان.\n"
         "اضغط للبدء:",
         reply_markup=InlineKeyboardMarkup(kb),
         parse_mode='HTML'
     )
+
+async def force_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر للمشرف لمسح cache وإعادة تحميل الأنماط."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ هذا الأمر مخصص للمشرف فقط.")
+        return
+
+    # مسح cache
+    pattern_cache.cache.clear()
+    logger.info("🧹 Cache cleared by admin via /force_learn")
+
+    # اختياري: إعادة تحميل جميع الأنماط من DB لملء cache (اختياري، يمكن تركه للطلبات اللاحقة)
+    # هنا نكتفي بمسح cache فقط.
+
+    await update.message.reply_text("✅ تم مسح الذاكرة المؤقتة. سيتم إعادة تحميل الأنماط عند الحاجة.")
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -467,7 +480,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             conn.commit()
                 except Exception as e:
                     logger.error(f"Save error: {e}")
-            pattern_cache.cache.clear()
+            pattern_cache.cache.clear()  # مسح cache بعد التحديث
             kb = [[InlineKeyboardButton("🗑️ تصحيح", callback_data="delete_last")], [InlineKeyboardButton("🔄 تغيير", callback_data="choose_suit")]]
             await query.edit_message_text(f"✅ تم التسجيل: <b>{WINNER_NAMES[w_code]}</b>\n\n📥 <b>أرسل الرقم التالي لـ ({suit} {rank}):</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
@@ -502,7 +515,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
 
         bar = generate_progress_bar(confidence)
-        report = f"""🎯 <b>تقرير V16.7 (سريع)</b> ⏱️ {elapsed:.1f} ثانية
+        report = f"""🎯 <b>تقرير V16.8 (سريع)</b> ⏱️ {elapsed:.1f} ثانية
 ━━━━━━━━━━━━━━━
 🃏 الورقة: {suit} {rank} | 📥 البونص: <code>{clean_text}</code>
 
@@ -523,7 +536,8 @@ if __name__ == "__main__":
     ensure_columns()
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("force_learn", force_learn))  # الأمر الجديد
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    logger.info("🚀 HADES V16.7 (Mistral Devstral) is running...")
+    logger.info("🚀 HADES V16.8 (Mistral Devstral) is running...")
     app.run_polling(drop_pending_updates=True)
