@@ -1,10 +1,10 @@
 """
-HADES V-INFINITY - The Chaos Theory Engine
+HADES V-INFINITY - The Chaos Theory Engine (Fixed Import)
 ابتكار خاص: محرك التطابق الفراكتلي (Fractal Parity)، مذبذب الفوضى (Entropy Oscillator)، وبروتوكول التناقض (Paradox).
 """
 
 import os, re, datetime, psycopg2, pandas as pd, json, logging
-from typing import Tuple, Dict, Optional
+from typing import Tuple, Dict, Optional, List  # 🌟 تم إصلاح هذا السطر ليتضمن List
 from contextlib import contextmanager
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler, CommandHandler, ContextTypes
@@ -180,110 +180,4 @@ def live_train_infinity(b_num: str, suit: str, winner_code: int):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     kb = [[InlineKeyboardButton("🎴 اختيار البذلة", callback_data="choose_suit")]]
-    await update.message.reply_text("<b>🌌 HADES V-INFINITY</b>\n\nنظام التفكير الخوارزمي المعكوس (Chaos Theory).\nاضغط للبدء:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    
-    try:
-        if data == "choose_suit":
-            context.user_data.pop('suit', None); context.user_data.pop('rank', None)
-            kb = [[InlineKeyboardButton(s, callback_data=f"suit_{s}") for s in SUITS]]
-            await query.edit_message_text("🎴 <b>اختر البذلة:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-            
-        elif data.startswith("suit_"):
-            suit = data.split("_")[1]
-            context.user_data['suit'] = suit
-            kb = [[InlineKeyboardButton(r, callback_data=f"rank_{r}") for r in row] for row in RANKS_LAYOUT]
-            kb.append([InlineKeyboardButton("🔙 رجوع", callback_data="choose_suit")])
-            await query.edit_message_text(f"✅ البذلة: <b>{suit}</b>\n🃏 <b>اختر الورقة:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-
-        elif data.startswith("rank_"):
-            rank = data.split("_")[1]
-            context.user_data['rank'] = rank
-            suit = context.user_data.get('suit', '')
-            kb = [[InlineKeyboardButton("🔄 تغيير الاختيار", callback_data="choose_suit")]]
-            await query.edit_message_text(f"✅ تم: <b>{suit} {rank}</b>\n\n📥 <b>أرسل رقم البونص:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-
-        elif data == "delete_last":
-            try:
-                with get_db_cursor() as (conn, cur):
-                    cur.execute("DELETE FROM history WHERE id = (SELECT max(id) FROM history WHERE user_id = %s)", (update.effective_user.id,))
-                    conn.commit()
-            except: pass
-            kb = [[InlineKeyboardButton("🔄 تغيير", callback_data="choose_suit")]]
-            await query.edit_message_text(f"🗑️ تم حذف الجولة الخاطئة.\n📥 أرسل الرقم الصحيح:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-
-        elif data.startswith("save_"):
-            w_code = int(data.split("_")[1])
-            b_num = context.user_data.get('last_b_num')
-            suit = context.user_data.get('last_suit')
-            rank = context.user_data.get('last_rank')
-            
-            if b_num and suit and rank:
-                try:
-                    with get_db_cursor() as (conn, cur):
-                        cur.execute("""INSERT INTO history (b_num, suit, rank, bonus_last_digit, winner, user_id) 
-                                       VALUES (%s, %s, %s, %s, %s, %s)""",
-                                    (b_num, suit, rank, int(clean_digits(b_num)[-1]), WINNER_NAMES[w_code], update.effective_user.id))
-                        conn.commit()
-                    # التعليم الفوري
-                    live_train_infinity(b_num, suit, w_code)
-                except Exception as e: logger.error(f"Save Error: {e}")
-
-            kb = [[InlineKeyboardButton("🗑️ تصحيح", callback_data="delete_last")], [InlineKeyboardButton("🔄 تغيير", callback_data="choose_suit")]]
-            await query.edit_message_text(f"✅ تم التسجيل والتعلم: <b>{WINNER_NAMES[w_code]}</b>\n\n📥 <b>أرسل الرقم التالي لـ ({suit} {rank}):</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-            
-    except Exception as e:
-        logger.error(f"Callback Error: {e}")
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        text = update.message.text
-        clean_text = clean_digits(text)
-        
-        if clean_text:
-            suit = context.user_data.get('suit')
-            rank = context.user_data.get('rank')
-            
-            if not suit or not rank:
-                kb = [[InlineKeyboardButton("🎴 اختيار البذلة", callback_data="choose_suit")]]
-                await update.message.reply_text("⚠️ <b>يجب اختيار البذلة والورقة أولاً!</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-                return
-                
-            pred_code, confidence, reason = await predict_infinity(clean_text, suit, rank)
-            
-            context.user_data['last_b_num'] = clean_text
-            context.user_data['last_suit'] = suit
-            context.user_data['last_rank'] = rank
-            
-            kb = [
-                [InlineKeyboardButton("راعي 🔴", callback_data="save_0"), InlineKeyboardButton("ثور 🔵", callback_data="save_1")],
-                [InlineKeyboardButton("تعادل ⚪", callback_data="save_2")]
-            ]
-            
-            bar = generate_progress_bar(confidence)
-            report = f"""🌌 <b>تقرير INFINITY</b>
-━━━━━━━━━━━━━━━
-🃏 الورقة: {suit} {rank} | 📥 البونص: <code>{clean_text}</code>
-
-🏆 <b>التوقع: {WINNER_NAMES[pred_code]}</b>
-📊 قوة التوقع: [{bar}] {confidence}%
-
-<b>🔍 مجريات التحليل الكسيري (Fractal):</b>\n{reason}
-━━━━━━━━━━━━━━━
-اختر الفائز الفعلي للتسجيل:"""
-            
-            await update.message.reply_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
-    except Exception as e:
-        logger.error(f"Handle Msg Error: {e}")
-
-if __name__ == "__main__":
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("🌌 HADES V-INFINITY RUNNING...")
-    app.run_polling(drop_pending_updates=True)
+    await update.message.reply_text("<b>🌌 HADES V-INFINIT
