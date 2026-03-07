@@ -1,5 +1,5 @@
 """
-HADES V13 - THE ANTI-SHIFT ENGINE
+HADES V13 - THE ANTI-SHIFT ENGINE (Complete & Fixed)
 الميزات: كاشف انعكاس اللعبة التلقائي (Auto-Inversion)، تبسيط الـ AI Agent، وتحليل الفجوات الزمنية.
 """
 
@@ -10,7 +10,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler, CommandHandler, ContextTypes
 from openai import AsyncOpenAI
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s" 
@@ -64,7 +64,6 @@ class AutonomousAgent:
         self.client = AsyncOpenAI(api_key=NVIDIA_API_KEY, base_url=NVIDIA_BASE_URL, timeout=20.0)
 
     async def analyze_and_create_laws(self, limit=100) -> str:
-        """نسخة مبسطة جداً لضمان استجابة نموذج الذكاء الاصطناعي"""
         try:
             with get_db_cursor() as (conn, cur):
                 cur.execute(f"SELECT suit, timestamp, winner FROM history WHERE winner IS NOT NULL ORDER BY id DESC LIMIT {limit}")
@@ -78,7 +77,7 @@ class AutonomousAgent:
                 suit = rows[i][0]
                 time_gap = int((rows[i][1] - rows[i-1][1]).total_seconds())
                 winner = WINNER_MAP.get(rows[i][2], 2)
-                if time_gap < 120: # نركز فقط على الجولات السريعة المتتالية (أقل من دقيقتين)
+                if time_gap < 120: 
                     agent_data.append(f"({suit},{time_gap}s,{winner})")
 
             prompt = f"""
@@ -115,16 +114,12 @@ class AutonomousAgent:
                 return f"✅ تم بنجاح! العميل زرع {len(laws)} قوانين زمنية جديدة."
             return "⚠️ الذكاء الاصطناعي لم يجد نمطاً حاسماً."
         except Exception as e:
-            return f"❌ خطأ في العميل."
+            return f"❌ خطأ في العميل: {e}"
 
 ai_agent = AutonomousAgent()
 
 # ==================== 🔄 كاشف الانعكاس الحي (Auto-Inversion) ====================
 def detect_regime_shift() -> Tuple[bool, str]:
-    """
-    يقرأ آخر 6 جولات من قاعدة البيانات. إذا رأى أن اللعبة بدأت تتجه لطرف واحد 
-    بقوة (مثلاً 5 ثور)، سيعرف أن اللعبة دخلت وضع "تفريغ/انعكاس".
-    """
     try:
         with get_db_cursor() as (conn, cur):
             cur.execute("SELECT winner FROM history WHERE winner IS NOT NULL ORDER BY id DESC LIMIT 6")
@@ -173,22 +168,18 @@ async def predict_v13(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     logs = []
     scores = {0: 0.0, 1: 0.0}
     
-    # 1. كاشف الانعكاس (أهم شيء الآن)
     is_shifted, shift_msg = detect_regime_shift()
     if is_shifted:
         logs.append(shift_msg)
     
-    # 2. قوانين العميل الزمني
     agent_w, agent_c, agent_log = get_agent_prediction(suit, current_gap)
     if agent_w is not None:
-        # إذا كانت اللعبة في حالة انعكاس، نعكس قرار العميل
         if is_shifted: agent_w = 1 if agent_w == 0 else 0
         scores[agent_w] += agent_c * 2.0  
         logs.append(f"⏱️ **الفجوة ({current_gap} ث):** {WINNER_NAMES[agent_w]} [{agent_log}]")
     else:
         logs.append(f"⏱️ الفجوة الحالية: {current_gap} ث (لا يوجد قانون لها).")
 
-    # 3. الإحصاء الرياضي السريع
     try:
         with get_db_cursor() as (conn, cur):
             cur.execute("SELECT winner FROM history WHERE suit=%s AND bonus_last_digit=%s ORDER BY id DESC LIMIT 50", (suit, last_digit))
@@ -198,7 +189,6 @@ async def predict_v13(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
                 red, blue = recent.count(0), recent.count(1)
                 if red != blue:
                     best = 0 if red > blue else 1
-                    # نعكس القرار الإحصائي إذا كانت اللعبة في وضع الانعكاس
                     if is_shifted: best = 1 if best == 0 else 0
                     
                     conf = (max(red, blue) / (red + blue)) * 100
@@ -206,7 +196,6 @@ async def predict_v13(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
                     logs.append(f"📊 **الذاكرة المباشرة:** {WINNER_NAMES[best]}")
     except: pass
 
-    # ================= الحساب النهائي =================
     final_pred = 0 if scores[0] >= scores[1] else 1
     total_score = scores[0] + scores[1]
     
@@ -218,7 +207,8 @@ async def predict_v13(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     raw_conf = (scores[final_pred] / total_score) * 100
     confidence = int(min(99, max(50, raw_conf)))
     
-    return final_pred, confidence, "\n".join(logs)
+    reason_str = "\n".join(logs)
+    return final_pred, confidence, reason_str
 
 # ==================== 🛠️ أوامر التدخل الإداري ====================
 async def trigger_agent_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -272,4 +262,86 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     cur.execute("DELETE FROM history WHERE id = (SELECT max(id) FROM history WHERE user_id = %s)", (update.effective_user.id,))
                     conn.commit()
             except: pass
-            suit = context.user_data.get
+            
+            suit = context.user_data.get('suit')
+            rank = context.user_data.get('rank')
+            if suit and rank:
+                kb = [[InlineKeyboardButton("🔄 تغيير", callback_data="choose_suit")]]
+                await query.edit_message_text(f"🗑️ تم حذف الجولة الخاطئة.\n\nمستمرون مع: <b>{suit} {rank}</b>\n📥 أرسل الرقم الصحيح:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+            else:
+                kb = [[InlineKeyboardButton("🎴 اختيار", callback_data="choose_suit")]]
+                await query.edit_message_text("🗑️ تم الحذف. يرجى اختيار الورقة من جديد:", reply_markup=InlineKeyboardMarkup(kb))
+
+        elif data.startswith("save_"):
+            w_code = int(data.split("_")[1])
+            b_num = context.user_data.get('last_b_num')
+            suit = context.user_data.get('last_suit')
+            rank = context.user_data.get('last_rank')
+            
+            if b_num and suit and rank:
+                last_digit = int(clean_digits(b_num)[-1]) 
+                try:
+                    with get_db_cursor() as (conn, cur):
+                        cur.execute("""INSERT INTO history (b_num, suit, rank, bonus_last_digit, winner, user_id) 
+                                       VALUES (%s, %s, %s, %s, %s, %s)""",
+                                    (b_num, suit, rank, last_digit, WINNER_NAMES[w_code], update.effective_user.id))
+                        conn.commit()
+                except Exception as e: logger.error(f"Live Save Error: {e}")
+
+            kb = [[InlineKeyboardButton("🗑️ تصحيح", callback_data="delete_last")], [InlineKeyboardButton("🔄 تغيير", callback_data="choose_suit")]]
+            await query.edit_message_text(f"✅ تم التسجيل: <b>{WINNER_NAMES[w_code]}</b>\n\n📥 <b>أرسل الرقم التالي لـ ({suit} {rank}):</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+            
+    except Exception as e:
+        logger.error(f"Callback Error: {e}")
+        await query.edit_message_text("❌ حدث خطأ، ارسل /start")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        text = update.message.text
+        clean_text = clean_digits(text)
+        
+        if clean_text:
+            suit = context.user_data.get('suit')
+            rank = context.user_data.get('rank')
+            
+            if not suit or not rank:
+                kb = [[InlineKeyboardButton("🎴 اختيار البذلة", callback_data="choose_suit")]]
+                await update.message.reply_text("⚠️ <b>يجب اختيار البذلة والورقة أولاً!</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+                return
+                
+            pred_code, confidence, reason = await predict_v13(clean_text, suit, rank)
+            
+            context.user_data['last_b_num'] = clean_text
+            context.user_data['last_suit'] = suit
+            context.user_data['last_rank'] = rank
+            context.user_data['last_pred_code'] = pred_code
+            
+            kb = [
+                [InlineKeyboardButton("راعي 🔴", callback_data="save_0"), InlineKeyboardButton("ثور 🔵", callback_data="save_1")],
+                [InlineKeyboardButton("تعادل ⚪", callback_data="save_2")]
+            ]
+            
+            bar = generate_progress_bar(confidence)
+            report = f"""🎯 <b>تقرير V13 (Anti-Shift Mode)</b>
+━━━━━━━━━━━━━━━
+🃏 الورقة: {suit} {rank} | 📥 البونص: <code>{clean_text}</code>
+
+🏆 <b>التوقع المرجح: {WINNER_NAMES[pred_code]}</b>
+📊 الثقة: [{bar}] {confidence}%
+
+<b>🔍 مجريات التحليل:</b>\n{reason}
+━━━━━━━━━━━━━━━
+اختر الفائز الفعلي:"""
+            
+            await update.message.reply_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Handle Msg Error: {e}")
+
+if __name__ == "__main__":
+    ensure_columns()
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    print("🚀 HADES V13 RUNNING...")
+    app.run_polling(drop_pending_updates=True)
