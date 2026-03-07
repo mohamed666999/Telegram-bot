@@ -1,14 +1,8 @@
 """
-HADES V16.5 - THE NEURAL HYBRID (Improved)
-- استخراج JSON ذكي من ردود GPT
-- ثقة محسنة باستخدام الإنتروبيا
-- دمج التعادل في الأنماط الإحصائية
-- تحسين الأداء باستعلام واحد مجمع
-- إزالة الكلمات الأجنبية
-- استخدام متغيرات البيئة للأمان
+HADES V16.5 - THE NEURAL HYBRID (GPT-5-mini + Bayesian Engine)
+تم تضمين معلومات المستخدم مباشرة في الكود.
 """
 
-import os
 import re
 import json
 import logging
@@ -19,7 +13,6 @@ from contextlib import contextmanager
 from datetime import datetime
 
 import psycopg2
-from psycopg2.extras import execute_values
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -30,22 +23,15 @@ from telegram.ext import (
     ContextTypes,
 )
 from openai import AsyncOpenAI
-from dotenv import load_dotenv  # لتأمين المفاتيح
 
-load_dotenv()  # تحميل المتغيرات من ملف .env
+# ==================== 🛡️ الإعدادات (مضمنة مباشرة) ====================
+TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
+DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
+ADMIN_ID = 6033203084
 
-# ==================== 🛡️ الإعدادات ====================
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-
-AI_API_KEY = os.getenv("AI_API_KEY")
-AI_BASE_URL = os.getenv("AI_BASE_URL", "https://www.aichixia.xyz/api/v1")
-AI_MODEL = os.getenv("AI_MODEL", "gpt-5-mini")  # يمكن تغييره عبر البيئة
-
-# التأكد من وجود المفاتيح
-if not all([TOKEN, DATABASE_URL, AI_API_KEY]):
-    raise ValueError("يرجى تعيين TELEGRAM_TOKEN, DATABASE_URL, AI_API_KEY في ملف .env")
+AI_API_KEY = "acv-d8351cddde4fbd194ee91aa7442600cd54b961bd1fe39fcf898831db50b3892b"
+AI_BASE_URL = "https://www.aichixia.xyz/api/v1"
+AI_MODEL = "gpt-5-mini"  # تم التعديل حسب الصورة الأخيرة
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
