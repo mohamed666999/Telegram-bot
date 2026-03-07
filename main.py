@@ -1,6 +1,6 @@
 """
-HADES V16 - THE NEURAL HYBRID (Grok-3 + Bayesian Engine)
-تم تعديل الموديل إلى grok-3 وفقاً للصورة المرفوعة.
+HADES V16 - THE NEURAL HYBRID (GPT-5-mini + Bayesian Engine)
+تم تعديل الموديل إلى gpt-5-mini وفقاً للصورة المرفوعة.
 """
 
 import os, re, datetime, psycopg2, pandas as pd, json, logging
@@ -22,7 +22,7 @@ ADMIN_ID = 6033203084
 # 🌟 إعدادات الذكاء الاصطناعي (تم تصحيحها بناءً على الكود الخاص بك) 🌟
 AI_API_KEY = "acv-d8351cddde4fbd194ee91aa7442600cd54b961bd1fe39fcf898831db50b3892b"
 AI_BASE_URL = "https://www.aichixia.xyz/api/v1"  # تم التصحيح
-AI_MODEL = "grok-3"  # تم التعديل حسب الصورة الجديدة
+AI_MODEL = "gpt-5-mini"  # تم التعديل حسب الصورة
 
 WINNER_MAP = {'الراعي 🔴': 0, 'راعي': 0, 'الثور 🔵': 1, 'ثور': 1, 'تعادل ⚪': 2, 'تعادل': 2, '🔴': 0, '🔵': 1, '⚪': 2, 0: 0, 1: 1, 2: 2}
 WINNER_NAMES = {0: 'الراعي 🔴', 1: 'الثور 🔵', 2: 'تعادل ⚪'}
@@ -65,7 +65,7 @@ def generate_progress_bar(percentage: int) -> str:
     filled = int(percentage / 10)
     return "█" * filled + "░" * (10 - filled)
 
-# ==================== 🤖 محرك Grok-3 ====================
+# ==================== 🤖 محرك GPT-5-mini ====================
 class CustomAIEngine:
     def __init__(self):
         self.client = AsyncOpenAI(api_key=AI_API_KEY, base_url=AI_BASE_URL, timeout=5.0)
@@ -142,7 +142,7 @@ async def predict_hybrid_v16(b_num: str, suit: str, rank: str) -> Tuple[int, int
     logs = []
     scores = {0: 0.0, 1: 0.0}
     
-    # 1. الذكاء الاصطناعي (Grok-3)
+    # 1. الذكاء الاصطناعي (GPT-5-mini)
     recent_history = []
     try:
         with get_db_cursor() as (conn, cur):
@@ -154,9 +154,9 @@ async def predict_hybrid_v16(b_num: str, suit: str, rank: str) -> Tuple[int, int
     gpt_pred, gpt_conf, gpt_log = await gpt_engine.get_prediction(recent_history)
     if gpt_pred in [0, 1]:
         scores[gpt_pred] += (gpt_conf / 100) * WEIGHTS['GPT']
-        logs.append(f"🤖 **Grok-3:** {WINNER_NAMES[gpt_pred]} ({gpt_log})")
+        logs.append(f"🤖 **GPT-5-mini:** {WINNER_NAMES[gpt_pred]} ({gpt_log})")
     else:
-        logs.append(f"⚠️ **حالة Grok-3:** {gpt_log}")
+        logs.append(f"⚠️ **حالة GPT-5-mini:** {gpt_log}")
 
     # 2. الزخم (Momentum)
     streak_pred, streak_conf, streak_log = detect_streak_breaker()
@@ -195,7 +195,7 @@ async def predict_hybrid_v16(b_num: str, suit: str, rank: str) -> Tuple[int, int
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     kb = [[InlineKeyboardButton("🎴 اختيار البذلة", callback_data="choose_suit")]]
-    await update.message.reply_text("<b>🏛️ HADES V16 (Neural Hybrid)</b>\nدمج Grok-3 مع الإحصائيات.\nاضغط للبدء:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    await update.message.reply_text("<b>🏛️ HADES V16 (Neural Hybrid)</b>\nدمج GPT-5-mini مع الإحصائيات.\nاضغط للبدء:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -272,7 +272,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("⚠️ <b>يجب اختيار البذلة والورقة أولاً!</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
                 return
             
-            processing_msg = await update.message.reply_text("⏳ <b>يتم استشارة الإحصائيات و Grok-3...</b>", parse_mode='HTML')
+            processing_msg = await update.message.reply_text("⏳ <b>يتم استشارة الإحصائيات و GPT-5-mini...</b>", parse_mode='HTML')
             
             pred_code, confidence, reason = await predict_hybrid_v16(clean_text, suit, rank)
             
