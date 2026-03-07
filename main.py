@@ -1,34 +1,60 @@
 """
-HADES V-INFINITY - The Chaos Theory Engine (Fixed Import)
-ابتكار خاص: محرك التطابق الفراكتلي (Fractal Parity)، مذبذب الفوضى (Entropy Oscillator)، وبروتوكول التناقض (Paradox).
+HADES V-INFINITY 2.0 - The GPT-5.2 Edition
+الميزات: إصلاح نهائي للأزرار، دمج ذكاء GPT-5.2 مع محرك الفوضى (Chaos Engine)، وإضافة أوامر التحميل.
 """
 
-import os, re, datetime, psycopg2, pandas as pd, json, logging
-from typing import Tuple, Dict, Optional, List  # 🌟 تم إصلاح هذا السطر ليتضمن List
+import os, re, datetime, psycopg2, pandas as pd, json, logging, asyncio
+from typing import Tuple, Dict, Optional, List
 from contextlib import contextmanager
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler, CommandHandler, ContextTypes
+from openai import AsyncOpenAI
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# ==================== 🛡️ الإعدادات الأساسية والمفاتيح ====================
 TOKEN = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s" 
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 ADMIN_ID = 6033203084
+
+# 🌟 مفاتيح الذكاء الاصطناعي الجديدة (GPT-5.2) 🌟
+AI_API_KEY = "acv-d8351cddde4fbd194ee91aa7442600cd54b961bd1fe39fcf898831db50b3892b"
+AI_MODEL = "gpt-5.2"
+# إذا كان المفتاح يتبع لموقع وسيط (Proxy)، ضع رابطه هنا بدلاً من رابط أوبن إي آي الأصلي:
+AI_BASE_URL = "https://api.openai.com/v1" 
 
 WINNER_MAP = {'الراعي 🔴': 0, 'راعي': 0, 'الثور 🔵': 1, 'ثور': 1, 'تعادل ⚪': 2, 'تعادل': 2, '🔴': 0, '🔵': 1, '⚪': 2}
 WINNER_NAMES = {0: 'الراعي 🔴', 1: 'الثور 🔵', 2: 'تعادل ⚪'}
 SUITS = ['♦️', '♥️', '♠️', '♣️']
 RANKS_LAYOUT = [["A", "K", "Q", "J"], ["10", "9", "8", "7"], ["6", "5", "4", "3", "2"]]
 
-# ==================== 🗄️ البنية التحتية ====================
+RANK_VALUE = {"A":14, "K":13, "Q":12, "J":11, "10":10, "9":9, "8":8, "7":7, "6":6, "5":5, "4":4, "3":3, "2":2}
+
+# ==================== 🗄️ إدارة قاعدة البيانات الآمنة السريعة ====================
 @contextmanager
 def get_db_cursor():
-    conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+    # إضافة timeout لمنع تعليق الأزرار نهائياً
+    conn = psycopg2.connect(DATABASE_URL, sslmode='require', connect_timeout=3)
     try:
         yield conn, conn.cursor()
     finally:
         conn.close()
+
+def ensure_columns():
+    try:
+        with get_db_cursor() as (conn, cur):
+            cur.execute("""CREATE TABLE IF NOT EXISTS history(
+                id SERIAL PRIMARY KEY, b_num TEXT, suit TEXT, rank TEXT,
+                bonus_last_digit INT, winner TEXT, user_id BIGINT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+            
+            cur.execute("""CREATE TABLE IF NOT EXISTS pattern_stats (
+                pattern_id VARCHAR(50) PRIMARY KEY, pattern_type VARCHAR(20),
+                red_count FLOAT DEFAULT 0, blue_count FLOAT DEFAULT 0, tie_count FLOAT DEFAULT 0)""")
+            conn.commit()
+    except Exception as e:
+        logger.error(f"DB Init Error: {e}")
 
 def clean_digits(text: str) -> str:
     if not text: return ""
@@ -38,50 +64,60 @@ def generate_progress_bar(percentage: int) -> str:
     filled = int(percentage / 10)
     return "█" * filled + "░" * (10 - filled)
 
-# ==================== 🌌 ابتكار 1: شيفرة الفراكتل (Fractal Parity) ====================
-def get_fractal_signature(b_num: str) -> str:
-    """يحول آخر 4 أرقام من البونص إلى بصمة ثنائية (0 للزوجي، 1 للفردي) لكشف تسريب معالج الكازينو"""
-    padded = b_num.zfill(4)
-    last_four = padded[-4:]
-    signature = "".join(["0" if int(d)%2==0 else "1" for d in last_four])
-    return f"FRACTAL_{signature}"
+# ==================== 🤖 محرك GPT-5.2 الحي ====================
+class GPT5Engine:
+    def __init__(self):
+        self.client = AsyncOpenAI(api_key=AI_API_KEY, base_url=AI_BASE_URL, timeout=5.0)
 
-# ==================== 🌌 ابتكار 2: مذبذب الفوضى (Entropy Oscillator) ====================
+    async def get_prediction(self, recent_history: list) -> Tuple[Optional[int], int, str]:
+        """يرسل آخر الجولات لـ GPT-5.2 ليقرر هل اللعبة في حالة تريند أم كسر"""
+        if len(recent_history) < 3: return None, 0, ""
+        
+        prompt = f"""
+        You are a Casino Probability AI. 
+        Recent game history (0=Red, 1=Blue): {recent_history}
+        Based on pattern recognition and mean reversion, predict the next outcome.
+        Reply ONLY with JSON: {{"winner": 0 or 1, "confidence": 50-95, "reason": "short explanation in Arabic"}}
+        """
+        try:
+            response = await self.client.chat.completions.create(
+                model=AI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2, max_tokens=100
+            )
+            content = response.choices[0].message.content
+            match = re.search(r'\{.*\}', content, re.DOTALL)
+            if match:
+                data = json.loads(match.group())
+                return int(data.get("winner", 2)), int(data.get("confidence", 50)), data.get("reason", "تحليل GPT-5.2")
+        except Exception as e:
+            logger.error(f"GPT Error: {e}")
+        return None, 0, "فشل الاتصال بـ GPT"
+
+gpt_engine = GPT5Engine()
+
+# ==================== 🌌 محرك الفوضى (Chaos & Paradox) ====================
 def measure_chaos_entropy() -> Tuple[float, str, bool]:
-    """يقيس مدى تذبذب اللعبة. الفوضى العالية تعني انعكاساً قادماً"""
     try:
         with get_db_cursor() as (conn, cur):
             cur.execute("SELECT winner FROM history WHERE winner IS NOT NULL ORDER BY id DESC LIMIT 8")
             rows = cur.fetchall()
             if len(rows) < 8: return 0.0, "استقرار", False
-            
             recent = [WINNER_MAP.get(r[0], 2) for r in rows]
-            recent.reverse() # ترتيب من الأقدم للأحدث
-            
-            # حساب التغيرات (Transitions)
+            recent.reverse() 
             changes = sum(1 for i in range(1, len(recent)) if recent[i] != recent[i-1])
-            entropy_level = changes / 7.0 # النسبة المئوية للتغير
+            entropy_level = changes / 7.0 
             
-            if entropy_level > 0.7:
-                return entropy_level, "⚠️ فوضى عارمة (اللعبة تعكس النتائج باستمرار)", True
-            elif entropy_level < 0.2:
-                return entropy_level, "⚠️ ركود خوارزمي (الهدوء الذي يسبق العاصفة، سيحدث كسر قريباً)", True
-            else:
-                return entropy_level, "متوازن (اللعبة تسير بنمط طبيعي)", False
+            if entropy_level > 0.7: return entropy_level, "⚠️ فوضى عارمة (اللعبة تعكس النتائج)", True
+            elif entropy_level < 0.2: return entropy_level, "⚠️ ركود خوارزمي (تريند طويل)", True
+            else: return entropy_level, "متوازن (اللعبة تسير بنمط طبيعي)", False
     except: pass
     return 0.0, "مجهول", False
 
-# ==================== 🌌 ابتكار 3: بروتوكول التناقض (The Paradox Engine) ====================
-def fetch_paradoxical_patterns(suit: str, last_digit: int, fractal_sig: str) -> Tuple[Dict[int, float], List[str]]:
-    """يجلب الأنماط، وإذا وجد نمطاً نسبة نجاحه وهمية/فائقة (كفخ من الكازينو)، يقوم بعكسه فوراً!"""
+def fetch_paradoxical_patterns(suit: str, last_digit: int) -> Tuple[Dict[int, float], List[str]]:
     scores = {0: 0.0, 1: 0.0}
     logs = []
-    
-    queries = [
-        (fractal_sig, "بصمة معالج الكازينو", 2.5),
-        (f"SD_{suit}_{last_digit}", "نمط البذلة+الرقم", 2.0),
-        (f"SUIT_{suit}", "نمط البذلة", 1.2)
-    ]
+    queries = [(f"SD_{suit}_{last_digit}", "نمط البذلة+الرقم", 2.0), (f"SUIT_{suit}", "نمط البذلة", 1.2)]
     
     try:
         with get_db_cursor() as (conn, cur):
@@ -94,90 +130,225 @@ def fetch_paradoxical_patterns(suit: str, last_digit: int, fractal_sig: str) -> 
                     if total > 0:
                         p_red = red / total
                         p_blue = blue / total
-                        
-                        # 🚨 THE PARADOX PROTOCOL 🚨
-                        # إذا كان النمط يبدو مضموناً بشكل مبالغ فيه (+85%)، الكازينو سيقوم بكسره! نعكس التوقع!
                         if p_red > 0.85 and total >= 4:
-                            scores[1] += weight * 3.0 # نعطي الثور قوة مضاعفة لكسر الفخ
-                            logs.append(f"🌀 **بروتوكول التناقض:** فخ مكشوف للراعي في ({desc}) -> انعكاس إجباري للثور 🔵!")
+                            scores[1] += weight * 3.0 
+                            logs.append(f"🌀 بروتوكول التناقض: فخ مكشوف للراعي -> انعكاس للثور 🔵!")
                         elif p_blue > 0.85 and total >= 4:
                             scores[0] += weight * 3.0 
-                            logs.append(f"🌀 **بروتوكول التناقض:** فخ مكشوف للثور في ({desc}) -> انعكاس إجباري للراعي 🔴!")
+                            logs.append(f"🌀 بروتوكول التناقض: فخ مكشوف للثور -> انعكاس للراعي 🔴!")
                         else:
-                            # حساب طبيعي
                             winner = 0 if p_red > p_blue else 1
                             scores[winner] += max(p_red, p_blue) * weight
                             logs.append(f"🔍 {desc}: {WINNER_NAMES[winner]} [✅{int(max(red,blue))}|❌{int(min(red,blue))}]")
-    except Exception as e:
-        logger.error(f"Paradox Engine Error: {e}")
-        
+    except: pass
     return scores, logs
 
-# ==================== 🧠 محرك INFINITY المركزي ====================
-async def predict_infinity(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
+# ==================== 🧠 محرك INFINITY המدمج ====================
+async def predict_infinity_gpt(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     clean_b = clean_digits(b_num)
     if not clean_b: return 2, 0, "❌ رقم غير صالح"
-    
     last_digit = int(clean_b[-1])
-    fractal_sig = get_fractal_signature(clean_b)
     
     logs = []
+    scores = {0: 0.0, 1: 0.0}
     
-    # 1. قياس الفوضى (هل اللعبة في وضع جنون؟)
+    # 1. تحليل الفوضى
     entropy_val, entropy_msg, is_danger = measure_chaos_entropy()
-    logs.append(f"🌊 **مذبذب الفوضى:** {entropy_msg} (معدل: {entropy_val:.2f})")
+    logs.append(f"🌊 **مذبذب الفوضى:** {entropy_msg}")
 
-    # 2. استدعاء بروتوكول التناقض والبصمة
-    scores, paradox_logs = fetch_paradoxical_patterns(suit, last_digit, fractal_sig)
+    # 2. استشارة GPT-5.2 الحي
+    recent_history = []
+    try:
+        with get_db_cursor() as (conn, cur):
+            cur.execute("SELECT winner FROM history WHERE winner IS NOT NULL ORDER BY id DESC LIMIT 10")
+            recent_history = [WINNER_MAP.get(r[0], 2) for r in cur.fetchall()]
+            recent_history.reverse()
+    except: pass
+
+    gpt_pred, gpt_conf, gpt_log = await gpt_engine.get_prediction(recent_history)
+    if gpt_pred in [0, 1]:
+        scores[gpt_pred] += (gpt_conf / 100) * 2.5 # وزن قوي لـ GPT
+        logs.append(f"🤖 **عقل GPT-5.2:** {WINNER_NAMES[gpt_pred]} ({gpt_log})")
+
+    # 3. الأنماط الرياضية والـ Paradox
+    db_scores, paradox_logs = fetch_paradoxical_patterns(suit, last_digit)
     logs.extend(paradox_logs)
+    scores[0] += db_scores[0]
+    scores[1] += db_scores[1]
     
-    # 3. دمج الحسابات
+    # حساب القرار النهائي
     final_pred = 0 if scores[0] >= scores[1] else 1
     total_score = scores[0] + scores[1]
     
-    # حماية ضد نقص البيانات
     if total_score == 0:
-        math_res = (sum(int(d) for d in clean_b[-3:]) + last_digit) % 2
-        logs.append(f"🧮 **تحليل احتياطي (لم يسبق رؤية هذه البصمة)**")
-        return math_res, 60, "\n".join(logs)
+        padded_b = clean_b.zfill(3)
+        math_res = (sum(int(d) for d in padded_b[-3:]) + last_digit) % 2
+        return math_res, 60, "🧮 **تحليل رياضي احتياطي**"
         
     raw_conf = (scores[final_pred] / total_score) * 100
     confidence = int(min(99, max(50, raw_conf)))
     
-    # إذا كانت اللعبة في وضع خطر (فوضى أو ركود عالي)، نخفض الثقة لنخبرك بالحذر
-    if is_danger:
-        confidence = min(65, confidence)
-        logs.append("\n⚠️ **نصيحة الآلة:** اللعبة في مرحلة تحول خوارزمي، العب بحذر شديد.")
+    if is_danger: confidence = min(65, confidence)
     
     reason_str = "\n".join(logs)
     return final_pred, confidence, reason_str
 
-# ==================== 🛠️ التعلم المستمر والآني ====================
-def live_train_infinity(b_num: str, suit: str, winner_code: int):
-    """تحديث البصمة الفراكتلية والأنماط فوراً بعد كل جولة"""
-    last_digit = int(clean_digits(b_num)[-1])
-    fractal_sig = get_fractal_signature(clean_digits(b_num))
-    
-    patterns = [
-        fractal_sig,
-        f"SD_{suit}_{last_digit}",
-        f"SUIT_{suit}"
-    ]
-    
-    col = "red_count" if winner_code == 0 else "blue_count" if winner_code == 1 else "tie_count"
-    
+# ==================== 🛠️ السحب والتصدير (Admin) ====================
+async def download_db_txt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    message = update.message if update.message else update.callback_query.message
+    msg = await message.reply_text("⏳ جاري سحب قاعدة البيانات...")
     try:
         with get_db_cursor() as (conn, cur):
-            for pid in patterns:
-                cur.execute(f"""
-                    INSERT INTO pattern_stats (pattern_id, {col}) VALUES (%s, 1) 
-                    ON CONFLICT (pattern_id) DO UPDATE SET {col} = pattern_stats.{col} + 1
-                """, (pid,))
-            conn.commit()
-    except: pass
+            df_history = pd.read_sql("SELECT * FROM history ORDER BY id DESC LIMIT 5000", conn)
+            df_patterns = pd.read_sql("SELECT * FROM pattern_stats ORDER BY (red_count + blue_count) DESC", conn)
+            
+        filename = f"hades_db_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write("=== HADES DB BACKUP ===\n\n--- PATTERN STATS ---\n")
+            df_patterns.to_csv(f, sep='\t', index=False)
+            f.write("\n\n--- HISTORY ---\n")
+            df_history.to_csv(f, sep='\t', index=False)
 
-# ==================== 🎮 الواجهة ====================
+        with open(filename, "rb") as f:
+            await message.reply_document(document=f, caption="📥 نسخة احتياطية من قاعدة البيانات")
+        os.remove(filename)
+        await msg.delete()
+    except Exception as e:
+        await msg.edit_text(f"❌ خطأ: {e}")
+
+# ==================== 🎮 واجهة التليجرام (مضادة للتعليق) ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    kb = [[InlineKeyboardButton("🎴 اختيار البذلة", callback_data="choose_suit")]]
-    await update.message.reply_text("<b>🌌 HADES V-INFINIT
+    kb = [
+        [InlineKeyboardButton("🎴 بدء التوقع", callback_data="choose_suit")],
+        [InlineKeyboardButton("📥 تحميل البيانات", callback_data="download_txt")]
+    ]
+    await update.message.reply_text("<b>🌌 HADES V-INFINITY (GPT-5.2 Edition)</b>\nاضغط للبدء:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    # 🌟 الرد الفوري على التليجرام لمنع تعليق الزر:
+    await query.answer("يتم تنفيذ الأمر...") 
+    data = query.data
+    
+    try:
+        if data == "download_txt":
+            await download_db_txt(update, context)
+            
+        elif data == "choose_suit":
+            context.user_data.pop('suit', None); context.user_data.pop('rank', None)
+            kb = [[InlineKeyboardButton(s, callback_data=f"suit_{s}") for s in SUITS]]
+            await query.edit_message_text("🎴 <b>اختر البذلة:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+            
+        elif data.startswith("suit_"):
+            suit = data.split("_")[1]
+            context.user_data['suit'] = suit
+            kb = [[InlineKeyboardButton(r, callback_data=f"rank_{r}") for r in row] for row in RANKS_LAYOUT]
+            kb.append([InlineKeyboardButton("🔙 رجوع", callback_data="choose_suit")])
+            await query.edit_message_text(f"✅ البذلة: <b>{suit}</b>\n🃏 <b>اختر الورقة:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+
+        elif data.startswith("rank_"):
+            rank = data.split("_")[1]
+            context.user_data['rank'] = rank
+            suit = context.user_data.get('suit', '')
+            kb = [[InlineKeyboardButton("🔄 تغيير الاختيار", callback_data="choose_suit")]]
+            await query.edit_message_text(f"✅ تم الاختيار: <b>{suit} {rank}</b>\n\n📥 <b>أرسل رقم البونص:</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+
+        elif data == "delete_last":
+            try:
+                with get_db_cursor() as (conn, cur):
+                    cur.execute("DELETE FROM history WHERE id = (SELECT max(id) FROM history WHERE user_id = %s)", (update.effective_user.id,))
+                    conn.commit()
+            except: pass
+            kb = [[InlineKeyboardButton("🔄 تغيير الاختيار", callback_data="choose_suit")]]
+            await query.edit_message_text(f"🗑️ تم مسح الجولة الخاطئة.\nأرسل الرقم الصحيح:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+
+        elif data.startswith("save_"):
+            w_code = int(data.split("_")[1])
+            
+            # 🌟 حماية: حتى لو فقد المتغيرات لن يعلق، سيحفظ الموجود ويطلب الإعادة
+            b_num = context.user_data.get('last_b_num', '00000')
+            suit = context.user_data.get('last_suit', '♦️')
+            rank = context.user_data.get('last_rank', 'A')
+            
+            try:
+                with get_db_cursor() as (conn, cur):
+                    cur.execute("""INSERT INTO history (b_num, suit, rank, bonus_last_digit, winner, user_id) 
+                                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                                (b_num, suit, rank, int(clean_digits(b_num)[-1]), WINNER_NAMES[w_code], update.effective_user.id))
+                    
+                    # التعليم الفوري الصامت (لا يعطل الواجهة)
+                    col = "red_count" if w_code == 0 else "blue_count" if w_code == 1 else "tie_count"
+                    pid = f"SD_{suit}_{int(clean_digits(b_num)[-1])}"
+                    cur.execute(f"INSERT INTO pattern_stats (pattern_id, {col}) VALUES (%s, 1) ON CONFLICT (pattern_id) DO UPDATE SET {col} = pattern_stats.{col} + 1", (pid,))
+                    conn.commit()
+            except Exception as db_e: 
+                logger.error(f"Live Save Error: {db_e}")
+
+            # 🌟 إعادة رسم الأزرار بشكل نظيف
+            kb = [
+                [InlineKeyboardButton("🗑️ تصحيح", callback_data="delete_last")], 
+                [InlineKeyboardButton("🔄 تغيير", callback_data="choose_suit")]
+            ]
+            await query.edit_message_text(f"✅ تم حفظ: <b>{WINNER_NAMES[w_code]}</b>\n\n📥 <b>أرسل الرقم التالي لـ ({suit} {rank}):</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+            
+    except Exception as e:
+        logger.error(f"Callback Error: {e}")
+        # لا نتركه يعلق أبداً، نعطيه زر الرجوع
+        kb = [[InlineKeyboardButton("رجوع للقائمة", callback_data="choose_suit")]]
+        await query.edit_message_text("❌ انتهت صلاحية الجلسة.", reply_markup=InlineKeyboardMarkup(kb))
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        text = update.message.text
+        clean_text = clean_digits(text)
+        
+        if clean_text:
+            suit = context.user_data.get('suit')
+            rank = context.user_data.get('rank')
+            
+            if not suit or not rank:
+                kb = [[InlineKeyboardButton("🎴 اختيار البذلة", callback_data="choose_suit")]]
+                await update.message.reply_text("⚠️ <b>يجب اختيار البذلة والورقة أولاً!</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+                return
+            
+            # 🌟 رسالة انتظار تفاعلية
+            processing_msg = await update.message.reply_text("⏳ <b>يتم استشارة GPT-5.2 ومحرك الفوضى...</b>", parse_mode='HTML')
+            
+            pred_code, confidence, reason = await predict_infinity_gpt(clean_text, suit, rank)
+            
+            context.user_data['last_b_num'] = clean_text
+            context.user_data['last_suit'] = suit
+            context.user_data['last_rank'] = rank
+            
+            kb = [
+                [InlineKeyboardButton("راعي 🔴", callback_data="save_0"), InlineKeyboardButton("ثور 🔵", callback_data="save_1")],
+                [InlineKeyboardButton("تعادل ⚪", callback_data="save_2")]
+            ]
+            
+            bar = generate_progress_bar(confidence)
+            report = f"""🌌 <b>تقرير V-INFINITY (GPT-5.2)</b>
+━━━━━━━━━━━━━━━
+🃏 الورقة: {suit} {rank} | 📥 البونص: <code>{clean_text}</code>
+
+🏆 <b>التوقع المرجح: {WINNER_NAMES[pred_code]}</b>
+📊 الثقة: [{bar}] {confidence}%
+
+<b>🔍 مجريات التحليل:</b>\n{reason}
+━━━━━━━━━━━━━━━
+اختر الفائز الفعلي للتسجيل:"""
+            
+            await processing_msg.edit_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Handle Msg Error: {e}")
+
+if __name__ == "__main__":
+    ensure_columns()
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("download", download_db_txt))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    print("🌌 HADES V-INFINITY (GPT-5.2 Edition) RUNNING...")
+    app.run_polling(drop_pending_updates=True)
