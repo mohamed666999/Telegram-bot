@@ -1,6 +1,6 @@
 """
-HADES V13.1 - THE ANTI-SHIFT ENGINE (Hotfix)
-تم إصلاح مشكلة NoneType في حساب الفجوة الزمنية للبيانات القديمة.
+HADES V13.2 - THE ANTI-SHIFT ENGINE (JSON Armor)
+إصلاح مشكلة معالجة الـ JSON القادم من الذكاء الاصطناعي وتجريده من الشوائب.
 """
 
 import os, re, datetime, psycopg2, pandas as pd, json, logging, asyncio
@@ -58,7 +58,7 @@ def generate_progress_bar(percentage: int) -> str:
     filled = int(percentage / 10)
     return "█" * filled + "░" * (10 - filled)
 
-# ==================== 🤖 العميل المستقل (Optimized AI Agent) ====================
+# ==================== 🤖 العميل المستقل (Safeguarded AI Agent) ====================
 class AutonomousAgent:
     def __init__(self):
         self.client = AsyncOpenAI(api_key=NVIDIA_API_KEY, base_url=NVIDIA_BASE_URL, timeout=20.0)
@@ -78,54 +78,64 @@ class AutonomousAgent:
                 t_current = rows[i][1]
                 t_prev = rows[i-1][1]
                 
-                # 🌟 إصلاح الخطأ: التأكد أن التوقيت ليس None
-                if t_current is None or t_prev is None:
-                    continue
+                if t_current is None or t_prev is None: continue
                     
                 time_gap = int((t_current - t_prev).total_seconds())
                 winner = WINNER_MAP.get(rows[i][2], 2)
                 
-                if time_gap > 0 and time_gap < 180: # نأخذ الفجوات المنطقية فقط
+                if time_gap > 0 and time_gap < 180: 
                     agent_data.append(f"({suit},{time_gap}s,{winner})")
 
-            if not agent_data:
-                return "⚠️ لا توجد جولات ذات توقيت زمني صحيح لبناء القوانين."
+            if not agent_data: return "⚠️ لا توجد جولات متتالية صحيحة التوقيت لبناء قوانين."
 
             prompt = f"""
             Analyze this Casino data format: (Suit, TimeGap_seconds, Winner[0=Red, 1=Blue]).
             Data: {', '.join(agent_data[-60:])}
             
-            Task: Give me 2 or 3 rules based on TimeGap. 
-            Example: If Gap is between 30 and 40 for ♦️, who wins more?
-            
-            You MUST reply ONLY with a valid JSON array like this:
+            Task: Give me 2 or 3 rules based on TimeGap.
+            OUTPUT STRICTLY AS A RAW JSON ARRAY. NO MARKDOWN. NO CODE BLOCKS.
+            Example:
             [
-              {{"suit": "♦️", "min_gap": 25, "max_gap": 40, "predicted_winner": 1, "confidence": 85, "reason": "Fast gaps favor Blue"}},
-              {{"suit": "♠️", "min_gap": 41, "max_gap": 60, "predicted_winner": 0, "confidence": 75, "reason": "Medium gaps favor Red"}}
+              {{"suit": "♦️", "min_gap": 25, "max_gap": 40, "predicted_winner": 1, "confidence": 85, "reason": "Fast gaps favor Blue"}}
             ]
             """
             
             response = await self.client.chat.completions.create(
                 model=NVIDIA_MODEL,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "system", "content": "You are a JSON stringifier. Do not use markdown like ```json. Return pure JSON array."},
+                    {"role": "user", "content": prompt}
+                ],
                 temperature=0.1, max_tokens=300
             )
             
             content = response.choices[0].message.content
+            
+            # 🛡️ الدرع الواقي (JSON Armor) لتنظيف النص من الماركداون والشوائب
+            content = content.replace('```json', '').replace('```', '').strip()
             match = re.search(r'\[.*\]', content, re.DOTALL)
+            
             if match:
-                laws = json.loads(match.group())
-                with get_db_cursor() as (conn, cur):
-                    cur.execute("TRUNCATE TABLE agent_laws")
-                    for law in laws:
-                        cur.execute("""INSERT INTO agent_laws (suit, min_gap, max_gap, predicted_winner, confidence, reason) 
-                                       VALUES (%s, %s, %s, %s, %s, %s)""",
-                                    (law['suit'], law['min_gap'], law['max_gap'], law['predicted_winner'], law['confidence'], law['reason']))
-                    conn.commit()
-                return f"✅ تم بنجاح! العميل زرع {len(laws)} قوانين زمنية جديدة."
-            return "⚠️ الذكاء الاصطناعي لم يجد نمطاً حاسماً."
+                clean_json_str = match.group()
+                try:
+                    laws = json.loads(clean_json_str)
+                    if isinstance(laws, list) and len(laws) > 0:
+                        with get_db_cursor() as (conn, cur):
+                            cur.execute("TRUNCATE TABLE agent_laws")
+                            for law in laws:
+                                cur.execute("""INSERT INTO agent_laws (suit, min_gap, max_gap, predicted_winner, confidence, reason) 
+                                               VALUES (%s, %s, %s, %s, %s, %s)""",
+                                            (law.get('suit'), law.get('min_gap'), law.get('max_gap'), law.get('predicted_winner'), law.get('confidence'), law.get('reason')))
+                            conn.commit()
+                        return f"✅ تم بنجاح! العميل زرع {len(laws)} قوانين زمنية جديدة."
+                    else:
+                        return "⚠️ العميل لم ينتج أي قانون مفيد."
+                except json.JSONDecodeError as e:
+                    logger.error(f"JSON Decode Error. Raw string: {clean_json_str}")
+                    return "❌ فشل الذكاء الاصطناعي في صياغة القوانين بشكل صحيح. حاول مجدداً."
+            return "⚠️ الذكاء الاصطناعي أرجع رداً غير مفهوم."
         except Exception as e:
-            return f"❌ خطأ في العميل: {e}"
+            return f"❌ خطأ في الاتصال بالعميل الذكي."
 
 ai_agent = AutonomousAgent()
 
@@ -148,7 +158,7 @@ def detect_regime_shift() -> Tuple[bool, str]:
     except: pass
     return False, ""
 
-# ==================== 🧠 محرك التوقع (V13.1) ====================
+# ==================== 🧠 محرك التوقع (V13.2) ====================
 def calculate_current_gap() -> int:
     try:
         with get_db_cursor() as (conn, cur):
@@ -180,12 +190,10 @@ async def predict_v13(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     logs = []
     scores = {0: 0.0, 1: 0.0}
     
-    # 1. كاشف الانعكاس
     is_shifted, shift_msg = detect_regime_shift()
     if is_shifted:
         logs.append(shift_msg)
     
-    # 2. قوانين العميل الزمني
     agent_w, agent_c, agent_log = get_agent_prediction(suit, current_gap)
     if agent_w is not None:
         if is_shifted: agent_w = 1 if agent_w == 0 else 0
@@ -194,7 +202,6 @@ async def predict_v13(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     else:
         logs.append(f"⏱️ الفجوة الحالية: {current_gap} ث (لا يوجد قانون لها).")
 
-    # 3. الإحصاء الرياضي السريع
     try:
         with get_db_cursor() as (conn, cur):
             cur.execute("SELECT winner FROM history WHERE suit=%s AND bonus_last_digit=%s AND winner IS NOT NULL ORDER BY id DESC LIMIT 50", (suit, last_digit))
@@ -211,7 +218,6 @@ async def predict_v13(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
                     logs.append(f"📊 **الذاكرة المباشرة:** {WINNER_NAMES[best]}")
     except: pass
 
-    # ================= الحساب النهائي =================
     final_pred = 0 if scores[0] >= scores[1] else 1
     total_score = scores[0] + scores[1]
     
@@ -242,7 +248,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🎴 بدء التوقع", callback_data="choose_suit")],
         [InlineKeyboardButton("🤖 تحديث قوانين العميل الزمني", callback_data="force_agent")]
     ]
-    await update.message.reply_text("<b>🏛️ HADES V13.1 (Anti-Shift Mode)</b>\n\nاضغط للبدء:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    await update.message.reply_text("<b>🏛️ HADES V13.2 (Anti-Shift Mode)</b>\n\nنظام كشف الانعكاس والعميل الزمني مفعل.\nاضغط للبدء:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -338,7 +344,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             
             bar = generate_progress_bar(confidence)
-            report = f"""🎯 <b>تقرير V13.1</b>
+            report = f"""🎯 <b>تقرير V13.2</b>
 ━━━━━━━━━━━━━━━
 🃏 الورقة: {suit} {rank} | 📥 البونص: <code>{clean_text}</code>
 
@@ -359,5 +365,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("🚀 HADES V13.1 RUNNING...")
+    print("🚀 HADES V13.2 RUNNING...")
     app.run_polling(drop_pending_updates=True)
