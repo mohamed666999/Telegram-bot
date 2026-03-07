@@ -1,6 +1,6 @@
 """
-HADES V13 - THE ANTI-SHIFT ENGINE (Complete & Fixed)
-الميزات: كاشف انعكاس اللعبة التلقائي (Auto-Inversion)، تبسيط الـ AI Agent، وتحليل الفجوات الزمنية.
+HADES V13.1 - THE ANTI-SHIFT ENGINE (Hotfix)
+تم إصلاح مشكلة NoneType في حساب الفجوة الزمنية للبيانات القديمة.
 """
 
 import os, re, datetime, psycopg2, pandas as pd, json, logging, asyncio
@@ -66,7 +66,7 @@ class AutonomousAgent:
     async def analyze_and_create_laws(self, limit=100) -> str:
         try:
             with get_db_cursor() as (conn, cur):
-                cur.execute(f"SELECT suit, timestamp, winner FROM history WHERE winner IS NOT NULL ORDER BY id DESC LIMIT {limit}")
+                cur.execute(f"SELECT suit, timestamp, winner FROM history WHERE winner IS NOT NULL AND timestamp IS NOT NULL ORDER BY id DESC LIMIT {limit}")
                 rows = cur.fetchall()
             
             if len(rows) < 10: return "بيانات غير كافية لتدريب العميل."
@@ -75,10 +75,21 @@ class AutonomousAgent:
             rows.reverse()
             for i in range(1, len(rows)):
                 suit = rows[i][0]
-                time_gap = int((rows[i][1] - rows[i-1][1]).total_seconds())
+                t_current = rows[i][1]
+                t_prev = rows[i-1][1]
+                
+                # 🌟 إصلاح الخطأ: التأكد أن التوقيت ليس None
+                if t_current is None or t_prev is None:
+                    continue
+                    
+                time_gap = int((t_current - t_prev).total_seconds())
                 winner = WINNER_MAP.get(rows[i][2], 2)
-                if time_gap < 120: 
+                
+                if time_gap > 0 and time_gap < 180: # نأخذ الفجوات المنطقية فقط
                     agent_data.append(f"({suit},{time_gap}s,{winner})")
+
+            if not agent_data:
+                return "⚠️ لا توجد جولات ذات توقيت زمني صحيح لبناء القوانين."
 
             prompt = f"""
             Analyze this Casino data format: (Suit, TimeGap_seconds, Winner[0=Red, 1=Blue]).
@@ -137,13 +148,14 @@ def detect_regime_shift() -> Tuple[bool, str]:
     except: pass
     return False, ""
 
-# ==================== 🧠 محرك التوقع (V13) ====================
+# ==================== 🧠 محرك التوقع (V13.1) ====================
 def calculate_current_gap() -> int:
     try:
         with get_db_cursor() as (conn, cur):
-            cur.execute("SELECT timestamp FROM history ORDER BY id DESC LIMIT 1")
+            cur.execute("SELECT timestamp FROM history WHERE timestamp IS NOT NULL ORDER BY id DESC LIMIT 1")
             row = cur.fetchone()
-            if row: return int((datetime.datetime.utcnow() - row[0]).total_seconds())
+            if row and row[0]: 
+                return int((datetime.datetime.utcnow() - row[0]).total_seconds())
     except: pass
     return 0
 
@@ -168,10 +180,12 @@ async def predict_v13(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     logs = []
     scores = {0: 0.0, 1: 0.0}
     
+    # 1. كاشف الانعكاس
     is_shifted, shift_msg = detect_regime_shift()
     if is_shifted:
         logs.append(shift_msg)
     
+    # 2. قوانين العميل الزمني
     agent_w, agent_c, agent_log = get_agent_prediction(suit, current_gap)
     if agent_w is not None:
         if is_shifted: agent_w = 1 if agent_w == 0 else 0
@@ -180,9 +194,10 @@ async def predict_v13(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     else:
         logs.append(f"⏱️ الفجوة الحالية: {current_gap} ث (لا يوجد قانون لها).")
 
+    # 3. الإحصاء الرياضي السريع
     try:
         with get_db_cursor() as (conn, cur):
-            cur.execute("SELECT winner FROM history WHERE suit=%s AND bonus_last_digit=%s ORDER BY id DESC LIMIT 50", (suit, last_digit))
+            cur.execute("SELECT winner FROM history WHERE suit=%s AND bonus_last_digit=%s AND winner IS NOT NULL ORDER BY id DESC LIMIT 50", (suit, last_digit))
             rows = cur.fetchall()
             if len(rows) > 2:
                 recent = [WINNER_MAP.get(r[0], 2) for r in rows]
@@ -196,6 +211,7 @@ async def predict_v13(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
                     logs.append(f"📊 **الذاكرة المباشرة:** {WINNER_NAMES[best]}")
     except: pass
 
+    # ================= الحساب النهائي =================
     final_pred = 0 if scores[0] >= scores[1] else 1
     total_score = scores[0] + scores[1]
     
@@ -226,7 +242,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🎴 بدء التوقع", callback_data="choose_suit")],
         [InlineKeyboardButton("🤖 تحديث قوانين العميل الزمني", callback_data="force_agent")]
     ]
-    await update.message.reply_text("<b>🏛️ HADES V13 (Anti-Shift Mode)</b>\n\nنظام كشف الانعكاس والعميل الزمني مفعل.\nاضغط للبدء:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+    await update.message.reply_text("<b>🏛️ HADES V13.1 (Anti-Shift Mode)</b>\n\nاضغط للبدء:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -282,9 +298,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 last_digit = int(clean_digits(b_num)[-1]) 
                 try:
                     with get_db_cursor() as (conn, cur):
-                        cur.execute("""INSERT INTO history (b_num, suit, rank, bonus_last_digit, winner, user_id) 
-                                       VALUES (%s, %s, %s, %s, %s, %s)""",
-                                    (b_num, suit, rank, last_digit, WINNER_NAMES[w_code], update.effective_user.id))
+                        cur.execute("""INSERT INTO history (b_num, suit, rank, bonus_last_digit, winner, user_id, timestamp) 
+                                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                                    (b_num, suit, rank, last_digit, WINNER_NAMES[w_code], update.effective_user.id, datetime.datetime.utcnow()))
                         conn.commit()
                 except Exception as e: logger.error(f"Live Save Error: {e}")
 
@@ -322,7 +338,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             
             bar = generate_progress_bar(confidence)
-            report = f"""🎯 <b>تقرير V13 (Anti-Shift Mode)</b>
+            report = f"""🎯 <b>تقرير V13.1</b>
 ━━━━━━━━━━━━━━━
 🃏 الورقة: {suit} {rank} | 📥 البونص: <code>{clean_text}</code>
 
@@ -343,5 +359,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("🚀 HADES V13 RUNNING...")
+    print("🚀 HADES V13.1 RUNNING...")
     app.run_polling(drop_pending_updates=True)
