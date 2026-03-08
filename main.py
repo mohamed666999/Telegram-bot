@@ -43,7 +43,7 @@ ADMIN_ID     = 6033203084
 AI_BASE_URL  = "https://integrate.api.nvidia.com/v1"
 AI_API_KEY   = "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"
 AI_MODEL     = "mistralai/devstral-2-123b-instruct-2512"
-AI_TIMEOUT   = 6.0
+AI_TIMEOUT   = 3.0
 LEARN_TIMEOUT = 300  # 5 دقائق للتعلم العميق
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -407,22 +407,27 @@ def ensure_tables():
                         tie_count    FLOAT DEFAULT 0
                     )
                 """)
+                # أنشئ جدول ai_laws بأبسط هيكل أولاً
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS ai_laws (
-                        id          SERIAL PRIMARY KEY,
-                        law_type    VARCHAR(50),
-                        conditions  JSONB,
-                        prediction  INT,
-                        confidence  FLOAT DEFAULT 70,
-                        accuracy    FLOAT DEFAULT 70,
-                        times_used  INT DEFAULT 0,
-                        description TEXT,
-                        source      TEXT DEFAULT 'force_learn',
-                        active      BOOLEAN DEFAULT TRUE,
-                        created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        session_id  INT DEFAULT 0
+                        id         SERIAL PRIMARY KEY,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
+                # أضف الأعمدة الناقصة بشكل آمن (تتجاهل إن كانت موجودة)
+                migrate_cols = [
+                    "ALTER TABLE ai_laws ADD COLUMN IF NOT EXISTS law_type    VARCHAR(50)",
+                    "ALTER TABLE ai_laws ADD COLUMN IF NOT EXISTS conditions  JSONB",
+                    "ALTER TABLE ai_laws ADD COLUMN IF NOT EXISTS prediction  INT",
+                    "ALTER TABLE ai_laws ADD COLUMN IF NOT EXISTS confidence  FLOAT DEFAULT 70",
+                    "ALTER TABLE ai_laws ADD COLUMN IF NOT EXISTS accuracy    FLOAT DEFAULT 70",
+                    "ALTER TABLE ai_laws ADD COLUMN IF NOT EXISTS times_used  INT DEFAULT 0",
+                    "ALTER TABLE ai_laws ADD COLUMN IF NOT EXISTS description TEXT",
+                    "ALTER TABLE ai_laws ADD COLUMN IF NOT EXISTS source      TEXT DEFAULT \'force_learn\'",
+                    "ALTER TABLE ai_laws ADD COLUMN IF NOT EXISTS active      BOOLEAN DEFAULT TRUE",
+                ]
+                for sql in migrate_cols:
+                    cur.execute(sql)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS learn_sessions (
                         id           SERIAL PRIMARY KEY,
