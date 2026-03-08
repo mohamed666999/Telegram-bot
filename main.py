@@ -707,13 +707,15 @@ async def force_learn_engine(status_callback) -> Dict:
                         skipped += 1
                         continue
 
+                    law_name = law.get("law_type", "COMBINED")
                     cur.execute("""
                         INSERT INTO ai_laws
-                            (law_type, conditions, prediction, confidence,
+                            (law_name, law_type, conditions, prediction, confidence,
                              accuracy, description, source)
-                        VALUES (%s, %s, %s, %s, %s, %s, 'force_learn')
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, 'force_learn')
                     """, (
-                        law.get("law_type", "COMBINED"),
+                        law_name,
+                        law_name,
                         json.dumps(cond, ensure_ascii=False),
                         int(pred),
                         float(law.get("confidence", 70)),
