@@ -241,106 +241,119 @@ def load_laws(force: bool = False) -> List[Dict]:
         return _laws_cache  # أعِد الكاش القديم
 
 def match_law(law: Dict, suit: str, rank: str, last_digit: int,
-              recent: List[int]) -> float:
+              recent: List[int], b_num: str = "", b_gap: Optional[float] = None,
+              gap_sec: Optional[float] = None, round_index: int = 0) -> float:
     """
-    يقيّم إن كان القانون ينطبق على الجولة الحالية.
-    يُعيد قيمة [0, 1]: درجة الانطباق.
+    يُطابق القانون مع الجولة الحالية — يدعم الشروط الرياضية والفجوات.
+    يُعيد [0, 1]: 1 = انطباق كامل.
     """
     cond  = law.get("conditions", {})
     score = 0.0
     total = 0
 
-    if "suit" in cond:
+    def chk(condition: bool):
+        nonlocal score, total
         total += 1
-        if suit == cond["suit"]:
+        if condition:
             score += 1
 
-    if "digit" in cond:
-        total += 1
-        if str(last_digit) == str(cond["digit"]):
-            score += 1
-
-    if "rank" in cond:
-        total += 1
-        if rank == cond["rank"]:
-            score += 1
-
-    if "digits_in" in cond:
-        total += 1
-        if str(last_digit) in [str(d) for d in cond["digits_in"]]:
-            score += 1
-
-    if "suits_in" in cond:
-        total += 1
-        if suit in cond["suits_in"]:
-            score += 1
-
-    if "streak" in cond and len(recent) >= cond["streak"]["length"]:
-        total += 1
-        expected = [cond["streak"]["value"]] * cond["streak"]["length"]
-        if recent[-cond["streak"]["length"]:] == expected:
-            score += 1
-
-    if "after_pattern" in cond and len(recent) >= len(cond["after_pattern"]):
-        total += 1
-        pat = cond["after_pattern"]
-        if recent[-len(pat):] == pat:
-            score += 1
-
-    if "rank_family" in cond:
-        total += 1
-        families = {
-            "face":   ["J", "Q", "K"],
-            "low":    ["2", "3", "4", "5"],
-            "high":   ["9", "10", "A"],
-            "middle": ["6", "7", "8"],
-        }
-        if rank in families.get(cond["rank_family"], []):
-            score += 1
-
+    # ── شروط أساسية ─────────────────────────────────────────────────
+    if "suit"      in cond: chk(suit == cond["suit"])
+    if "suits_in"  in cond: chk(suit in cond["suits_in"])
+    if "digit"     in cond: chk(str(last_digit) == str(cond["digit"]))
+    if "digits_in" in cond: chk(str(last_digit) in [str(d) for d in cond["digits_in"]])
+    if "rank"      in cond: chk(rank == cond["rank"])
     if "digit_parity" in cond:
-        total += 1
-        parity = "even" if last_digit % 2 == 0 else "odd"
-        if parity == cond["digit_parity"]:
-            score += 1
+        chk(("even" if last_digit % 2 == 0 else "odd") == cond["digit_parity"])
+    if "rank_family" in cond:
+        families = {"face": ["J","Q","K"], "low": ["2","3","4","5"],
+                    "high": ["9","10","A"], "middle": ["6","7","8"]}
+        chk(rank in families.get(cond["rank_family"], []))
+
+    # ── شروط تسلسلية ────────────────────────────────────────────────
+    if "streak" in cond:
+        slen = cond["streak"]["length"]
+        if len(recent) >= slen:
+            chk(recent[-slen:] == [cond["streak"]["value"]] * slen)
+    if "after_pattern" in cond:
+        pat = cond["after_pattern"]
+        if len(recent) >= len(pat):
+            chk(recent[-len(pat):] == pat)
+
+    # ── شروط رياضية (b_num) ──────────────────────────────────────────
+    if b_num and "digit_sum_mod" in cond:
+        c    = cond["digit_sum_mod"]
+        dsum = sum(int(d) for d in b_num if d.isdigit())
+        chk(dsum % int(c["mod"]) == int(c["remainder"]))
+
+    if b_num and "rank_value_mod" in cond:
+        c  = cond["rank_value_mod"]
+        rv = RANK_VALUE.get(rank.upper(), 0)
+        chk(rv % int(c["mod"]) == int(c["remainder"]))
+
+    if b_num and "digit_plus_rank_mod" in cond:
+        c    = cond["digit_plus_rank_mod"]
+        rv   = RANK_VALUE.get(rank.upper(), 0)
+        dsum = sum(int(d) for d in b_num if d.isdigit())
+        chk((dsum + rv) % int(c["mod"]) == int(c["remainder"]))
+
+    # ── شروط الدورة ──────────────────────────────────────────────────
+    if "cycle_position" in cond and round_index > 0:
+        c = cond["cycle_position"]
+        chk(round_index % int(c["cycle"]) == int(c["position"]))
+
+    # ── شروط الفجوة الرقمية ──────────────────────────────────────────
+    if b_gap is not None:
+        if "b_gap_gt"      in cond: chk(b_gap > float(cond["b_gap_gt"]))
+        if "b_gap_lt"      in cond: chk(b_gap < float(cond["b_gap_lt"]))
+        if "after_big_gap" in cond: chk(b_gap > 2000)
+
+    # ── شروط الفجوة الزمنية ──────────────────────────────────────────
+    if gap_sec is not None:
+        if "gap_sec_lt" in cond: chk(gap_sec < float(cond["gap_sec_lt"]))
+        if "gap_sec_gt" in cond: chk(gap_sec > float(cond["gap_sec_gt"]))
 
     if total == 0:
-        return 0.5  # قانون عام بدون شروط
+        return 0.5
     return score / total
 
 def apply_laws(suit: str, rank: str, last_digit: int,
-               recent: List[int]) -> Tuple[Dict[int, float], List[str]]:
+               recent: List[int], b_num: str = "",
+               b_gap: Optional[float] = None, gap_sec: Optional[float] = None,
+               round_index: int = 0) -> Tuple[Dict[int, float], List[str]]:
     """
-    يُطبّق كل القوانين النشطة على الجولة الحالية.
-    يُعيد: (scores بالنسبة لـ red/blue, سجلات نصية)
+    يُطبّق كل القوانين النشطة — يدعم الشروط الرياضية والفجوات.
     """
     laws   = load_laws()
     scores = {0: 0.0, 1: 0.0}
     logs   = []
 
     for law in laws:
-        match = match_law(law, suit, rank, last_digit, recent)
+        match = match_law(law, suit, rank, last_digit, recent,
+                          b_num=b_num, b_gap=b_gap,
+                          gap_sec=gap_sec, round_index=round_index)
         if match < 0.5:
-            continue  # القانون لا ينطبق بشكل كافٍ
+            continue
 
         pred = law.get("prediction")
         if pred not in [0, 1]:
             continue
 
-        # وزن القانون = ثقته × دقته × درجة الانطباق
         weight = (law["confidence"] / 100) * max(0.5, law["accuracy"] / 100) * match
         scores[pred] += weight * WEIGHTS['LAW']
 
-        if match >= 0.8:  # فقط القوانين القوية تظهر في السجل
+        if match >= 0.8:
             logs.append(
                 f"⚖️ قانون #{law['id']} ({law['law_type']}): "
                 f"{WINNER_NAMES[pred]} — {law['description'][:60]}"
             )
 
-        # تحديث عداد الاستخدام بشكل غير متزامن
-        asyncio.get_event_loop().run_in_executor(
-            None, _increment_law_usage, law["id"]
-        )
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.run_in_executor(None, _increment_law_usage, law["id"])
+        except Exception:
+            pass
 
     return scores, logs
 
@@ -545,15 +558,209 @@ def extract_json_safe(text: str) -> Optional[Any]:
     except Exception:
         return None
 
-# ==================== 🧬 /force_learn: التعلم العميق ====================
+# ==================== 🧬 /force_learn: التعلم الرياضي العميق ====================
+def _filter_valid_rounds(rows) -> List[Dict]:
+    """
+    تنقية الجولات:
+    1. تجاهل أول 700 جولة (كانت تعادلات مضللة)
+    2. حساب فجوات الوقت بين الجولات
+    3. تمييز الجولات المتصلة (فجوة < 20 ثانية) عن المنفصلة
+    """
+    valid = []
+    rows_list = list(rows)
+
+    # تجاهل أول 700 جولة
+    working = rows_list[700:] if len(rows_list) > 700 else rows_list
+
+    for i, row in enumerate(working):
+        b_num   = clean_digits(str(row[1] or ""))
+        suit    = row[2] or ""
+        rank    = row[3] or ""
+        digit   = int(row[4]) if row[4] is not None else -1
+        winner  = WINNER_MAP.get(row[5], 2)
+        ts      = row[6]  # created_at
+
+        if winner == 2 or not b_num or not suit:
+            continue
+
+        # فجوة الوقت مع الجولة السابقة
+        gap_sec = None
+        if i > 0 and working[i-1][6] and ts:
+            gap_sec = abs((ts - working[i-1][6]).total_seconds())
+
+        # فجوة رقم البونص (الفرق بين الأرقام)
+        b_gap = None
+        if i > 0:
+            prev_b = clean_digits(str(working[i-1][1] or ""))
+            if b_num and prev_b:
+                try:
+                    b_gap = abs(int(b_num) - int(prev_b))
+                except Exception:
+                    pass
+
+        valid.append({
+            "idx":       i,
+            "b_num":     b_num,
+            "suit":      suit,
+            "rank":      rank,
+            "digit":     digit,
+            "winner":    winner,
+            "ts":        ts,
+            "gap_sec":   gap_sec,
+            "b_gap":     b_gap,
+            # الجولة متصلة إن كانت الفجوة < 20 ثانية أو الفجوة الرقمية صغيرة
+            "connected": (gap_sec is not None and gap_sec <= 20) or
+                         (b_gap is not None and b_gap <= 500),
+        })
+
+    return valid
+
+def _build_math_memory(rounds: List[Dict]) -> Dict:
+    """
+    يبني ذاكرة رياضية — لا إحصاء عادي.
+    التركيز على: الفجوات، الدورات، المعادلات، الأنماط الزمنية.
+    """
+    connected = [r for r in rounds if r["connected"]]
+    total     = len(rounds)
+    conn_cnt  = len(connected)
+
+    # ── تحليل الفجوة الرقمية ────────────────────────────────────────
+    gap_analysis = {"small": [0, 0], "medium": [0, 0], "large": [0, 0]}
+    for r in rounds:
+        if r["b_gap"] is None:
+            continue
+        w = r["winner"]
+        if w not in [0, 1]:
+            continue
+        if r["b_gap"] < 200:
+            gap_analysis["small"][w] += 1
+        elif r["b_gap"] < 1000:
+            gap_analysis["medium"][w] += 1
+        else:
+            gap_analysis["large"][w] += 1
+
+    # ── تحليل آخر رقم من b_num (الرقم الكامل لا digit البونص فقط) ──
+    last_digit_of_bnum = defaultdict(lambda: [0, 0])
+    for r in rounds:
+        if r["b_num"] and r["winner"] in [0, 1]:
+            ld = int(r["b_num"][-1])
+            last_digit_of_bnum[str(ld)][r["winner"]] += 1
+
+    # ── تحليل مجموع أرقام b_num mod N ──────────────────────────────
+    digit_sum_mod = {}
+    for mod in [2, 3, 5, 7]:
+        mod_stats = defaultdict(lambda: [0, 0])
+        for r in rounds:
+            if r["b_num"] and r["winner"] in [0, 1]:
+                s = sum(int(d) for d in r["b_num"]) % mod
+                mod_stats[str(s)][r["winner"]] += 1
+        digit_sum_mod[f"mod_{mod}"] = {
+            k: {"red": v[0], "blue": v[1],
+                "bias": round((v[1]-v[0]) / max(v[0]+v[1], 1) * 100, 1)}
+            for k, v in mod_stats.items()
+        }
+
+    # ── تحليل الدورة (كل N جولة ماذا يتكرر) ─────────────────────────
+    cycle_analysis = {}
+    for cycle in [3, 4, 5, 6, 7]:
+        cycle_stats = defaultdict(lambda: [0, 0])
+        for i, r in enumerate(connected):
+            if r["winner"] in [0, 1]:
+                pos = i % cycle
+                cycle_stats[str(pos)][r["winner"]] += 1
+        cycle_analysis[f"cycle_{cycle}"] = {
+            k: {"red": v[0], "blue": v[1],
+                "dominant": "red" if v[0] > v[1] else "blue"}
+            for k, v in cycle_stats.items()
+            if v[0] + v[1] >= 5
+        }
+
+    # ── تحليل الانتكاس بعد الفجوة ───────────────────────────────────
+    after_gap = {"after_big_gap": [0, 0], "after_small_gap": [0, 0]}
+    for r in rounds:
+        if r["winner"] not in [0, 1] or r["b_gap"] is None:
+            continue
+        if r["b_gap"] > 2000:
+            after_gap["after_big_gap"][r["winner"]] += 1
+        elif r["b_gap"] < 300:
+            after_gap["after_small_gap"][r["winner"]] += 1
+
+    # ── تحليل الفجوة الزمنية ────────────────────────────────────────
+    time_gap_analysis = {"fresh": [0, 0], "stale": [0, 0]}
+    for r in rounds:
+        if r["winner"] not in [0, 1] or r["gap_sec"] is None:
+            continue
+        if r["gap_sec"] <= 15:
+            time_gap_analysis["fresh"][r["winner"]] += 1
+        else:
+            time_gap_analysis["stale"][r["winner"]] += 1
+
+    # ── تسلسلات الفوز عند الاتصال ───────────────────────────────────
+    streaks_after_connect = {"connected_after_red": [0, 0], "connected_after_blue": [0, 0]}
+    for i in range(1, len(connected)):
+        prev_w = connected[i-1]["winner"]
+        curr_w = connected[i]["winner"]
+        if prev_w == 0 and curr_w in [0, 1]:
+            streaks_after_connect["connected_after_red"][curr_w] += 1
+        elif prev_w == 1 and curr_w in [0, 1]:
+            streaks_after_connect["connected_after_blue"][curr_w] += 1
+
+    # ── قيمة b_num mod (مجموع الأرقام) مقابل الرتبة ─────────────────
+    rank_digit_sum_bias = defaultdict(lambda: defaultdict(lambda: [0, 0]))
+    for r in rounds:
+        if r["b_num"] and r["winner"] in [0, 1] and r["rank"]:
+            s = sum(int(d) for d in r["b_num"]) % 10
+            rank_digit_sum_bias[r["rank"]][str(s)][r["winner"]] += 1
+
+    top_rank_bias = {}
+    for rank, smap in rank_digit_sum_bias.items():
+        for s, v in smap.items():
+            t = v[0] + v[1]
+            if t >= 5:
+                bias = (v[1] - v[0]) / t
+                if abs(bias) > 0.25:
+                    top_rank_bias[f"{rank}_sum{s}"] = {
+                        "red": v[0], "blue": v[1],
+                        "bias_pct": round(bias * 100, 1)
+                    }
+
+    # ── عينة من الجولات المتصلة للـ AI ──────────────────────────────
+    sample_connected = [
+        {
+            "b_num": r["b_num"], "suit": r["suit"],
+            "rank": r["rank"], "digit": r["digit"],
+            "winner": r["winner"], "b_gap": r["b_gap"],
+            "gap_sec": round(r["gap_sec"], 1) if r["gap_sec"] else None,
+        }
+        for r in connected[-150:]  # آخر 150 جولة متصلة
+    ]
+
+    return {
+        "overview": {
+            "total_after_filter": total,
+            "connected_rounds":   conn_cnt,
+            "skipped_first_700":  True,
+        },
+        "gap_analysis":          gap_analysis,
+        "time_gap_analysis":     time_gap_analysis,
+        "after_gap_winner":      after_gap,
+        "last_digit_of_bnum":    dict(last_digit_of_bnum),
+        "digit_sum_mod":         digit_sum_mod,
+        "cycle_analysis":        cycle_analysis,
+        "streaks_after_connect": streaks_after_connect,
+        "rank_digit_sum_bias":   top_rank_bias,
+        "sample_connected_150":  sample_connected,
+    }
+
 async def force_learn_engine(status_callback) -> Dict:
     """
-    يُحلّل كل الجولات السابقة ويُولّد قوانين ذكية عبر مراحل متعددة.
-    status_callback: دالة async لإرسال تحديثات للمستخدم.
+    تعلم رياضي عميق:
+    - تجاهل أول 700 جولة (مضللة)
+    - تحليل الفجوات الزمنية والرقمية
+    - AI يكتشف قوانين رياضية (mod، دورات، فجوات) لا إحصاء بسيط
     """
-    await status_callback("📥 <b>المرحلة 1/5</b> — جلب كل الجولات من قاعدة البيانات...")
+    await status_callback("📥 <b>المرحلة 1/5</b> — جلب كل الجولات...")
 
-    # ── جلب البيانات الكاملة ────────────────────────────────────────
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
@@ -561,109 +768,108 @@ async def force_learn_engine(status_callback) -> Dict:
                     SELECT id, b_num, suit, rank, bonus_last_digit,
                            winner, created_at
                     FROM history
-                    WHERE winner IS NOT NULL
-                      AND suit IS NOT NULL
+                    WHERE winner IS NOT NULL AND suit IS NOT NULL
                     ORDER BY id ASC
                 """)
                 rows = cur.fetchall()
     except Exception as e:
         return {"error": str(e)}
 
-    if len(rows) < 10:
-        return {"error": "بيانات غير كافية (أقل من 10 جولات)"}
+    if len(rows) < 50:
+        return {"error": "بيانات غير كافية"}
 
-    total_rounds = len(rows)
+    raw_total = len(rows)
     await status_callback(
-        f"✅ <b>المرحلة 1/5</b> — تم جلب <b>{total_rounds}</b> جولة\n\n"
-        f"📊 <b>المرحلة 2/5</b> — بناء الذاكرة الإحصائية..."
+        f"✅ <b>المرحلة 1/5</b> — {raw_total} جولة خام\n\n"
+        f"🔬 <b>المرحلة 2/5</b> — تصفية + تحليل الفجوات..."
     )
 
-    # ── بناء ملخص إحصائي شامل ───────────────────────────────────────
-    memory = _build_statistical_memory(rows)
+    rounds = _filter_valid_rounds(rows)
+    conn_cnt = sum(1 for r in rounds if r["connected"])
+    memory = _build_math_memory(rounds)
 
-    # ── جلب القوانين السابقة (الذاكرة التراكمية) ────────────────────
+    # القوانين الحالية (ذاكرة تراكمية)
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT id, law_type, conditions, prediction, confidence,
-                           accuracy, times_used, description
-                    FROM ai_laws
-                    WHERE active = TRUE
-                    ORDER BY accuracy DESC LIMIT 20
+                    SELECT law_type, conditions, prediction, accuracy, description
+                    FROM ai_laws WHERE active = TRUE
+                    ORDER BY accuracy DESC LIMIT 15
                 """)
-                existing_laws = [
-                    {
-                        "id": r[0], "type": r[1],
-                        "cond": r[2] if isinstance(r[2], dict) else {},
-                        "pred": r[3], "conf": r[4],
-                        "acc": r[5], "used": r[6], "desc": r[7]
-                    }
-                    for r in cur.fetchall()
-                ]
+                existing_laws = cur.fetchall()
     except Exception:
         existing_laws = []
 
+    prev_laws_txt = ""
+    if existing_laws:
+        prev_laws_txt = "\n\nالقوانين الحالية (لا تكررها، طوّر عليها أو اكتشف جديدة):\n"
+        for l in existing_laws:
+            prev_laws_txt += f"- [{l[0]}] pred={l[2]} acc={l[3]:.0f}% — {l[4]}\n"
+
     await status_callback(
-        f"✅ <b>المرحلة 2/5</b> — الذاكرة جاهزة\n"
-        f"📚 قوانين سابقة موجودة: <b>{len(existing_laws)}</b>\n\n"
-        f"🤖 <b>المرحلة 3/5</b> — إرسال البيانات إلى Devstral للتحليل العميق...\n"
-        f"<i>(قد تستغرق هذه المرحلة عدة دقائق)</i>"
+        f"✅ <b>المرحلة 2/5</b> — {len(rounds)} جولة صالحة ({conn_cnt} متصلة)\n\n"
+        f"🤖 <b>المرحلة 3/5</b> — Devstral يحلل الأنماط الرياضية...\n"
+        f"<i>لا مهلة زمنية — انتظر حتى الاكتمال</i>"
     )
 
-    # ── بناء الـ prompt الذكي ────────────────────────────────────────
-    laws_summary = ""
-    if existing_laws:
-        laws_summary = "\n\nالقوانين الموجودة مسبقاً (تجنّب التكرار وحسّن عليها):\n"
-        for l in existing_laws[:10]:
-            laws_summary += f"- [{l['type']}] {l['desc']} | دقة: {l['acc']:.0f}% | استخدام: {l['used']}\n"
-
     prompt = f"""
-أنت عقل تحليلي متخصص في لعبة الباكارات. لديك {total_rounds} جولة تاريخية كاملة.
-المهمة: استخرج قوانين تنبؤية قوية تعمل كعقل الإنسان — تتعلم، تحفظ، وتكتشف أنماطاً جديدة.
+أنت عقل رياضي متخصص في اكتشاف القوانين الخفية في لعبة الباكارات.
 
-━━━ الملخص الإحصائي الشامل ━━━
-{json.dumps(memory, ensure_ascii=False, indent=2)}
-{laws_summary}
+━━━ السياق ━━━
+- تم تجاهل أول 700 جولة (كانت تعادلات مضللة)
+- الجولات ليست متتالية — هناك جولات لم تُسجَّل بينها
+- الفجوة الزمنية (gap_sec) والفجوة الرقمية (b_gap) مهمتان جداً
+- الفجوة > 20 ثانية أو b_gap > 500 تعني وجود جولات غير مسجلة بينها
 
-━━━ التعليمات ━━━
-1. حلّل الأنماط العميقة: التسلسلات، الدورات، الإيقاعات، انتهاء السلاسل.
-2. ابحث عن علاقات مركّبة لم تكن في القوانين السابقة.
-3. كل قانون له شروط محددة (conditions) وتنبؤ (0=راعي، 1=ثور) وثقة (50-99).
+━━━ البيانات الرياضية ━━━
+{json.dumps(memory, ensure_ascii=False, indent=1)}
+{prev_laws_txt}
 
-أنواع الشروط المتاحة:
-- "suit": بذلة واحدة
-- "suits_in": قائمة بذلات
-- "digit": رقم أخير واحد
-- "digits_in": قائمة أرقام
-- "rank": رتبة ورقة
-- "rank_family": "face"/"low"/"high"/"middle"
-- "digit_parity": "even"/"odd"
-- "streak": {{"length": N, "value": 0أو1}} (سلسلة من نفس النتيجة)
-- "after_pattern": [0,1,0,...] (بعد تسلسل محدد)
+━━━ المطلوب: قوانين رياضية لا إحصائية ━━━
+اكتشف قوانين من هذا النوع (أمثلة للتوجيه فقط، ابتكر ما هو أفضل):
+1. مجموع أرقام b_num mod N يعطي نتيجة محددة
+2. الجولة بعد فجوة رقمية كبيرة (b_gap > X) تميل لـ red/blue
+3. في الجولة رقم K من كل دورة طولها N، النتيجة غالباً X
+4. إذا كانت الفجوة الزمنية قصيرة (< 15 ث) والبذلة X، النتيجة Y
+5. (digit_sum + rank_value) mod N → نتيجة
+6. بعد انقطاع (فجوة كبيرة) ثم عودة، النمط يبدأ من جديد
 
-أعد JSON فقط — مصفوفة من القوانين:
+أنواع الشروط المتاحة في conditions:
+- "digit_sum_mod": {{"mod": N, "remainder": K}}
+- "b_gap_gt": عدد (b_gap أكبر من)
+- "b_gap_lt": عدد (b_gap أصغر من)
+- "gap_sec_lt": ثواني (فجوة زمنية أصغر من)
+- "gap_sec_gt": ثواني (فجوة زمنية أكبر من)
+- "cycle_position": {{"cycle": N, "position": K}}
+- "suit": بذلة
+- "digit": آخر رقم من b_num
+- "rank": رتبة الورقة
+- "rank_value_mod": {{"mod": N, "remainder": K}}
+- "digit_plus_rank_mod": {{"mod": N, "remainder": K}}
+- "streak": {{"length": N, "value": 0أو1}}
+- "after_big_gap": true (بعد انقطاع > 2000)
+
+أعد JSON فقط — مصفوفة:
 [
   {{
-    "law_type": "نوع القانون",
+    "law_type": "اسم_نوع_القانون",
     "conditions": {{ ... }},
-    "prediction": 0 أو 1,
-    "confidence": 50-99,
-    "description": "شرح مختصر باللغة العربية لماذا هذا القانون منطقي"
-  }},
-  ...
+    "prediction": 0أو1,
+    "confidence": 50-97,
+    "description": "شرح رياضي مختصر بالعربية — لماذا هذا القانون يعمل"
+  }}
 ]
 
-أنشئ 15-25 قانوناً متنوعاً. اجعلها مفيدة وغير تافهة.
+أنشئ 20-30 قانوناً. ركّز على الرياضيات والفجوات. تجنّب الإحصاء البسيط (مجرد بذلة=ثور ليس كافياً).
 """
 
-    # ── استدعاء AI ──────────────────────────────────────────────────
     try:
         response = await asyncio.wait_for(
             ai_client.chat.completions.create(
                 model=AI_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
+                temperature=0.25,
                 max_tokens=8192,
                 seed=42,
             ),
@@ -671,7 +877,7 @@ async def force_learn_engine(status_callback) -> Dict:
         )
         raw_text = response.choices[0].message.content
     except asyncio.TimeoutError:
-        return {"error": "انتهت المهلة الزمنية (5 دقائق)"}
+        return {"error": "انتهت المهلة الزمنية"}
     except Exception as e:
         return {"error": f"خطأ في AI: {e}"}
 
@@ -998,30 +1204,59 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     if not clean_b:
         return 2, 0, "❌ رقم بونص غير صالح"
 
-    last_digit = int(clean_b[-1])
+    last_digit  = int(clean_b[-1])
     scores: Dict[int, float] = {0: 0.0, 1: 0.0}
     logs:   List[str]        = []
 
-    # ── تاريخ حديث ──────────────────────────────────────────────────
+    # ── تاريخ حديث + فجوة b_num الأخيرة ────────────────────────────
     recent_history: List[int] = []
+    b_gap:   Optional[float] = None
+    gap_sec: Optional[float] = None
+    round_index: int = 0
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT winner FROM history
+                    SELECT winner, b_num, created_at
+                    FROM history
                     WHERE winner IS NOT NULL
                     ORDER BY id DESC LIMIT 20
                 """)
-                recent_history = [WINNER_MAP.get(r[0], 2) for r in cur.fetchall()]
-                recent_history.reverse()
+                rows = cur.fetchall()
+                if rows:
+                    recent_history = [WINNER_MAP.get(r[0], 2) for r in rows]
+                    recent_history.reverse()
+                    # فجوة رقم البونص مع آخر جولة
+                    last_b = clean_digits(str(rows[0][1] or ""))
+                    if last_b and clean_b:
+                        try:
+                            b_gap = abs(int(clean_b) - int(last_b))
+                        except Exception:
+                            pass
+                    # فجوة زمنية
+                    if rows[0][2]:
+                        gap_sec = (datetime.now() - rows[0][2]).total_seconds()
+                    # موضع الجولة
+                    cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL")
+                    round_index = cur.fetchone()[0]
     except Exception as e:
         logger.warning(f"History fetch: {e}")
+
+    # ── تسجيل معلومات الفجوة في السجل ──────────────────────────────
+    if b_gap is not None:
+        gap_label = "🟢 متصلة" if b_gap < 500 else "🔴 منفصلة"
+        logs.append(f"🔗 فجوة b_num: {int(b_gap)} ({gap_label})")
+    if gap_sec is not None:
+        logs.append(f"⏱️ فجوة زمنية: {gap_sec:.0f}ث {'(جولات مفقودة محتملة)' if gap_sec > 20 else ''}")
 
     # ── AI متوازٍ ────────────────────────────────────────────────────
     ai_task = asyncio.create_task(ai_predict(recent_history))
 
     # ── 1. القوانين الذكية (الذاكرة السياقية) ──────────────────────
-    law_scores, law_logs = apply_laws(suit, rank, last_digit, recent_history)
+    law_scores, law_logs = apply_laws(
+        suit, rank, last_digit, recent_history,
+        b_num=clean_b, b_gap=b_gap, gap_sec=gap_sec, round_index=round_index
+    )
     for k in [0, 1]:
         scores[k] += law_scores[k]
     logs.extend(law_logs)
@@ -1421,6 +1656,97 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"predict error: {e}", exc_info=True)
         await wait_msg.edit_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
 
+# ==================== /download: تصدير قاعدة البيانات ====================
+async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يُصدِّر قاعدة البيانات كاملة كملف txt ويُرسله."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ هذا الأمر للمشرف فقط.")
+        return
+
+    msg = await update.message.reply_text("⏳ جارٍ تصدير قاعدة البيانات...")
+    try:
+        lines = []
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                # ── PATTERN STATS ──
+                lines.append("=" * 60)
+                lines.append("SECTION: PATTERN_STATS")
+                lines.append("=" * 60)
+                cur.execute("""
+                    SELECT pattern_id, pattern_type, red_count, blue_count, tie_count
+                    FROM pattern_stats ORDER BY pattern_type, pattern_id
+                """)
+                for r in cur.fetchall():
+                    lines.append(f"{r[0]}|{r[1]}|R:{r[2]}|B:{r[3]}|T:{r[4]}")
+
+                # ── AI LAWS ──
+                lines.append("")
+                lines.append("=" * 60)
+                lines.append("SECTION: AI_LAWS")
+                lines.append("=" * 60)
+                cur.execute("""
+                    SELECT id, law_name, law_type, conditions, prediction,
+                           confidence, accuracy, times_used, description, active
+                    FROM ai_laws ORDER BY id
+                """)
+                for r in cur.fetchall():
+                    lines.append(
+                        f"ID:{r[0]}|NAME:{r[1]}|TYPE:{r[2]}|"
+                        f"PRED:{r[3]}|CONF:{r[4]:.0f}|ACC:{r[5]:.0f}|"
+                        f"USED:{r[6]}|ACTIVE:{r[9]}|DESC:{r[8]}"
+                    )
+
+                # ── LEARN SESSIONS ──
+                lines.append("")
+                lines.append("=" * 60)
+                lines.append("SECTION: LEARN_SESSIONS")
+                lines.append("=" * 60)
+                cur.execute("""
+                    SELECT id, rounds_used, laws_created, summary, created_at
+                    FROM learn_sessions ORDER BY id
+                """)
+                for r in cur.fetchall():
+                    lines.append(f"#{r[0]} | {r[4]} | rounds:{r[1]} | laws:{r[2]} | {r[3]}")
+
+                # ── HISTORY ──
+                lines.append("")
+                lines.append("=" * 60)
+                lines.append("SECTION: HISTORY")
+                lines.append("=" * 60)
+                cur.execute("""
+                    SELECT id, b_num, suit, rank, bonus_last_digit,
+                           winner, prediction, created_at
+                    FROM history ORDER BY id ASC
+                """)
+                for r in cur.fetchall():
+                    lines.append(
+                        f"{r[0]}|{r[1]}|{r[2]}|{r[3]}|{r[4]}|"
+                        f"{r[5]}|pred:{r[6]}|{r[7]}"
+                    )
+
+        from datetime import datetime as _dt
+        filename = f"hades_db_{_dt.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        content_txt = "\n".join(lines)
+
+        import io
+        file_bytes = io.BytesIO(content_txt.encode("utf-8"))
+        file_bytes.name = filename
+
+        await msg.delete()
+        await update.message.reply_document(
+            document=file_bytes,
+            filename=filename,
+            caption=(
+                "\U0001f4e6 <b>HADES DB Export</b>\n"
+                f"\U0001f4c5 {_dt.now().strftime('%Y-%m-%d %H:%M')}\n"
+                f"\U0001f4dd {len(lines)} \u0633\u0637\u0631"
+            ),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Download error: {e}", exc_info=True)
+        await msg.edit_text(f"❌ خطأ في التصدير: <code>{e}</code>", parse_mode="HTML")
+
 # ==================== التشغيل ====================
 def main():
     ensure_tables()
@@ -1429,6 +1755,7 @@ def main():
     app.add_handler(CommandHandler("start",       cmd_start))
     app.add_handler(CommandHandler("force_learn", cmd_force_learn))
     app.add_handler(CommandHandler("laws",        cmd_laws))
+    app.add_handler(CommandHandler("download",    cmd_download))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     logger.info("🚀 HADES V18.0 is running...")
