@@ -625,7 +625,7 @@ def _build_math_memory(rounds: List[Dict]) -> Dict:
     conn_cnt  = len(connected)
 
     # ── تحليل الفجوة الرقمية ────────────────────────────────────────
-    gap_analysis = {"small": [0, 0], "medium": [0, 0], "large": [0, 0]}
+    _ga_raw = {"small_bnum_gap_lt200": [0, 0], "medium_bnum_gap_200_1000": [0, 0], "large_bnum_gap_gt1000": [0, 0]}
     for r in rounds:
         if r["b_gap"] is None:
             continue
@@ -633,18 +633,29 @@ def _build_math_memory(rounds: List[Dict]) -> Dict:
         if w not in [0, 1]:
             continue
         if r["b_gap"] < 200:
-            gap_analysis["small"][w] += 1
+            _ga_raw["small_bnum_gap_lt200"][w] += 1
         elif r["b_gap"] < 1000:
-            gap_analysis["medium"][w] += 1
+            _ga_raw["medium_bnum_gap_200_1000"][w] += 1
         else:
-            gap_analysis["large"][w] += 1
+            _ga_raw["large_bnum_gap_gt1000"][w] += 1
+    gap_analysis = {
+        k: {"red_banker_0": v[0], "blue_player_1": v[1],
+            "likely_prediction": 0 if v[0] > v[1] else 1,
+            "note": "0=راعي_red_banker | 1=ثور_blue_player"}
+        for k, v in _ga_raw.items()
+    }
 
     # ── تحليل آخر رقم من b_num (الرقم الكامل لا digit البونص فقط) ──
-    last_digit_of_bnum = defaultdict(lambda: [0, 0])
+    _ld_raw = defaultdict(lambda: [0, 0])
     for r in rounds:
         if r["b_num"] and r["winner"] in [0, 1]:
             ld = int(r["b_num"][-1])
-            last_digit_of_bnum[str(ld)][r["winner"]] += 1
+            _ld_raw[str(ld)][r["winner"]] += 1
+    last_digit_of_bnum = {
+        k: {"red_banker_0": v[0], "blue_player_1": v[1],
+            "likely_prediction": 0 if v[0] > v[1] else 1}
+        for k, v in _ld_raw.items()
+    }
 
     # ── تحليل مجموع أرقام b_num mod N ──────────────────────────────
     digit_sum_mod = {}
@@ -676,34 +687,51 @@ def _build_math_memory(rounds: List[Dict]) -> Dict:
         }
 
     # ── تحليل الانتكاس بعد الفجوة ───────────────────────────────────
-    after_gap = {"after_big_gap": [0, 0], "after_small_gap": [0, 0]}
+    # 0=راعي🔴(red/banker)  1=ثور🔵(blue/player)
+    _ag = {"after_big_gap": [0, 0], "after_small_gap": [0, 0]}
     for r in rounds:
         if r["winner"] not in [0, 1] or r["b_gap"] is None:
             continue
         if r["b_gap"] > 2000:
-            after_gap["after_big_gap"][r["winner"]] += 1
+            _ag["after_big_gap"][r["winner"]] += 1
         elif r["b_gap"] < 300:
-            after_gap["after_small_gap"][r["winner"]] += 1
+            _ag["after_small_gap"][r["winner"]] += 1
+    after_gap = {
+        k: {"red_banker_0": v[0], "blue_player_1": v[1],
+            "likely_prediction": 0 if v[0] > v[1] else 1,
+            "note": "0=راعي_red_banker | 1=ثور_blue_player"}
+        for k, v in _ag.items()
+    }
 
     # ── تحليل الفجوة الزمنية ────────────────────────────────────────
-    time_gap_analysis = {"fresh": [0, 0], "stale": [0, 0]}
+    _tg = {"fresh_gap_lt_15s": [0, 0], "stale_gap_gt_15s": [0, 0]}
     for r in rounds:
         if r["winner"] not in [0, 1] or r["gap_sec"] is None:
             continue
         if r["gap_sec"] <= 15:
-            time_gap_analysis["fresh"][r["winner"]] += 1
+            _tg["fresh_gap_lt_15s"][r["winner"]] += 1
         else:
-            time_gap_analysis["stale"][r["winner"]] += 1
+            _tg["stale_gap_gt_15s"][r["winner"]] += 1
+    time_gap_analysis = {
+        k: {"red_banker_0": v[0], "blue_player_1": v[1],
+            "likely_prediction": 0 if v[0] > v[1] else 1}
+        for k, v in _tg.items()
+    }
 
     # ── تسلسلات الفوز عند الاتصال ───────────────────────────────────
-    streaks_after_connect = {"connected_after_red": [0, 0], "connected_after_blue": [0, 0]}
+    _sc = {"connected_after_red_0": [0, 0], "connected_after_blue_1": [0, 0]}
     for i in range(1, len(connected)):
         prev_w = connected[i-1]["winner"]
         curr_w = connected[i]["winner"]
         if prev_w == 0 and curr_w in [0, 1]:
-            streaks_after_connect["connected_after_red"][curr_w] += 1
+            _sc["connected_after_red_0"][curr_w] += 1
         elif prev_w == 1 and curr_w in [0, 1]:
-            streaks_after_connect["connected_after_blue"][curr_w] += 1
+            _sc["connected_after_blue_1"][curr_w] += 1
+    streaks_after_connect = {
+        k: {"red_banker_0": v[0], "blue_player_1": v[1],
+            "likely_prediction": 0 if v[0] > v[1] else 1}
+        for k, v in _sc.items()
+    }
 
     # ── قيمة b_num mod (مجموع الأرقام) مقابل الرتبة ─────────────────
     rank_digit_sum_bias = defaultdict(lambda: defaultdict(lambda: [0, 0]))
@@ -817,6 +845,13 @@ async def force_learn_engine(status_callback) -> Dict:
     prompt = f"""
 أنت عقل رياضي متخصص في اكتشاف القوانين الخفية في لعبة الباكارات.
 
+━━━ تعريف المتغيرات — مهم جداً ━━━
+prediction=0  يعني  الراعي 🔴 (red/banker)
+prediction=1  يعني  الثور 🔵  (blue/player)
+red_banker_0  = عدد مرات فوز الراعي
+blue_player_1 = عدد مرات فوز الثور
+likely_prediction = التوقع المقترح (0=راعي، 1=ثور)
+
 ━━━ السياق ━━━
 - تم تجاهل أول 700 جولة (كانت تعادلات مضللة)
 - الجولات ليست متتالية — هناك جولات لم تُسجَّل بينها
@@ -863,6 +898,7 @@ async def force_learn_engine(status_callback) -> Dict:
 ]
 
 أنشئ 20-30 قانوناً. ركّز على الرياضيات والفجوات. تجنّب الإحصاء البسيط (مجرد بذلة=ثور ليس كافياً).
+تذكير: prediction=0 دائماً يعني الراعي🔴، prediction=1 دائماً يعني الثور🔵.
 """
 
     try:
