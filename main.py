@@ -1139,6 +1139,76 @@ def _find_best_patterns(suit_s, digit_s, rank_s, sd_s) -> Dict:
         "strongest_red":  [(k, round(-v*100, 1)) for k, v in sorted_p if v < 0][:5],
     }
 
+# ==================== ⚡ تحليل الزخم الحقيقي (T1) ====================
+def detect_real_streak(history: List[int]) -> Tuple[Optional[int], float]:
+    """يكتشف سلسلة 4+ متتالية ويقترح الكسر."""
+    if len(history) < 4:
+        return None, 0.0
+    last   = history[-1]
+    streak = 1
+    for i in range(len(history) - 2, -1, -1):
+        if history[i] == last:
+            streak += 1
+        else:
+            break
+    if streak >= 4:
+        opposite = 1 if last == 0 else 0
+        # كلما طالت السلسلة كلما ارتفعت الثقة (حد 0.90)
+        conf = min(0.90, 0.75 + (streak - 4) * 0.03)
+        return opposite, conf
+    return None, 0.0
+
+# ==================== 🧠 الذاكرة القصيرة (T2) ====================
+def short_memory_bias(history: List[int]) -> Tuple[Optional[int], float]:
+    """آخر 10 جولات — إن كان هناك انحياز واضح يُعزَّز."""
+    if len(history) < 10:
+        return None, 0.0
+    last10 = history[-10:]
+    r = last10.count(0)
+    b = last10.count(1)
+    if abs(r - b) >= 5:
+        return (0, 0.65) if r > b else (1, 0.65)
+    return None, 0.0
+
+# ==================== 📊 انحياز البذلة الذكي (T3) ====================
+def suit_bias_from_history(suit: str) -> Tuple[Optional[int], float]:
+    """
+    يحسب انحياز البذلة الحالية من آخر 80 جولة في DB مباشرة.
+    """
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT winner FROM history
+                    WHERE winner IS NOT NULL AND suit = %s
+                    ORDER BY id DESC LIMIT 80
+                """, (suit,))
+                rows = cur.fetchall()
+        if len(rows) < 10:
+            return None, 0.0
+        r = sum(1 for x in rows if WINNER_MAP.get(x[0], 2) == 0)
+        b = sum(1 for x in rows if WINNER_MAP.get(x[0], 2) == 1)
+        t = r + b
+        if t == 0:
+            return None, 0.0
+        diff = (b - r) / t
+        if abs(diff) > 0.20:
+            pred = 1 if diff > 0 else 0
+            conf = min(0.70, abs(diff))
+            return pred, conf
+    except Exception:
+        pass
+    return None, 0.0
+
+# ==================== 🔢 فحص الأعداد الأولية (T7) ====================
+def is_prime(n: int) -> bool:
+    if n < 2:
+        return False
+    for i in range(2, int(n**0.5) + 1):
+        if n % i == 0:
+            return False
+    return True
+
 # ==================== كاشف الزخم ====================
 def detect_momentum() -> Tuple[Optional[int], float, str]:
     try:
@@ -1282,7 +1352,7 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
 
     # ── 4. نتيجة AI الآني ───────────────────────────────────────────
     try:
-        ai_pred, ai_conf, ai_log = await asyncio.wait_for(ai_task, timeout=0.5)
+        ai_pred, ai_conf, ai_log = await asyncio.wait_for(ai_task, timeout=0.8)
         if ai_pred in [0, 1]:
             scores[ai_pred] += (ai_conf / 100) * WEIGHTS['AI']
             logs.append(f"🤖 Devstral: {WINNER_NAMES[ai_pred]} — {ai_log}")
@@ -1292,6 +1362,35 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         logs.append("⚠️ Devstral: لم يكتمل في الوقت المحدد")
     except Exception:
         logs.append("⚠️ Devstral: خطأ")
+
+    # ── T1: كاشف الزخم الحقيقي ─────────────────────────────────────
+    streak_pred, streak_conf = detect_real_streak(recent_history)
+    if streak_pred is not None:
+        scores[streak_pred] += streak_conf * WEIGHTS['MOMENTUM']
+        logs.append(f"⚡ كسر سلسلة: {WINNER_NAMES[streak_pred]} (streak_conf={streak_conf:.0%})")
+
+    # ── T2: الذاكرة القصيرة ──────────────────────────────────────────
+    mem_pred, mem_conf = short_memory_bias(recent_history)
+    if mem_pred is not None:
+        scores[mem_pred] += mem_conf * 1.4
+        logs.append(f"🧠 ذاكرة قصيرة: {WINNER_NAMES[mem_pred]} ({mem_conf:.0%})")
+
+    # ── T3: انحياز البذلة الذكي ──────────────────────────────────────
+    sb_pred, sb_conf = suit_bias_from_history(suit)
+    if sb_pred is not None:
+        scores[sb_pred] += sb_conf * 1.6
+        logs.append(f"📊 انحياز البذلة: {WINNER_NAMES[sb_pred]} ({sb_conf:.0%})")
+
+    # ── T6: قانون مجموع الأرقام الرياضي ─────────────────────────────
+    digit_sum  = sum(int(d) for d in clean_b)
+    math_rule  = (digit_sum + last_digit) % 2
+    scores[math_rule] += 0.8
+    # تعزيز إن كان الرقم أولياً
+    if is_prime(int(clean_b) % 97):  # mod لتجنب أعداد ضخمة
+        scores[math_rule] += 0.4
+        logs.append(f"🔢 قانون الأرقام (prime): {WINNER_NAMES[math_rule]} (sum={digit_sum})")
+    else:
+        logs.append(f"🔢 قانون مجموع الأرقام: {WINNER_NAMES[math_rule]} (sum={digit_sum})")
 
     # ── الحساب النهائي ──────────────────────────────────────────────
     total_score = scores[0] + scores[1]
@@ -1304,7 +1403,7 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     p0 = scores[0] / total_score
     p1 = scores[1] / total_score
     entropy    = -(p0 * math.log2(p0 + 1e-9) + p1 * math.log2(p1 + 1e-9))
-    confidence = int(min(99, max(51, 50 + 45 * (1 - entropy))))
+    confidence = int(min(97, max(55, 55 + 40 * (1 - entropy))))
     final      = 0 if scores[0] >= scores[1] else 1
     return final, confidence, "\n".join(logs)
 
