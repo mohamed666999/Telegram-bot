@@ -778,7 +778,8 @@ async def force_learn_engine(status_callback) -> Dict:
     if len(rows) < 50:
         return {"error": "بيانات غير كافية"}
 
-    raw_total = len(rows)
+    raw_total    = len(rows)
+    total_rounds = raw_total
     await status_callback(
         f"✅ <b>المرحلة 1/5</b> — {raw_total} جولة خام\n\n"
         f"🔬 <b>المرحلة 2/5</b> — تصفية + تحليل الفجوات..."
