@@ -707,19 +707,25 @@ async def force_learn_engine(status_callback) -> Dict:
                         skipped += 1
                         continue
 
-                    law_name = law.get("law_type", "COMBINED")
+                    law_name = f"{law.get('law_type', 'COMBINED')}_{saved}_{int(time.time())}"
                     cur.execute("""
                         INSERT INTO ai_laws
                             (law_name, law_type, conditions, prediction, confidence,
                              accuracy, description, source)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, 'force_learn')
+                        ON CONFLICT (law_name) DO UPDATE
+                            SET conditions  = EXCLUDED.conditions,
+                                prediction  = EXCLUDED.prediction,
+                                confidence  = EXCLUDED.confidence,
+                                description = EXCLUDED.description,
+                                active      = TRUE
                     """, (
                         law_name,
-                        law_name,
+                        law.get("law_type", "COMBINED"),
                         json.dumps(cond, ensure_ascii=False),
                         int(pred),
                         float(law.get("confidence", 70)),
-                        float(law.get("confidence", 70)),  # accuracy = confidence مبدئياً
+                        float(law.get("confidence", 70)),
                         law.get("description", ""),
                     ))
                     saved += 1
