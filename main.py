@@ -43,7 +43,7 @@ ADMIN_ID     = 6033203084
 AI_BASE_URL  = "https://integrate.api.nvidia.com/v1"
 AI_API_KEY   = "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"
 AI_MODEL     = "mistralai/devstral-2-123b-instruct-2512"
-AI_TIMEOUT   = 5.0
+AI_TIMEOUT   = 6.0
 LEARN_TIMEOUT = 300  # 5 دقائق للتعلم العميق
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -686,8 +686,8 @@ async def force_learn_engine(status_callback) -> Dict:
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
-                # احصل على رقم الجلسة الجديدة
-                cur.execute("SELECT COALESCE(MAX(session_id), 0) + 1 FROM ai_laws")
+                # احصل على رقم الجلسة الجديدة من جدول learn_sessions
+                cur.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM learn_sessions")
                 session_id = cur.fetchone()[0]
 
                 for law in laws_data:
