@@ -504,9 +504,9 @@ def format_prediction(pred: int, conf: int, reason: str,
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🃏  {suit} {rank}   |   #{b_num} (آخر رقم: {ld})\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔮  **التوقع: {name}**\n"
+        f"🔮  <b>التوقع: {name}</b>\n"
         f"📊  [{bar}] {conf}%\n\n"
-        f"📋 **التحليل:**\n{reason}\n"
+        f"📋 <b>التحليل:</b>\n{reason}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━"
     )
 
@@ -535,6 +535,251 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=kb
     )
 
+
+# ── helper: تعديل آمن للرسالة ────────────────────────────────────────────────
+async def safe_edit(query, text: str, reply_markup=None):
+    """يُعدّل الرسالة بـHTML — يتجاهل MessageNotModified ويسجّل أي خطأ."""
+    from telegram.error import BadRequest
+    try:
+        await query.edit_message_text(
+            text, parse_mode="HTML", reply_markup=reply_markup
+        )
+    except BadRequest as e:
+        if "Message is not modified" not in str(e):
+            logger.error(f"safe_edit BadRequest: {e}")
+            raise
+    except Exception as e:
+        logger.error(f"safe_edit error: {e}")
+        raise
+
+# ==================== معالجات تيليجرام ====================
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎴 ابدأ جولة جديدة", callback_data="choose_suit")],
+        [InlineKeyboardButton("📊 إحصائيات سريعة",  callback_data="stats")],
+    ])
+    await update.message.reply_text(
+        "🏛️ <b>HADES V17.0</b>\n"
+        "محرك تنبؤ باكارات — بيانات مدمجة + ذكاء اصطناعي\n\n"
+        "اضغط <b>ابدأ</b> لتحديد البذلة والرتبة، ثم أرسل رقم البونص.",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.a
+    # ★ أجب فوراً دائماً لإزالة حالة التحميل من الزر
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    data = query.data
+    logger.info(f"CB [{query.from_user.id}]: {data!r}")
+
+    try:
+        # ── اختيار البذلة ────────────────────────────────────────────
+        if data == "choose_suit":
+            context.user_data.pop('suit', None)
+            context.user_data.pop('rank', None)
+            # نستخدم فهرس البذلة (0-3) في callback_data بدل الإيموجي مباشرة
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton(SUITS[i], callback_data=f"suit_{i}")
+                for i in range(len(SUITS))
+            ]])
+            await safe_edit(query, "🎴 اختر البذلة:", reply_markup=kb)
+
+        # ── تحديد البذلة → اختيار الرتبة ─────────────────────────────
+        elif data.startswith("suit_"):
+            idx  = int(data.split("_")[1])
+            suit = SUITS[idx]
+            context.user_data['suit']     = suit
+            context.user_data['suit_idx'] = idx
+            rows = [
+                [InlineKeyboardButton(r, callback_data=f"rank_{r}") for r in row]
+                for row in RANKS_LAYOUT
+            ]
+            rows.append([InlineKeyboardButton("🔙 تغيير البذلة", callback_data="choose_suit")])
+            await safe_edit(
+                query,
+                f"البذلة: <b>{suit}</b>\nاختر الرتبة:",
+                reply_markup=InlineKeyboardMarkup(rows)
+            )
+
+        # ── تحديد الرتبة → انتظار رقم البونص ────────────────────────
+        elif data.startswith("rank_"):
+            rank      = data[5:]
+            suit      = context.user_data.get('suit', '?')
+            suit_idx  = context.user_data.get('suit_idx', 0)
+            context.user_data['rank'] = rank
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 تغيير الرتبة", callback_data=f"suit_{suit_idx}")
+            ]])
+            await safe_edit(
+                query,
+                f"✅ البذلة: <b>{suit}</b>  |  الرتبة: <b>{rank}</b>\n\n"
+                f"📩 أرسل رقم البونص (مثال: <code>7022088</code>)",
+                reply_markup=kb
+            )
+
+        # ── تسجيل النتيجة الحقيقية ───────────────────────────────────
+        elif data.startswith("save_"):
+            parts  = data.split("_", 2)
+            winner = int(parts[1])
+            b_num  = parts[2] if len(parts) > 2 else context.user_data.get('last_b_num', '')
+            suit   = context.user_data.get('suit', '')
+            rank   = context.user_data.get('rank', '')
+            pred   = context.user_data.get('last_pred', 2)
+
+            if not (b_num and suit and rank):
+                await safe_edit(query, "❌ بيانات ناقصة — اضغط /start للبدء من جديد.")
+                return
+
+            last_digit = get_last_digit(b_num)
+            correct    = (winner == pred)
+
+            try:
+                with db_pool.get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO history
+                                (b_num, suit, rank, bonus_last_digit, winner,
+                                 prediction, user_id, timestamp, created_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                        """, (b_num, suit, rank, last_digit,
+                              WINNER_NAMES[winner], WINNER_NAMES.get(pred, ''),
+                              query.from_user.id))
+                        conn.commit()
+            except Exception as e:
+                logger.error(f"Save history error: {e}")
+
+            update_pattern_db(suit, rank, last_digit, winner)
+
+            verdict = "<b>صحيح! 🎯</b>" if correct else "خاطئ ❌"
+            icon    = "✅" if correct else "❌"
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎴 جولة جديدة", callback_data="choose_suit")],
+                [InlineKeyboardButton("📊 الإحصائيات",  callback_data="stats")],
+            ])
+            await safe_edit(
+                query,
+                f"{icon} تم تسجيل: <b>{WINNER_NAMES[winner]}</b>\n"
+                f"التوقع كان: {WINNER_NAMES.get(pred, '?')} — {verdict}\n\n"
+                f"البذلة: {suit}  |  الرتبة: {rank}  |  رقم: {b_num}  (آخر: {last_digit})",
+                reply_markup=kb
+            )
+
+        # ── الإحصائيات السريعة ────────────────────────────────────────
+        elif data == "stats":
+            await safe_edit(query, "⏳ جارٍ تحميل الإحصائيات...")
+            try:
+                with db_pool.get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT COUNT(*) FROM history")
+                        total = cur.fetchone()[0]
+                        cur.execute("""
+                            SELECT winner, COUNT(*) FROM history
+                            WHERE winner IS NOT NULL GROUP BY winner
+                        """)
+                        dist = {r[0]: r[1] for r in cur.fetchall()}
+                        cur.execute("""
+                            SELECT COUNT(*) FROM history
+                            WHERE winner IS NOT NULL
+                              AND winner::text = prediction::text
+                        """)
+                        correct_cnt = cur.fetchone()[0]
+
+                r_cnt  = dist.get('الراعي 🔴', 0)
+                b_cnt  = dist.get('الثور 🔵',  0)
+                t_cnt  = dist.get('تعادل ⚪',  0)
+                played = r_cnt + b_cnt + t_cnt or 1
+                acc    = round(correct_cnt / max(played, 1) * 100, 1)
+
+                best_sd = max(
+                    ((k, v) for k, v in EMBEDDED_PATTERNS.items() if k.startswith("SD_")),
+                    key=lambda x: abs(x[1]["b"] - x[1]["r"])
+                )
+                bp_id     = best_sd[0]
+                bp_raw    = best_sd[1]
+                bp_winner = "🔵 الثور" if bp_raw["b"] > bp_raw["r"] else "🔴 الراعي"
+
+                msg = (
+                    f"📊 <b>إحصائيات HADES</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🎮 إجمالي الجولات: <b>{total}</b>\n"
+                    f"🔴 الراعي:  {r_cnt} ({round(r_cnt/played*100,1)}%)\n"
+                    f"🔵 الثور:   {b_cnt} ({round(b_cnt/played*100,1)}%)\n"
+                    f"⚪ تعادل:   {t_cnt} ({round(t_cnt/played*100,1)}%)\n"
+                    f"🎯 دقة التوقع: <b>{acc}%</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🏆 أقوى نمط مدمج:\n"
+                    f"  {bp_id} ← {bp_winner}\n"
+                    f"  [{bp_raw['r']}🔴:{bp_raw['b']}🔵:{bp_raw['t']}⚪]"
+                )
+            except Exception as e:
+                logger.error(f"Stats error: {e}")
+                msg = f"❌ خطأ في جلب الإحصائيات:\n<code>{e}</code>"
+
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🎴 جولة جديدة", callback_data="choose_suit")
+            ]])
+            await safe_edit(query, msg, reply_markup=kb)
+
+        else:
+            logger.warning(f"Unhandled callback: {data!r}")
+
+    except Exception as e:
+        # ★ catch-all: أي خطأ غير متوقع لا يُجمّد الزر
+        logger.error(f"callback_handler crash [{data!r}]: {e}", exc_info=True)
+        try:
+            await safe_edit(query, f"⚠️ خطأ غير متوقع:\n<code>{str(e)[:200]}</code>")
+        except Exception:
+            pass
+
+# ── استقبال رقم البونص عبر الرسائل النصية ───────────────────────────────────
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    suit = context.user_data.get('suit')
+    rank = context.user_data.get('rank')
+
+    if not suit or not rank:
+        await update.message.reply_text(
+            "ابدأ أولاً بالضغط على /start واختيار البذلة والرتبة."
+        )
+        return
+
+    b_num = clean_digits(text)
+    if not b_num:
+        await update.message.reply_text("❌ أرسل رقم البونص فقط (أرقام).")
+        return
+
+    context.user_data['last_b_num'] = b_num
+    wait_msg = await update.message.reply_text("🔄 جارٍ التحليل...")
+
+    try:
+        pred, conf, reason = await predict(b_num, suit, rank)
+        context.user_data['last_pred'] = pred
+        msg = format_prediction(pred, conf, reason, suit, rank, b_num)
+        await wait_msg.delete()
+        await update.message.reply_text(
+            msg,
+            parse_mode="HTML",
+            reply_markup=result_keyboard(pred, b_num)
+        )
+    except Exception as e:
+        logger.error(f"message_handler predict error: {e}", exc_info=True)
+        await wait_msg.edit_text(f"❌ خطأ في التحليل: {e}")
+
+# ==================== التشغيل ====================
+def main():
+    ensure_tables()
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    logger.info("🚀 HADES V17.0 is running...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
