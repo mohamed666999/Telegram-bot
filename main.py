@@ -3408,22 +3408,23 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                         parse_mode="HTML")
         return
 
-    # ── ابحث عن الجولة بالـ b_num (جرّب أكثر من استراتيجية) ──────────
+    # ── ابحث عن الجولة بالـ b_num (3 استراتيجيات + fallback) ──────────
     rows = []
+    fallback_rows = []
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
-                # استراتيجية 1: b_num::text = input
+                # 1: مطابقة تامة بعد TRIM
                 cur.execute("""
                     SELECT id, b_num, suit, rank, bonus_last_digit,
                            winner, prediction, created_at, user_id
                     FROM history
-                    WHERE b_num::text = %s
+                    WHERE TRIM(b_num::text) = %s
                     ORDER BY id DESC LIMIT 3
                 """, (bnum_input,))
                 rows = cur.fetchall()
 
-                # استراتيجية 2: b_num LIKE (إن فشل الأول)
+                # 2: LIKE جزئي
                 if not rows:
                     cur.execute("""
                         SELECT id, b_num, suit, rank, bonus_last_digit,
@@ -3434,16 +3435,59 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     """, (f"%{bnum_input}%",))
                     rows = cur.fetchall()
 
+                # 3: آخر 7 أرقام (في حال الرقم مختلف بالأول)
+                if not rows and len(bnum_input) >= 7:
+                    suffix = bnum_input[-7:]
+                    cur.execute("""
+                        SELECT id, b_num, suit, rank, bonus_last_digit,
+                               winner, prediction, created_at, user_id
+                        FROM history
+                        WHERE b_num::text LIKE %s
+                        ORDER BY id DESC LIMIT 3
+                    """, (f"%{suffix}",))
+                    rows = cur.fetchall()
+
+                # fallback: عرض آخر 8 جولات حقيقية للاختيار منها
+                if not rows:
+                    cur.execute("""
+                        SELECT id, b_num, suit, rank, bonus_last_digit,
+                               winner, prediction, created_at, user_id
+                        FROM history
+                        WHERE rank IS NOT NULL AND rank != 'NULL'
+                          AND suit IS NOT NULL
+                        ORDER BY id DESC LIMIT 8
+                    """)
+                    fallback_rows = cur.fetchall()
+
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
         return
 
     if not rows:
-        await update.message.reply_text(
-            f"⚠️ لا توجد جولة بالرقم <code>{bnum_input}</code>"
-            f"تأكد من الرقم وأعد المحاولة.",
-            parse_mode="HTML"
-        )
+        if fallback_rows:
+            buttons = []
+            for r in fallback_rows:
+                rid2, bnum2, suit2, rank2, digit2, winner2, pred2, cat2, _ = r
+                t2   = cat2.strftime("%d/%m %H:%M") if cat2 else "?"
+                icon2 = {"الراعي 🔴":"🔴","الثور 🔵":"🔵","تعادل ⚪":"⚪"}.get(winner2,"?")
+                ok2   = "✅" if (pred2 and winner2 and pred2 == winner2) else ("❌" if pred2 else "")
+                buttons.append([InlineKeyboardButton(
+                    f"{bnum2} | {suit2 or '?'}{rank2 or '?'} {icon2}{ok2} | {t2}",
+                    callback_data=f"del_confirm_{rid2}"
+                )])
+            buttons.append([InlineKeyboardButton("❌ إلغاء", callback_data="del_cancel")])
+            await update.message.reply_text(
+                f"⚠️ لم أجد الرقم <code>{bnum_input}</code>"
+                f"━━━━━━━━━━━━━━━━━━━━━━"
+                f"📋 <b>آخر الجولات المسجّلة — اضغط على الجولة التي تريد حذفها:</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+        else:
+            await update.message.reply_text(
+                f"⚠️ لا توجد جولات في قاعدة البيانات.",
+                parse_mode="HTML"
+            )
         return
 
     # ── جولة واحدة → اعرض تفاصيل + تأكيد ──────────────────────────
