@@ -1688,7 +1688,7 @@ def check_anti_mode() -> Tuple[bool, float]:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT winner, prediction FROM history
-                    WHERE winner IS NOT NULL AND prediction IS NOT NULL AND prediction != ''
+                    WHERE winner IS NOT NULL AND prediction IS NOT NULL
                     ORDER BY id DESC LIMIT 15
                 """)
                 rows = cur.fetchall()
@@ -2819,7 +2819,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     with conn.cursor() as cur:
                         cur.execute("""
                             SELECT winner, prediction FROM history
-                            WHERE winner IS NOT NULL AND prediction IS NOT NULL AND prediction != ''
+                            WHERE winner IS NOT NULL AND prediction IS NOT NULL
                             ORDER BY id DESC LIMIT 20
                         """)
                         recent_results = cur.fetchall()
@@ -2848,7 +2848,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         total = cur.fetchone()[0]
                         cur.execute("SELECT winner, COUNT(*) FROM history WHERE winner IS NOT NULL GROUP BY winner")
                         dist = {r[0]: r[1] for r in cur.fetchall()}
-                        cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL AND prediction IS NOT NULL AND prediction != '' AND winner::text = prediction::text")
+                        cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL AND prediction IS NOT NULL AND winner::text = prediction::text")
                         correct_cnt = cur.fetchone()[0]
                         cur.execute("SELECT COUNT(*) FROM ai_laws WHERE active = TRUE")
                         laws_cnt = cur.fetchone()[0]
@@ -2942,7 +2942,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                    winner, prediction, created_at, user_id
                             FROM history
                             WHERE (user_id = %s OR %s = %s)
-                              AND prediction IS NOT NULL AND prediction != ''
+                              AND prediction IS NOT NULL
                             ORDER BY id DESC LIMIT 5
                         """, (uid, uid, ADMIN_ID))
                         rows = cur.fetchall()
@@ -3045,7 +3045,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cur.execute("""
                     SELECT COUNT(*) FROM history
                     WHERE winner IS NOT NULL
-                      AND prediction IS NOT NULL AND prediction != ''
+                      AND prediction IS NOT NULL
                       AND winner::text = prediction::text
                 """)
                 correct_cnt = cur.fetchone()[0]
@@ -3409,7 +3409,7 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
                            winner, prediction, created_at, user_id
                     FROM history
                     WHERE user_id = %s
-                      AND prediction IS NOT NULL AND prediction != ''
+                      AND prediction IS NOT NULL
                     ORDER BY id DESC LIMIT 5
                 """, (uid,))
                 rows = cur.fetchall()
@@ -3431,7 +3431,7 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         SELECT id, b_num, suit, rank, bonus_last_digit,
                                winner, prediction, created_at, user_id
                         FROM history
-                        WHERE prediction IS NOT NULL AND prediction != ''
+                        WHERE prediction IS NOT NULL
                         ORDER BY id DESC LIMIT 5
                     """)
                     rows = cur.fetchall()
@@ -3507,7 +3507,7 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     cur.execute(f"SELECT COUNT(*) FROM {tbl}")
                     counts[tbl] = cur.fetchone()[0]
 
-                cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL AND prediction IS NOT NULL AND prediction != '' AND winner::text = prediction::text")
+                cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL AND prediction IS NOT NULL AND winner::text = prediction::text")
                 correct = cur.fetchone()[0]
                 played  = max(counts["history"], 1)
                 acc     = round(correct / played * 100, 1)
