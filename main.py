@@ -1,5 +1,5 @@
 """
-HADES V18.0 - Neural Hybrid + Deep Learning Memory
+HADES V19.0 - Neural Hybrid + Deep Learning Memory
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 /force_learn : يُحلّل كل الجولات السابقة (+2700) ويستخرج قوانين ذكية
                تُخزَّن في DB وتُستخدم مباشرة في كل تنبؤ.
@@ -73,6 +73,45 @@ WEIGHTS = {
     'MOMENTUM': 1.5, 'AI': 2.5,
     'LAW': 3.5,      # قوانين الذاكرة السياقية — أعلى وزن
 }
+# ════════════════════════════════════════════════════════════════════
+# 📊 قوانين مستخلصة من تحليل 1780 جولة حقيقية (v19)
+# ════════════════════════════════════════════════════════════════════
+DATA_LAWS: List[Dict] = [
+    # Gap micro (100-500) → RED (bias=0.20, n=122)
+    {"id": -1, "law_type": "data_gap_micro", "conditions": {"b_gap_gte": 100, "b_gap_lt": 500},
+     "prediction": 0, "confidence": 62, "accuracy": 60.0, "times_used": 122,
+     "description": "فجوة 100-500 → الراعي 🔴 (تحليل حقيقي)", "active": True},
+    # Gap nano (0-100) → BLUE (bias=0.20, n=35)
+    {"id": -2, "law_type": "data_gap_nano", "conditions": {"b_gap_lt": 100},
+     "prediction": 1, "confidence": 60, "accuracy": 60.0, "times_used": 35,
+     "description": "فجوة 0-100 → الثور 🔵 (تحليل حقيقي)", "active": True},
+    # After 4+ RED streak → BLUE (bias=0.29, n=34)
+    {"id": -3, "law_type": "data_after_4x_red", "conditions": {"streak": {"length": 4, "value": 0}},
+     "prediction": 1, "confidence": 64, "accuracy": 64.0, "times_used": 34,
+     "description": "بعد 4 رواعٍ متتالية → الثور 🔵 (bias=0.29)", "active": True},
+    # Cycle 8 pos=1 → RED (bias=0.11, n=223)
+    {"id": -4, "law_type": "data_cycle8_pos1", "conditions": {"cycle_position": {"cycle": 8, "position": 1}},
+     "prediction": 0, "confidence": 56, "accuracy": 55.5, "times_used": 223,
+     "description": "دورة 8 موضع 1 → الراعي 🔴", "active": True},
+    # Cycle 8 pos=5 → BLUE (bias=0.12, n=222)
+    {"id": -5, "law_type": "data_cycle8_pos5", "conditions": {"cycle_position": {"cycle": 8, "position": 5}},
+     "prediction": 1, "confidence": 56, "accuracy": 56.0, "times_used": 222,
+     "description": "دورة 8 موضع 5 → الثور 🔵", "active": True},
+    # digit_sum mod9=6 → RED (bias=0.11, n=206)
+    {"id": -6, "law_type": "data_digsum_mod9_r6", "conditions": {"digit_sum_mod": {"mod": 9, "remainder": 6}},
+     "prediction": 0, "confidence": 56, "accuracy": 55.3, "times_used": 206,
+     "description": "مجموع الأرقام mod9=6 → الراعي 🔴", "active": True},
+    # digit_sum mod7=1 → BLUE (bias=0.10, n=241)
+    {"id": -7, "law_type": "data_digsum_mod7_r1", "conditions": {"digit_sum_mod": {"mod": 7, "remainder": 1}},
+     "prediction": 1, "confidence": 55, "accuracy": 55.0, "times_used": 241,
+     "description": "مجموع الأرقام mod7=1 → الثور 🔵", "active": True},
+    # After 4+ BLUE streak → RED (bias=0.17, n=41)
+    {"id": -8, "law_type": "data_after_4x_blue", "conditions": {"streak": {"length": 4, "value": 1}},
+     "prediction": 0, "confidence": 58, "accuracy": 58.5, "times_used": 41,
+     "description": "بعد 4 ثيران متتالية → الراعي 🔴 (bias=0.17)", "active": True},
+]
+DATA_LAW_WEIGHT = 2.2   # وزن القوانين الحقيقية
+
 
 # ==================== 📦 بيانات الأنماط المدمجة ====================
 EMBEDDED_PATTERNS: Dict[str, Dict] = {
@@ -306,6 +345,8 @@ def match_law(law: Dict, suit: str, rank: str, last_digit: int,
     if b_gap is not None:
         if "b_gap_gt"      in cond: chk(b_gap > float(cond["b_gap_gt"]))
         if "b_gap_lt"      in cond: chk(b_gap < float(cond["b_gap_lt"]))
+        if "b_gap_gte"     in cond: chk(b_gap >= float(cond["b_gap_gte"]))
+        if "b_gap_lte"     in cond: chk(b_gap <= float(cond["b_gap_lte"]))
         if "after_big_gap" in cond: chk(b_gap > 2000)
 
     # ── شروط الفجوة الزمنية ──────────────────────────────────────────
@@ -328,7 +369,9 @@ def apply_laws(suit: str, rank: str, last_digit: int,
     scores = {0: 0.0, 1: 0.0}
     logs   = []
 
-    for law in laws:
+    # ── قوانين مستخلصة من البيانات الحقيقية ──────────────────────────
+    all_laws = list(DATA_LAWS) + laws
+    for law in all_laws:
         match = match_law(law, suit, rank, last_digit, recent,
                           b_num=b_num, b_gap=b_gap,
                           gap_sec=gap_sec, round_index=round_index)
@@ -1944,6 +1987,167 @@ def calibrate_confidence(raw_conf: int, scores: Dict[int, float]) -> int:
         raw_conf = max(55, raw_conf - 5)
     return raw_conf
 
+
+# ════════════════════════════════════════════════════════════════════
+# 🎯 محرك v19-1: أنماط EXACT (بذلة+رتبة+رقم مجتمعة)
+# يستخدم إحصائيات الثلاثية المجتمعة من pattern_stats
+# ════════════════════════════════════════════════════════════════════
+def exact_pattern_predict(suit: str, rank: str, last_digit: int) -> Tuple[Optional[int], float, str]:
+    """يبحث عن نمط EXACT_{suit}_{rank}_{digit} في pattern_stats."""
+    pattern_id = f"EXACT_{suit}_{rank}_{last_digit}"
+    res = get_pattern(pattern_id)
+    if res['w'] == 2 or res['c'] < 0.05:
+        # جرّب بدون رقم: EXACT_{suit}_{rank}
+        pattern_id2 = f"RANK_{rank}_SUIT_{suit}"
+        res2 = get_pattern(pattern_id2)
+        if res2['w'] != 2 and res2['c'] > 0.05:
+            return res2['w'], res2['c'], f"EXACT≈{pattern_id2} {res2['log']}"
+        return None, 0.0, ""
+    return res['w'], res['c'], f"EXACT {pattern_id} {res['log']}"
+
+# ════════════════════════════════════════════════════════════════════
+# 🧬 محرك v19-2: N-Gram من قاعدة البيانات الكاملة
+# يجلب آخر 600 جولة من DB لبحث أعمق
+# ════════════════════════════════════════════════════════════════════
+_full_history_cache: List[int] = []
+_full_hist_ts: float = 0.0
+
+def get_full_history(n: int = 600) -> List[int]:
+    global _full_history_cache, _full_hist_ts
+    if _full_history_cache and time.time() - _full_hist_ts < 30:
+        return _full_history_cache
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT winner FROM history
+                    WHERE winner IS NOT NULL
+                    ORDER BY id DESC LIMIT %s
+                """, (n,))
+                rows = cur.fetchall()
+        hist = [WINNER_MAP.get(r[0], 2) for r in rows]
+        hist.reverse()
+        _full_history_cache = [x for x in hist if x in [0, 1]]
+        _full_hist_ts = time.time()
+        return _full_history_cache
+    except Exception:
+        return []
+
+def deep_ngram_predict(recent: List[int]) -> Tuple[Optional[int], float, str]:
+    """N-Gram في 600 جولة كاملة (أعمق من ngram_db_predict)."""
+    full = get_full_history(600)
+    if len(full) < 20:
+        return None, 0.0, ""
+    clean_recent = [x for x in recent if x in [0,1]]
+    if len(clean_recent) < 3:
+        return None, 0.0, ""
+    best = (None, 0.0, "")
+    for n in [6, 5, 4, 3]:
+        if len(clean_recent) < n or len(full) < n + 3:
+            continue
+        needle = tuple(clean_recent[-n:])
+        counts = {0: 0, 1: 0}
+        for i in range(len(full) - n - 1):
+            if tuple(full[i:i+n]) == needle:
+                nxt = full[i+n]
+                if nxt in [0,1]:
+                    counts[nxt] += 1
+        total = counts[0] + counts[1]
+        if total >= 4:
+            pred = 0 if counts[0] > counts[1] else 1
+            conf = max(counts[0], counts[1]) / total
+            if conf >= 0.60 and conf > best[1]:
+                best = (pred, conf, f"DeepNGram({n}): {counts[0]}🔴:{counts[1]}🔵/{total}")
+    return best
+
+# ════════════════════════════════════════════════════════════════════
+# ⚡ محرك v19-3: كاشف الانتقال السريع (Hot-Switch Detector)
+# عندما تتبدل النتيجة بسرعة 4+ مرات → انتقال نمط
+# ════════════════════════════════════════════════════════════════════
+def hot_switch_detector(history: List[int]) -> Tuple[Optional[int], float, str]:
+    """يكتشف أنماط التبادل السريع ويتنبأ باستمراره أو كسره."""
+    clean = [x for x in history if x in [0,1]]
+    if len(clean) < 8:
+        return None, 0.0, ""
+    # عدد التبدّلات في آخر 8 جولات
+    last8 = clean[-8:]
+    switches = sum(1 for i in range(1, len(last8)) if last8[i] != last8[i-1])
+    if switches >= 6:
+        # تبادل شبه كامل — تابع النمط
+        pred = 1 - last8[-1]
+        return pred, 0.72, f"تبادل سريع ({switches}/7)"
+    elif switches <= 1:
+        # ثبات كامل — استمر
+        pred = last8[-1]
+        return pred, 0.68, f"ثبات كامل ({8-switches}/7)"
+    return None, 0.0, ""
+
+# ════════════════════════════════════════════════════════════════════
+# 🧲 محرك v19-4: الجذب التاريخي (Historical Gravity)
+# يحسب متوسط الفوز في آخر 50/100/200 جولة ويوجّه التوقع
+# ════════════════════════════════════════════════════════════════════
+_gravity_cache: Tuple = (None, 0.0, "")
+_gravity_ts: float = 0.0
+
+def historical_gravity() -> Tuple[Optional[int], float, str]:
+    global _gravity_cache, _gravity_ts
+    if _gravity_cache[0] is not None and time.time() - _gravity_ts < 20:
+        return _gravity_cache
+    full = get_full_history(300)
+    if len(full) < 50:
+        return None, 0.0, ""
+    windows = [(50, 0.40), (100, 0.35), (200, 0.25)]
+    weighted = {0: 0.0, 1: 0.0}
+    total_w = 0.0
+    for win_size, weight in windows:
+        if len(full) < win_size:
+            continue
+        window = full[-win_size:]
+        r = window.count(0); b = window.count(1)
+        tot = r + b
+        if tot == 0: continue
+        dominant = 0 if r > b else 1
+        bias = abs(r-b)/tot
+        if bias >= 0.05:
+            weighted[dominant] += bias * weight
+            total_w += weight
+    if total_w == 0:
+        _gravity_cache = (None, 0.0, "")
+        _gravity_ts = time.time()
+        return _gravity_cache
+    best = 0 if weighted[0] > weighted[1] else 1
+    score = max(weighted[0], weighted[1]) / max(total_w, 0.01)
+    if score < 0.04:
+        _gravity_cache = (None, 0.0, "")
+    else:
+        conf = min(0.72, 0.52 + score * 3.0)
+        _gravity_cache = (best, conf, f"جذب تاريخي={'🔴' if best==0 else '🔵'} s={score:.2f}")
+    _gravity_ts = time.time()
+    return _gravity_cache
+
+# ════════════════════════════════════════════════════════════════════
+# 🏆 محرك v19-5: تصويت الأغلبية الديناميكي (Dynamic Majority Vote)
+# يجمع التوقعات النقطية من كل المحركات ويُعطي حكماً نهائياً
+# ════════════════════════════════════════════════════════════════════
+def dynamic_majority_vote(signals: List[Tuple[Optional[int], float, str]]) -> Tuple[Optional[int], float, int, int]:
+    """
+    يُعيد (pred, conf, agree_count, total_count).
+    يُوزن كل صوت بثقته.
+    """
+    votes = {0: 0.0, 1: 0.0}
+    n_valid = 0
+    for pred, conf, _ in signals:
+        if pred in [0, 1]:
+            votes[pred] += conf
+            n_valid += 1
+    if n_valid < 2:
+        return None, 0.0, 0, 0
+    total_v = votes[0] + votes[1]
+    winner = 0 if votes[0] > votes[1] else 1
+    conf = max(votes[0], votes[1]) / max(total_v, 0.01)
+    agree = sum(1 for p,_,_ in signals if p == winner)
+    return winner, conf, agree, n_valid
+
 # ==================== 🔮 محرك التنبؤ الرئيسي ====================
 async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     clean_b = clean_digits(b_num)
@@ -2168,6 +2372,48 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     elif recent_acc > 0.62:
         logs.append(f"✅ دقة حالية ممتازة: {recent_acc:.0%}")
 
+    # ── V1: أنماط EXACT ─────────────────────────────────────────────
+    ex_pred, ex_conf, ex_log = exact_pattern_predict(suit, rank, last_digit)
+    if ex_pred is not None:
+        w = get_adaptive_weight('EXACT', 2.6)
+        scores[ex_pred] += ex_conf * w
+        logs.append(f"🎯 EXACT: {ex_log} → {WINNER_NAMES[ex_pred]} ({ex_conf:.0%})")
+
+    # ── V2: DeepNGram (600 جولة) ─────────────────────────────────
+    dn_pred, dn_conf, dn_log = deep_ngram_predict(recent_history)
+    if dn_pred is not None:
+        w = get_adaptive_weight('DEEP_NGRAM', 2.8)
+        scores[dn_pred] += dn_conf * w
+        logs.append(f"🧬 {dn_log} → {WINNER_NAMES[dn_pred]} ({dn_conf:.0%})")
+
+    # ── V3: Hot-Switch Detector ─────────────────────────────────
+    hs_pred, hs_conf, hs_log = hot_switch_detector(recent_history)
+    if hs_pred is not None:
+        w = get_adaptive_weight('HOT_SWITCH', 1.8)
+        scores[hs_pred] += hs_conf * w
+        logs.append(f"⚡ {hs_log} → {WINNER_NAMES[hs_pred]} ({hs_conf:.0%})")
+
+    # ── V4: الجذب التاريخي ───────────────────────────────────────
+    gv_pred, gv_conf, gv_log = historical_gravity()
+    if gv_pred is not None:
+        w = get_adaptive_weight('GRAVITY', 1.5)
+        scores[gv_pred] += gv_conf * w
+        logs.append(f"🧲 {gv_log} ({gv_conf:.0%})")
+
+    # ── V5: تصويت الأغلبية الديناميكي ─────────────────────────
+    all_point_signals = [
+        (mom_pred, 0.85, "mom"), (streak_pred, streak_conf if 'streak_conf' in dir() else 0.0, "streak"),
+        (mkv_pred, mkv_conf, "mkv"), (cyc_pred, cyc_conf if 'cyc_pred' in dir() and cyc_pred is not None else 0.0, "cyc"),
+        (ng_pred, ng_conf if 'ng_pred' in dir() and ng_pred is not None else 0.0, "ng"),
+        (dn_pred, dn_conf, "dn"), (gv_pred, gv_conf, "gv"),
+        (ac_pred, ac_conf if 'ac_pred' in dir() and ac_pred is not None else 0.0, "ac"),
+    ]
+    mv_pred, mv_conf, mv_agree, mv_total = dynamic_majority_vote(all_point_signals)
+    if mv_pred is not None and mv_total >= 4:
+        mv_boost = mv_conf * 1.8 * (mv_agree / max(mv_total, 1))
+        scores[mv_pred] += mv_boost
+        logs.append(f"🏆 أغلبية: {WINNER_NAMES[mv_pred]} ({mv_agree}/{mv_total} محركات، ثقة {mv_conf:.0%})")
+
     # ── الحساب النهائي ──────────────────────────────────────────────
     total_score = scores[0] + scores[1]
     if total_score == 0:
@@ -2199,6 +2445,9 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         'BAYESIAN': bay_pred,
         'AUTOCORR': ac_pred, 'NGRAM': ng_pred,
         'GAP_HIST': gh_pred, 'OVERDUE': od_pred,
+        'EXACT': ex_pred, 'DEEP_NGRAM': dn_pred,
+        'HOT_SWITCH': hs_pred, 'GRAVITY': gv_pred,
+        'OVERALL': final,
     })
     logs.append(f"__signals__{signal_json}")
 
@@ -2280,20 +2529,32 @@ def result_keyboard(pred: int, b_num: str) -> InlineKeyboardMarkup:
 
 # ==================== معالجات تيليجرام ====================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
     laws_count = len(load_laws())
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎴 ابدأ جولة جديدة", callback_data="choose_suit")],
-        [InlineKeyboardButton("📊 إحصائيات سريعة",  callback_data="stats")],
-    ])
+    active_data_laws = len([l for l in DATA_LAWS if l.get("active")])
     await update.message.reply_text(
-        f"🏛️ <b>HADES V18.0</b>\n"
-        f"محرك تنبؤ باكارات — بيانات مدمجة + ذكاء اصطناعي + ذاكرة سياقية\n\n"
-        f"⚖️ القوانين الذكية النشطة: <b>{laws_count}</b>\n"
-        f"💡 <code>/force_learn</code> — تعلم عميق | <code>/engine</code> — حالة المحركات\n\n"
-        f"اضغط <b>ابدأ</b> لتحديد البذلة والرتبة.",
+        f"<b>🧠 HADES V19 — نظام التنبؤ الأسطوري</b>\n"
+        f"{'━'*24}\n"
+        f"⚙️ <b>المحركات النشطة: 17</b>\n"
+        f"  ⚖️ قوانين AI: <b>{laws_count}</b>  |  📊 قوانين بيانات: <b>{active_data_laws}</b>\n"
+        f"  🔗 ماركوف  |  🔄 دورات  |  🧬 DeepNGram\n"
+        f"  🕰️ ارتباط زمني  |  🎯 EXACT  |  🏆 أغلبية\n"
+        f"  ⚡ Hot-Switch  |  🧲 جذب تاريخي  |  ⏳ متأخر\n"
+        f"{'━'*24}\n"
+        f"📋 <b>الأوامر:</b>\n"
+        f"  🎮 /start — بدء جولة جديدة\n"
+        f"  📊 /stats — لوحة الإحصاءات الحية\n"
+        f"  ⚖️ /laws  — عرض القوانين النشطة\n"
+        f"  📥 /download — تصدير قاعدة البيانات\n"
+        f"  🔬 /force_learn — تعلم عميق (مشرف)\n"
+        f"  ✂️ /prune — تنظيف القوانين الميتة (مشرف)\n"
+        f"  🔄 /reset_laws — إعادة تعيين (مشرف)\n"
+        f"{'━'*24}\n"
+        f"🎴 اختر البذلة للبدء:",
         parse_mode="HTML",
-        reply_markup=kb
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton(SUITS[i], callback_data=f"suit_{i}")
+            for i in range(len(SUITS))
+        ]])
     )
 
 async def cmd_force_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2393,7 +2654,7 @@ async def cmd_engine_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚙️ <b>حالة المحركات — HADES V18</b>\n"
+        f"⚙️ <b>حالة المحركات — HADES V19</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"📈 <b>الدقة الحالية (آخر 15):</b> {recent_acc:.0%}\n"
         f"{'🔃 <b>وضع الانعكاس نشط!</b>' if anti_active else '✅ وضع عادي'}\n\n"
@@ -2552,15 +2813,29 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             verdict = "<b>صحيح! 🎯</b>" if correct else "خاطئ ❌"
             icon    = "✅" if correct else "❌"
+            # احسب الدقة الحديثة (آخر 20 جولة)
+            try:
+                with db_pool.get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT winner, prediction FROM history
+                            WHERE winner IS NOT NULL AND prediction IS NOT NULL AND prediction != ''
+                            ORDER BY id DESC LIMIT 20
+                        """)
+                        recent_results = cur.fetchall()
+                recent_acc = sum(1 for r in recent_results if r[0] == r[1]) / max(len(recent_results), 1)
+                streak_disp = "".join("✅" if r[0]==r[1] else "❌" for r in recent_results[:10])
+                acc_txt = f"\n📈 دقة آخر 20: <b>{recent_acc:.0%}</b>  <code>{streak_disp}</code>"
+            except Exception:
+                acc_txt = ""
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎴 جولة جديدة", callback_data="choose_suit")],
-                [InlineKeyboardButton("📊 الإحصائيات",  callback_data="stats")],
+                [InlineKeyboardButton("🎴 جولة جديدة", callback_data="choose_suit"),
+                 InlineKeyboardButton("📊 إحصاءات",    callback_data="stats")],
             ])
             await safe_edit(
                 query,
-                f"{icon} تم تسجيل: <b>{WINNER_NAMES[winner]}</b>\n"
-                f"التوقع كان: {WINNER_NAMES.get(pred, '?')} — {verdict}\n\n"
-                f"البذلة: {suit}  |  الرتبة: {rank}  |  آخر رقم: {last_digit}",
+                f"{icon} <b>{WINNER_NAMES[winner]}</b>  ({verdict})\n"
+                f"التوقع: {WINNER_NAMES.get(pred, '?')}  |  {suit} {rank}  |  #{b_num}{acc_txt}",
                 reply_markup=kb
             )
 
@@ -2573,7 +2848,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         total = cur.fetchone()[0]
                         cur.execute("SELECT winner, COUNT(*) FROM history WHERE winner IS NOT NULL GROUP BY winner")
                         dist = {r[0]: r[1] for r in cur.fetchall()}
-                        cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL AND winner::text = prediction::text")
+                        cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL AND prediction IS NOT NULL AND prediction != '' AND winner::text = prediction::text")
                         correct_cnt = cur.fetchone()[0]
                         cur.execute("SELECT COUNT(*) FROM ai_laws WHERE active = TRUE")
                         laws_cnt = cur.fetchone()[0]
@@ -2698,6 +2973,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cur.execute("""
                     SELECT COUNT(*) FROM history
                     WHERE winner IS NOT NULL
+                      AND prediction IS NOT NULL AND prediction != ''
                       AND winner::text = prediction::text
                 """)
                 correct_cnt = cur.fetchone()[0]
@@ -2801,6 +3077,100 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"cmd_stats: {e}", exc_info=True)
         await msg.edit_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
 
+
+# ════════════════════════════════════════════════════════════════════
+# ✂️ /prune: تنظيف القوانين الميتة (ADMIN)
+# ════════════════════════════════════════════════════════════════════
+async def cmd_prune(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ هذا الأمر للمشرف فقط.")
+        return
+    msg = await update.message.reply_text("✂️ جارٍ تنظيف القوانين الميتة...")
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                # عدّ إجمالي الجولات
+                cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL")
+                total_rounds = cur.fetchone()[0]
+                # احذف القوانين التي لم تُستخدم قط بعد 100+ جولة
+                cur.execute("""
+                    UPDATE ai_laws SET active = FALSE
+                    WHERE times_used = 0
+                      AND created_at < NOW() - INTERVAL '2 hours'
+                      AND active = TRUE
+                """)
+                dead_by_usage = cur.rowcount
+                # احذف القوانين دقتها < 30% وتمت أكثر من 8 مرات
+                cur.execute("""
+                    UPDATE ai_laws SET active = FALSE
+                    WHERE accuracy < 30 AND times_used >= 8 AND active = TRUE
+                """)
+                dead_by_acc = cur.rowcount
+                # احذف قوانين مكررة (نفس law_type + prediction، احتفظ بالأفضل)
+                cur.execute("""
+                    WITH ranked AS (
+                        SELECT id, law_type, prediction,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY law_type, prediction
+                                   ORDER BY accuracy DESC, times_used DESC
+                               ) as rn
+                        FROM ai_laws WHERE active = TRUE
+                    )
+                    UPDATE ai_laws SET active = FALSE
+                    WHERE id IN (
+                        SELECT id FROM ranked WHERE rn > 3
+                    )
+                """)
+                dead_dupes = cur.rowcount
+                conn.commit()
+                # احسب الباقي
+                cur.execute("SELECT COUNT(*) FROM ai_laws WHERE active = TRUE")
+                remaining = cur.fetchone()[0]
+        load_laws(force=True)
+        await msg.edit_text(
+            f"✅ <b>تنظيف اكتمل</b>"
+            f"━━━━━━━━━━━━━━━━━━━━━━"
+            f"💤 لم تُستخدم قط:   <b>{dead_by_usage}</b>"
+            f"📉 دقة ضعيفة (<30%): <b>{dead_by_acc}</b>"
+            f"♻️ مكررة:            <b>{dead_dupes}</b>"
+            f"━━━━━━━━━━━━━━━━━━━━━━"
+            f"⚖️ القوانين الباقية: <b>{remaining}</b>",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"prune error: {e}", exc_info=True)
+        await msg.edit_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
+
+# ════════════════════════════════════════════════════════════════════
+# 🔄 /reset_laws: إعادة تعيين القوانين وبدء من جديد (ADMIN)
+# ════════════════════════════════════════════════════════════════════
+async def cmd_reset_laws(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ هذا الأمر للمشرف فقط.")
+        return
+    args = context.args or []
+    if 'confirm' not in args:
+        await update.message.reply_text(
+            "⚠️ هذا سيُعطّل جميع القوانين!"
+            "للتأكيد اكتب: <code>/reset_laws confirm</code>",
+            parse_mode="HTML"
+        )
+        return
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE ai_laws SET active = FALSE")
+                n = cur.rowcount
+                conn.commit()
+        load_laws(force=True)
+        await update.message.reply_text(
+            f"✅ تم تعطيل <b>{n}</b> قانون."
+            f"الآن شغّل /force_learn لبدء تعلم جديد.",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
+
 # ==================== /download: تصدير احترافي شامل ====================
 def _safe(v, fmt=None) -> str:
     """تحويل آمن لأي قيمة — يتجنب NoneType format errors."""
@@ -2836,7 +3206,7 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ── رأس الملف ──────────────────────────────────────────────
         lines.append("╔" + "═" * 58 + "╗")
-        lines.append("║" + " " * 15 + "HADES V18 — DB EXPORT" + " " * 22 + "║")
+        lines.append("║" + " " * 15 + "HADES V19 — DB EXPORT" + " " * 22 + "║")
         lines.append(f"║  Generated : {now_str:<44}║")
         lines.append("╚" + "═" * 58 + "╝")
 
@@ -2850,7 +3220,7 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     cur.execute(f"SELECT COUNT(*) FROM {tbl}")
                     counts[tbl] = cur.fetchone()[0]
 
-                cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL AND winner::text = prediction::text")
+                cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL AND prediction IS NOT NULL AND prediction != '' AND winner::text = prediction::text")
                 correct = cur.fetchone()[0]
                 played  = max(counts["history"], 1)
                 acc     = round(correct / played * 100, 1)
@@ -2990,11 +3360,13 @@ def main():
     app.add_handler(CommandHandler("force_learn", cmd_force_learn))
     app.add_handler(CommandHandler("laws",        cmd_laws))
     app.add_handler(CommandHandler("stats",       cmd_stats))
+    app.add_handler(CommandHandler("prune",       cmd_prune))
+    app.add_handler(CommandHandler("reset_laws",  cmd_reset_laws))
     app.add_handler(CommandHandler("download",    cmd_download))
     app.add_handler(CommandHandler("engine",      cmd_engine_status))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    logger.info("🚀 HADES V18.0 is running...")
+    logger.info("🚀 HADES V19.0 is running...")
     app.run_polling()
 
 if __name__ == "__main__":
