@@ -3142,6 +3142,80 @@ async def cmd_prune(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
 
 # ════════════════════════════════════════════════════════════════════
+# 🗑️ /delete: حذف آخر جولة مع rollback كامل لـ pattern_stats
+# ════════════════════════════════════════════════════════════════════
+async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """حذف آخر جولة مسجلة مع التراجع عن تأثيرها على pattern_stats."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ هذا الأمر للمشرف فقط.")
+        return
+
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                # ── جلب آخر جولة كاملة ──────────────────────────────
+                cur.execute("""
+                    SELECT id, winner, suit, rank, bonus_last_digit, b_num, created_at
+                    FROM history
+                    ORDER BY id DESC
+                    LIMIT 1
+                """)
+                row = cur.fetchone()
+
+                if not row:
+                    await update.message.reply_text("⚠️ لا توجد جولات لحذفها.")
+                    return
+
+                last_id, winner_str, suit, rank, digit, b_num, created_at = row
+                winner_int = WINNER_MAP.get(winner_str, 2)
+
+                # ── حذف الجولة ────────────────────────────────────────
+                cur.execute("DELETE FROM history WHERE id = %s", (last_id,))
+
+                # ── rollback pattern_stats ───────────────────────────
+                rollback_col = {0: "red_count", 1: "blue_count", 2: "tie_count"}.get(winner_int)
+                if rollback_col and suit and rank is not None and digit is not None:
+                    patterns_to_fix = [
+                        f"SUIT_{suit}",
+                        f"DIGIT_{digit}",
+                        f"RANK_{rank}",
+                        f"SD_{suit}_{digit}",
+                    ]
+                    for pid in patterns_to_fix:
+                        cur.execute(f"""
+                            UPDATE pattern_stats
+                            SET {rollback_col} = GREATEST(0, {rollback_col} - 1)
+                            WHERE pattern_id = %s
+                        """, (pid,))
+                        live_cache.cache.pop(pid, None)  # مسح الـ cache
+
+                conn.commit()
+
+        # تنسيق وقت الجولة
+        time_str = created_at.strftime("%Y-%m-%d %H:%M:%S") if created_at else "?"
+        rollback_note = "✅ تم تعديل pattern_stats" if rollback_col else "⚠️ لم يُعدَّل pattern_stats"
+
+        await update.message.reply_text(
+            f"🗑️ <b>تم حذف آخر جولة</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 ID: <code>{last_id}</code>\n"
+            f"🃏 {suit or '?'} {rank or '?'}\n"
+            f"🔢 آخر رقم: <b>{digit}</b>  |  b_num: <code>{b_num}</code>\n"
+            f"🏆 النتيجة: <b>{winner_str}</b>\n"
+            f"🕐 الوقت: {time_str}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{rollback_note}",
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+        logger.error(f"delete error: {e}", exc_info=True)
+        await update.message.reply_text(
+            f"❌ خطأ أثناء الحذف:\n<code>{e}</code>",
+            parse_mode="HTML"
+        )
+
+# ════════════════════════════════════════════════════════════════════
 # 🔄 /reset_laws: إعادة تعيين القوانين وبدء من جديد (ADMIN)
 # ════════════════════════════════════════════════════════════════════
 async def cmd_reset_laws(update: Update, context: ContextTypes.DEFAULT_TYPE):
