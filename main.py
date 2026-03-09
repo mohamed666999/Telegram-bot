@@ -2898,6 +2898,78 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]])
             await safe_edit(query, msg, reply_markup=kb)
 
+        elif data.startswith("del_confirm_"):
+            # ── تأكيد الحذف ──────────────────────────────────────────
+            target_id = int(data.split("_")[2])
+            await safe_edit(query, f"⏳ جارٍ حذف الجولة <code>#{target_id}</code>...", reply_markup=None)
+            res = await _do_delete_round(target_id)
+            if res["error"]:
+                await safe_edit(query, f"❌ خطأ: <code>{res['error']}</code>")
+            elif res["deleted"] and res["row"]:
+                row = res["row"]
+                _, bnum, suit, rank, digit, winner_str, pred_str, created_at, _ = row
+                t = created_at.strftime("%Y-%m-%d %H:%M") if created_at else "?"
+                await safe_edit(
+                    query,
+                    f"✅ <b>تم الحذف بنجاح — قاعدة البيانات كأن الجولة لم تحدث</b>"
+                    f"{'━'*22}"
+                    f"🆔 ID: <code>{target_id}</code>  |  🕐 {t}"
+                    f"🃏 {suit or '?'} {rank or '?'}  |  🔢 {digit}  |  🏆 {winner_str}"
+                    f"🔑 B_NUM: <code>{bnum}</code>"
+                    f"{'━'*22}"
+                    f"♻️ pattern_stats rollback: <b>{res['rolled_back']}</b> نمط"
+                    f"⚖️ قوانين مُعاد ضبطها:    <b>{res['laws_adjusted']}</b> قانون"
+                    f"🧠 Cache مُمسوح بالكامل",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🗑️ حذف المزيد", callback_data="del_more"),
+                        InlineKeyboardButton("🎴 جولة جديدة", callback_data="choose_suit"),
+                    ]])
+                )
+            else:
+                await safe_edit(query, f"⚠️ لا توجد جولة بالـ ID {target_id}.")
+
+        elif data == "del_cancel":
+            await safe_edit(query, "✅ تم الإلغاء.")
+
+        elif data == "del_more":
+            # إعادة عرض قائمة الجولات للحذف
+            uid = query.from_user.id
+            try:
+                with db_pool.get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT id, b_num, suit, rank, bonus_last_digit,
+                                   winner, prediction, created_at, user_id
+                            FROM history
+                            WHERE (user_id = %s OR %s = %s)
+                              AND prediction IS NOT NULL AND prediction != ''
+                            ORDER BY id DESC LIMIT 5
+                        """, (uid, uid, ADMIN_ID))
+                        rows = cur.fetchall()
+                        if not rows and uid == ADMIN_ID:
+                            cur.execute("""
+                                SELECT id, b_num, suit, rank, bonus_last_digit,
+                                       winner, prediction, created_at, user_id
+                                FROM history ORDER BY id DESC LIMIT 5
+                            """)
+                            rows = cur.fetchall()
+            except Exception as e:
+                await safe_edit(query, f"❌ خطأ: <code>{e}</code>")
+                return
+            if not rows:
+                await safe_edit(query, "⚠️ لا توجد جولات إضافية.")
+                return
+            buttons = []
+            for row in rows:
+                label = _delete_row_label(row)
+                buttons.append([InlineKeyboardButton(label, callback_data=f"del_confirm_{row[0]}")])
+            buttons.append([InlineKeyboardButton("❌ إلغاء", callback_data="del_cancel")])
+            await safe_edit(
+                query,
+                f"🗑️ <b>اختر الجولة التي تريد حذفها:</b>",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+
         else:
             logger.warning(f"Unhandled callback: {data!r}")
 
@@ -3173,131 +3245,218 @@ async def cmd_reset_laws(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ════════════════════════════════════════════════════════════════════
-# 🗑️ /delete  —  حذف آخر جولة (خاصة بالمستخدم) مع Rollback كامل
-#   1. يجلب آخر جولة للمستخدم نفسه (by user_id)
-#   2. يحذفها من history
-#   3. يتراجع عن تأثيرها على pattern_stats
-#   4. يُعيد ضبط دقة القوانين التي انطبقت عليها
-#   5. يمسح TTL-cache ذات الصلة
+# 🗑️ /delete  —  نظام حذف تفاعلي ذكي مع Rollback كامل
+#
+#  طريقة العمل:
+#   • /delete        → يعرض آخر 5 جولات حقيقية (بـ prediction غير NULL)
+#                      كأزرار تفاعلية للمستخدم ليختار أيها يحذف
+#   • /delete [id]   → يحذف مباشرة بالـ ID بعد عرض تفاصيل + زر تأكيد
+#
+#  عند الحذف:
+#   1. يحذف الجولة من history
+#   2. يتراجع عن pattern_stats (red/blue/tie counts)
+#   3. يُعيد ضبط دقة القوانين التي انطبقت عليها
+#   4. يمسح كل الـ cache (markov, history, gravity, live_cache)
 # ════════════════════════════════════════════════════════════════════
-async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
+
+async def _do_delete_round(rid: int) -> dict:
+    """
+    ينفّذ الحذف الكامل لجولة بالـ ID.
+    يُعيد dict بنتائج العملية.
+    """
+    result = {"deleted": False, "rid": rid, "row": None,
+              "rolled_back": 0, "laws_adjusted": 0, "error": None}
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
-
-                # ── جلب آخر جولة للمستخدم الحالي ─────────────────────
                 cur.execute("""
                     SELECT id, b_num, suit, rank, bonus_last_digit,
                            winner, prediction, created_at, user_id
-                    FROM history
-                    WHERE user_id = %s
-                    ORDER BY id DESC
-                    LIMIT 1
-                """, (uid,))
+                    FROM history WHERE id = %s
+                """, (rid,))
                 row = cur.fetchone()
-
-                # المشرف: إن لم يجد لنفسه، يجلب آخر جولة كلياً
-                if not row and uid == ADMIN_ID:
-                    cur.execute("""
-                        SELECT id, b_num, suit, rank, bonus_last_digit,
-                               winner, prediction, created_at, user_id
-                        FROM history
-                        ORDER BY id DESC
-                        LIMIT 1
-                    """)
-                    row = cur.fetchone()
-
                 if not row:
-                    await update.message.reply_text("⚠️ لا توجد جولات مسجّلة لك.")
-                    return
+                    result["error"] = f"لا توجد جولة بالـ ID {rid}"
+                    return result
 
-                rid, bnum, suit, rank, digit, winner_str, pred_str, created_at, owner_uid = row
+                result["row"] = row
+                _, bnum, suit, rank, digit, winner_str, pred_str, created_at, _ = row
                 winner_int = WINNER_MAP.get(winner_str, 2)
                 digit_int  = int(digit) if digit is not None else 0
 
-                # ── 1. حذف الجولة ─────────────────────────────────────
+                # ── 1. الحذف ──────────────────────────────────────────
                 cur.execute("DELETE FROM history WHERE id = %s", (rid,))
 
                 # ── 2. Rollback pattern_stats ──────────────────────────
-                rollback_col = {0: "red_count", 1: "blue_count", 2: "tie_count"}.get(winner_int)
-                rolled_back = 0
+                rollback_col = {0:"red_count", 1:"blue_count", 2:"tie_count"}.get(winner_int)
                 if rollback_col and suit and rank:
-                    patterns_to_fix = [
-                        f"SUIT_{suit}",
-                        f"DIGIT_{digit_int}",
-                        f"RANK_{rank}",
-                        f"SD_{suit}_{digit_int}",
-                    ]
-                    for pid in patterns_to_fix:
+                    for pid in [f"SUIT_{suit}", f"DIGIT_{digit_int}",
+                                f"RANK_{rank}", f"SD_{suit}_{digit_int}"]:
                         cur.execute(f"""
                             UPDATE pattern_stats
                             SET {rollback_col} = GREATEST(0, {rollback_col} - 1)
                             WHERE pattern_id = %s
                         """, (pid,))
-                        rolled_back += cur.rowcount
+                        result["rolled_back"] += cur.rowcount
                         live_cache.cache.pop(pid, None)
-
-                # ── 3. تراجع عن دقة القوانين التي انطبقت ──────────────
-                laws = load_laws()
-                laws_adjusted = 0
-                for law in laws:
-                    m = match_law(law, suit or "", rank or "", digit_int, [])
-                    if m >= 0.5:
-                        # اعكس تحديث الدقة الأخير: accuracy = acc/0.90 - new*0.10/0.90
-                        try:
-                            was_correct = (law["prediction"] == winner_int)
-                            old_acc = law["accuracy"]
-                            # عكس moving avg: acc_before = (acc - new*0.10) / 0.90
-                            new_val  = 100.0 if was_correct else 0.0
-                            restored = (old_acc - 0.10 * new_val) / 0.90
-                            restored = max(0.0, min(100.0, restored))
-                            with db_pool.get_conn() as c2:
-                                with c2.cursor() as c2c:
-                                    c2c.execute("""
-                                        UPDATE ai_laws
-                                        SET accuracy   = %s,
-                                            times_used = GREATEST(0, times_used - 1)
-                                        WHERE id = %s
-                                    """, (restored, law["id"]))
-                                    c2.commit()
-                            laws_adjusted += 1
-                        except Exception:
-                            pass
 
                 conn.commit()
 
-        # ── مسح الـ cache الكامل للتاريخ ─────────────────────────────
+        # ── 3. Rollback دقة القوانين ──────────────────────────────────
+        try:
+            digit_int = int(row[4]) if row[4] is not None else 0
+            winner_int_v = WINNER_MAP.get(row[5], 2)
+            for law in load_laws():
+                if match_law(law, row[2] or "", row[3] or "", digit_int, []) >= 0.5:
+                    was_correct = (law["prediction"] == winner_int_v)
+                    new_val  = 100.0 if was_correct else 0.0
+                    restored = max(0.0, min(100.0, (law["accuracy"] - 0.10 * new_val) / 0.90))
+                    with db_pool.get_conn() as c2:
+                        with c2.cursor() as c2c:
+                            c2c.execute("""
+                                UPDATE ai_laws
+                                SET accuracy   = %s,
+                                    times_used = GREATEST(0, times_used - 1)
+                                WHERE id = %s
+                            """, (restored, law["id"]))
+                            c2.commit()
+                    result["laws_adjusted"] += 1
+        except Exception:
+            pass
+
+        # ── 4. مسح الـ Cache ──────────────────────────────────────────
         live_cache.cache.clear()
         global _markov_cache, _full_history_cache, _gravity_cache
-        _markov_cache        = None
-        _full_history_cache  = []
-        _gravity_cache       = (None, 0.0, "")
+        _markov_cache       = None
+        _full_history_cache = []
+        _gravity_cache      = (None, 0.0, "")
         load_laws(force=True)
 
-        time_str = created_at.strftime("%Y-%m-%d %H:%M:%S") if created_at else "?"
-        await update.message.reply_text(
-            f"🗑️ <b>تم حذف آخر جولة لك</b>\n"
-            f"{'━'*22}\n"
-            f"🆔 ID: <code>{rid}</code>  |  🕐 {time_str}\n"
-            f"🃏 {suit or '?'} {rank or '?'}  |  🔢 رقم: <b>{digit_int}</b>\n"
-            f"🔑 B_NUM: <code>{bnum}</code>\n"
-            f"🏆 النتيجة: <b>{winner_str}</b>  |  التوقع: {pred_str or 'NULL'}\n"
-            f"{'━'*22}\n"
-            f"♻️ pattern_stats rollback: <b>{rolled_back}</b> نمط\n"
-            f"⚖️ قوانين مُعاد ضبطها:    <b>{laws_adjusted}</b> قانون\n"
-            f"🧠 Cache مُمسوح بالكامل\n"
-            f"{'━'*22}\n"
-            f"✅ <b>قاعدة البيانات كأن الجولة لم تحدث</b>",
-            parse_mode="HTML"
-        )
+        result["deleted"] = True
 
     except Exception as e:
-        logger.error(f"delete error: {e}", exc_info=True)
+        logger.error(f"_do_delete_round: {e}", exc_info=True)
+        result["error"] = str(e)
+    return result
+
+
+def _delete_row_label(row) -> str:
+    """نص مختصر لعرض الجولة في زر."""
+    rid, bnum, suit, rank, digit, winner_str, pred_str, created_at, _ = row
+    t = created_at.strftime("%H:%M") if created_at else "?"
+    winner_icon = {"الراعي 🔴": "🔴", "الثور 🔵": "🔵", "تعادل ⚪": "⚪"}.get(winner_str, "?")
+    correct = ""
+    if pred_str and winner_str:
+        correct = " ✅" if pred_str == winner_str else " ❌"
+    return f"#{rid} {suit or '?'}{rank or '?'} {winner_icon}{correct} {t}"
+
+
+async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /delete        → يعرض آخر 5 جولات حقيقية كأزرار تفاعلية
+    /delete [id]   → يعرض الجولة ويطلب تأكيداً قبل الحذف
+    """
+    uid  = update.effective_user.id
+    args = context.args or []
+
+    # ── حذف مباشر بـ ID ─────────────────────────────────────────────
+    if args and args[0].isdigit():
+        target_id = int(args[0])
+        try:
+            with db_pool.get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT id, b_num, suit, rank, bonus_last_digit,
+                               winner, prediction, created_at, user_id
+                        FROM history WHERE id = %s
+                    """, (target_id,))
+                    row = cur.fetchone()
+        except Exception as e:
+            await update.message.reply_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
+            return
+
+        if not row:
+            await update.message.reply_text(f"⚠️ لا توجد جولة بالـ ID <b>{target_id}</b>.", parse_mode="HTML")
+            return
+
+        # عرض التفاصيل + زر تأكيد
+        rid, bnum, suit, rank, digit, winner_str, pred_str, created_at, owner = row
+        t = created_at.strftime("%Y-%m-%d %H:%M:%S") if created_at else "?"
         await update.message.reply_text(
-            f"❌ خطأ أثناء الحذف:\n<code>{e}</code>",
-            parse_mode="HTML"
+            f"⚠️ <b>تأكيد حذف الجولة</b>"
+            f"{'━'*22}"
+            f"🆔 ID: <code>{rid}</code>  |  🕐 {t}"
+            f"🃏 {suit or '?'} {rank or '?'}  |  🔢 {digit}"
+            f"🔑 B_NUM: <code>{bnum}</code>"
+            f"🏆 {winner_str}  |  التوقع: {pred_str or 'NULL'}"
+            f"{'━'*22}"
+            f"هل أنت متأكد؟",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ نعم، احذف",  callback_data=f"del_confirm_{rid}"),
+                InlineKeyboardButton("❌ إلغاء",       callback_data="del_cancel"),
+            ]])
         )
+        return
+
+    # ── عرض آخر 5 جولات حقيقية ──────────────────────────────────────
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                # أولاً: جولات المستخدم نفسه بـ prediction غير فارغ
+                cur.execute("""
+                    SELECT id, b_num, suit, rank, bonus_last_digit,
+                           winner, prediction, created_at, user_id
+                    FROM history
+                    WHERE user_id = %s
+                      AND prediction IS NOT NULL AND prediction != ''
+                    ORDER BY id DESC LIMIT 5
+                """, (uid,))
+                rows = cur.fetchall()
+
+                # إذا لم يجد — جرّب بدون شرط prediction (جولاته القديمة)
+                if not rows:
+                    cur.execute("""
+                        SELECT id, b_num, suit, rank, bonus_last_digit,
+                               winner, prediction, created_at, user_id
+                        FROM history
+                        WHERE user_id = %s
+                        ORDER BY id DESC LIMIT 5
+                    """, (uid,))
+                    rows = cur.fetchall()
+
+                # المشرف: إذا ما زال لا يجد — يعرض آخر 5 جولات كاملة
+                if not rows and uid == ADMIN_ID:
+                    cur.execute("""
+                        SELECT id, b_num, suit, rank, bonus_last_digit,
+                               winner, prediction, created_at, user_id
+                        FROM history
+                        WHERE prediction IS NOT NULL AND prediction != ''
+                        ORDER BY id DESC LIMIT 5
+                    """)
+                    rows = cur.fetchall()
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
+        return
+
+    if not rows:
+        await update.message.reply_text("⚠️ لا توجد جولات مسجّلة.")
+        return
+
+    # ── بناء الأزرار ─────────────────────────────────────────────────
+    buttons = []
+    for row in rows:
+        label = _delete_row_label(row)
+        buttons.append([InlineKeyboardButton(label, callback_data=f"del_confirm_{row[0]}")])
+    buttons.append([InlineKeyboardButton("❌ إلغاء", callback_data="del_cancel")])
+
+    await update.message.reply_text(
+        f"🗑️ <b>اختر الجولة التي تريد حذفها:</b>"
+        f"<i>(آخر 5 جولات حقيقية — اضغط للحذف مع تأكيد)</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
 
 # ==================== /download: تصدير احترافي شامل ====================
 def _safe(v, fmt=None) -> str:
