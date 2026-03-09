@@ -3171,6 +3171,52 @@ async def cmd_reset_laws(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
 
+# ════════════════════════════════════════════════════════════════════
+# 🗑️ /delete: حذف آخر جولة تم إدخالها
+# ════════════════════════════════════════════════════════════════════
+async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """حذف آخر جولة (أحدث صف) من جدول history."""
+    msg = await update.message.reply_text("🗑️ جارٍ حذف آخر جولة...")
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                # جلب بيانات آخر جولة قبل الحذف
+                cur.execute("""
+                    SELECT id, b_num, suit, rank, winner, prediction, created_at
+                    FROM history
+                    ORDER BY id DESC
+                    LIMIT 1
+                """)
+                row = cur.fetchone()
+                if not row:
+                    await msg.edit_text("⚠️ لا توجد جولات لحذفها.")
+                    return
+
+                last_id      = row[0]
+                last_b_num   = row[1] or "—"
+                last_suit    = row[2] or "—"
+                last_rank    = row[3] or "—"
+                last_winner  = row[4] or "—"
+                last_pred    = row[5] or "—"
+                last_time    = row[6].strftime("%Y-%m-%d %H:%M:%S") if row[6] else "—"
+
+                # حذف الجولة
+                cur.execute("DELETE FROM history WHERE id = %s", (last_id,))
+                conn.commit()
+
+        await msg.edit_text(
+            f"✅ <b>تم حذف آخر جولة</b>\n"
+            f"{'━'*22}\n"
+            f"🆔 ID: <code>{last_id}</code>\n"
+            f"🎴 البطاقة: {last_suit} {last_rank}  |  #{last_b_num}\n"
+            f"🏆 النتيجة: {last_winner}  |  التوقع: {last_pred}\n"
+            f"🕐 الوقت: <code>{last_time}</code>",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"cmd_delete error: {e}", exc_info=True)
+        await msg.edit_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
+
 # ==================== /download: تصدير احترافي شامل ====================
 def _safe(v, fmt=None) -> str:
     """تحويل آمن لأي قيمة — يتجنب NoneType format errors."""
@@ -3363,6 +3409,7 @@ def main():
     app.add_handler(CommandHandler("prune",       cmd_prune))
     app.add_handler(CommandHandler("reset_laws",  cmd_reset_laws))
     app.add_handler(CommandHandler("download",    cmd_download))
+    app.add_handler(CommandHandler("delete",      cmd_delete))
     app.add_handler(CommandHandler("engine",      cmd_engine_status))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
