@@ -3196,7 +3196,7 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cur.execute("DELETE FROM history WHERE id = %s", (rid,))
                 conn.commit()
         # أيضاً أعد تحميل ذاكرة التخزين المؤقت
-        live_cache._cache.clear()
+        live_cache.cache.clear()
         await update.message.reply_text(
             f"🗑️ <b>تم حذف آخر جولة</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
