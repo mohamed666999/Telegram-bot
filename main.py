@@ -2772,21 +2772,26 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         # ── جرّب مع timestamp أولاً ────────────────────
                         # prediction مخزّن كـ INTEGER (0/1/2)، winner كـ TEXT عربي
                         # تحويل آمن: يقبل int أو نص عربي أو None
+                        # winner_int: 0=راعي 1=ثور 2=تعادل
+                        winner_int = int(winner) if isinstance(winner, int) and winner in [0,1,2] else WINNER_MAP.get(winner, 0)
+                        # pred_int: integer أو NULL
                         if isinstance(pred, int) and pred in [0, 1, 2]:
                             pred_int = pred
                         elif isinstance(pred, str):
                             pred_int = WINNER_MAP.get(pred, None)
                         else:
                             pred_int = None
+                        # winner نخزّنه نصاً عربياً (TEXT column)
+                        winner_text = WINNER_NAMES.get(winner_int, WINNER_NAMES.get(winner, "تعادل ⚪"))
                         try:
                             cur.execute("""
                                 INSERT INTO history
                                     (b_num, suit, rank, bonus_last_digit, winner,
                                      prediction, user_id, "timestamp", created_at)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                                VALUES (%s, %s, %s, %s, %s, %s::integer, %s, NOW(), NOW())
                                 RETURNING id
                             """, (b_num, suit, rank, last_digit,
-                                  WINNER_NAMES[winner], pred_int,
+                                  winner_text, pred_int,
                                   query.from_user.id))
                         except Exception:
                             # ── fallback بدون timestamp ─────────────────
@@ -2795,10 +2800,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 INSERT INTO history
                                     (b_num, suit, rank, bonus_last_digit, winner,
                                      prediction, user_id, created_at)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                                VALUES (%s, %s, %s, %s, %s, %s::integer, %s, NOW())
                                 RETURNING id
                             """, (b_num, suit, rank, last_digit,
-                                  WINNER_NAMES[winner], pred_int,
+                                  winner_text, pred_int,
                                   query.from_user.id))
                         row = cur.fetchone()
                         saved_id = row[0] if row else None
@@ -2862,8 +2867,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             ORDER BY id DESC LIMIT 20
                         """)
                         recent_results = cur.fetchall()
-                recent_acc = sum(1 for r in recent_results if r[0] == r[1]) / max(len(recent_results), 1)
-                streak_disp = "".join("✅" if r[0]==r[1] else "❌" for r in recent_results[:10])
+                # winner=TEXT, prediction=INTEGER — قارن بعد تحويل
+                def _is_correct(w, p):
+                    if p is None: return False
+                    expected = {"الراعي 🔴": 0, "الثور 🔵": 1, "تعادل ⚪": 2}
+                    return expected.get(w, -1) == int(p)
+                recent_acc = sum(1 for r in recent_results if _is_correct(r[0], r[1])) / max(len(recent_results), 1)
+                streak_disp = "".join("✅" if _is_correct(r[0], r[1]) else "❌" for r in recent_results[:10])
                 acc_txt = f"\n📈 دقة آخر 20: <b>{recent_acc:.0%}</b>  <code>{streak_disp}</code>"
             except Exception:
                 acc_txt = ""
@@ -2901,7 +2911,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         total = cur.fetchone()[0]
                         cur.execute("SELECT winner, COUNT(*) FROM history WHERE winner IS NOT NULL GROUP BY winner")
                         dist = {r[0]: r[1] for r in cur.fetchall()}
-                        cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL AND prediction IS NOT NULL AND winner::text = prediction::text")
+                        cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL AND prediction IS NOT NULL AND winner = CASE prediction WHEN 0 THEN 'الراعي 🔴' WHEN 1 THEN 'الثور 🔵' WHEN 2 THEN 'تعادل ⚪' END")
                         correct_cnt = cur.fetchone()[0]
                         cur.execute("SELECT COUNT(*) FROM ai_laws WHERE active = TRUE")
                         laws_cnt = cur.fetchone()[0]
@@ -3135,7 +3145,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     SELECT COUNT(*) FROM history
                     WHERE winner IS NOT NULL
                       AND prediction IS NOT NULL
-                      AND winner::text = prediction::text
+                      AND winner = CASE prediction WHEN 0 THEN 'الراعي 🔴' WHEN 1 THEN 'الثور 🔵' WHEN 2 THEN 'تعادل ⚪' END
                 """)
                 correct_cnt = cur.fetchone()[0]
                 cur.execute("SELECT COUNT(*) FROM ai_laws WHERE active = TRUE")
@@ -3567,7 +3577,7 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     cur.execute(f"SELECT COUNT(*) FROM {tbl}")
                     counts[tbl] = cur.fetchone()[0]
 
-                cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL AND prediction IS NOT NULL AND winner::text = prediction::text")
+                cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL AND prediction IS NOT NULL AND winner = CASE prediction WHEN 0 THEN 'الراعي 🔴' WHEN 1 THEN 'الثور 🔵' WHEN 2 THEN 'تعادل ⚪' END")
                 correct = cur.fetchone()[0]
                 played  = max(counts["history"], 1)
                 acc     = round(correct / played * 100, 1)
