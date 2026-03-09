@@ -2772,10 +2772,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 (b_num, suit, rank, bonus_last_digit, winner,
                                  prediction, user_id, timestamp, created_at)
                             VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                            RETURNING id
                         """, (b_num, suit, rank, last_digit,
                               WINNER_NAMES[winner], WINNER_NAMES.get(pred, ''),
                               query.from_user.id))
+                        new_id = cur.fetchone()[0]
                         conn.commit()
+                # ← احفظ id الجولة الجديدة لاستخدامه في /delete
+                context.user_data['last_saved_history_id'] = new_id
             except Exception as e:
                 logger.error(f"Save error: {e}")
 
@@ -3172,37 +3176,54 @@ async def cmd_reset_laws(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
 
 # ════════════════════════════════════════════════════════════════════
-# 🗑️ /delete: حذف آخر جولة تم إدخالها
+# 🗑️ /delete: حذف آخر جولة تم إدخالها (بالـ id المحفوظ فعلياً)
 # ════════════════════════════════════════════════════════════════════
 async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """حذف آخر جولة (أحدث صف) من جدول history."""
+    """
+    يحذف الجولة الأخيرة التي أدخلها هذا المستخدم تحديداً.
+    يعتمد على last_saved_history_id المخزَّن لحظة الحفظ،
+    وإن لم يوجد يلجأ إلى آخر صف لهذا المستخدم.
+    """
     msg = await update.message.reply_text("🗑️ جارٍ حذف آخر جولة...")
     try:
+        target_id = context.user_data.get('last_saved_history_id')
+
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
-                # جلب بيانات آخر جولة قبل الحذف
-                cur.execute("""
-                    SELECT id, b_num, suit, rank, winner, prediction, created_at
-                    FROM history
-                    ORDER BY id DESC
-                    LIMIT 1
-                """)
+
+                if target_id:
+                    # الحالة المثلى: نعرف id الجولة بالضبط
+                    cur.execute("""
+                        SELECT id, b_num, suit, rank, winner, prediction, created_at
+                        FROM history WHERE id = %s
+                    """, (target_id,))
+                else:
+                    # احتياطي: آخر صف لهذا المستخدم
+                    cur.execute("""
+                        SELECT id, b_num, suit, rank, winner, prediction, created_at
+                        FROM history
+                        WHERE user_id = %s
+                        ORDER BY id DESC LIMIT 1
+                    """, (update.effective_user.id,))
+
                 row = cur.fetchone()
                 if not row:
-                    await msg.edit_text("⚠️ لا توجد جولات لحذفها.")
+                    await msg.edit_text("⚠️ لا توجد جولة محفوظة لحذفها.")
                     return
 
-                last_id      = row[0]
-                last_b_num   = row[1] or "—"
-                last_suit    = row[2] or "—"
-                last_rank    = row[3] or "—"
-                last_winner  = row[4] or "—"
-                last_pred    = row[5] or "—"
-                last_time    = row[6].strftime("%Y-%m-%d %H:%M:%S") if row[6] else "—"
+                last_id     = row[0]
+                last_b_num  = row[1] or "—"
+                last_suit   = row[2] or "—"
+                last_rank   = row[3] or "—"
+                last_winner = row[4] or "—"
+                last_pred   = row[5] or "—"
+                last_time   = row[6].strftime("%Y-%m-%d %H:%M:%S") if row[6] else "—"
 
-                # حذف الجولة
                 cur.execute("DELETE FROM history WHERE id = %s", (last_id,))
                 conn.commit()
+
+        # امسح المخزَّن حتى لا يُحذف مرتين
+        context.user_data.pop('last_saved_history_id', None)
 
         await msg.edit_text(
             f"✅ <b>تم حذف آخر جولة</b>\n"
