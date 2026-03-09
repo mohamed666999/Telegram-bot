@@ -2941,12 +2941,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             SELECT id, b_num, suit, rank, bonus_last_digit,
                                    winner, prediction, created_at, user_id
                             FROM history
-                            WHERE (user_id = %s OR %s = %s)
-                              AND prediction IS NOT NULL
+                            WHERE rank IS NOT NULL AND rank != 'NULL'
+                              AND suit IS NOT NULL
                             ORDER BY id DESC LIMIT 5
-                        """, (uid, uid, ADMIN_ID))
+                        """)
                         rows = cur.fetchall()
-                        if not rows and uid == ADMIN_ID:
+                        if not rows:
                             cur.execute("""
                                 SELECT id, b_num, suit, rank, bonus_last_digit,
                                        winner, prediction, created_at, user_id
@@ -3399,40 +3399,24 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── عرض آخر 5 جولات حقيقية ──────────────────────────────────────
+    # ── آخر 5 جولات حقيقية = أعلى ID مع rank+suit موجودَين ──────────
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
-                # أولاً: جولات المستخدم نفسه بـ prediction غير فارغ
                 cur.execute("""
                     SELECT id, b_num, suit, rank, bonus_last_digit,
                            winner, prediction, created_at, user_id
                     FROM history
-                    WHERE user_id = %s
-                      AND prediction IS NOT NULL
+                    WHERE rank IS NOT NULL AND rank != 'NULL'
+                      AND suit IS NOT NULL
                     ORDER BY id DESC LIMIT 5
-                """, (uid,))
+                """)
                 rows = cur.fetchall()
-
-                # إذا لم يجد — جرّب بدون شرط prediction (جولاته القديمة)
                 if not rows:
                     cur.execute("""
                         SELECT id, b_num, suit, rank, bonus_last_digit,
                                winner, prediction, created_at, user_id
-                        FROM history
-                        WHERE user_id = %s
-                        ORDER BY id DESC LIMIT 5
-                    """, (uid,))
-                    rows = cur.fetchall()
-
-                # المشرف: إذا ما زال لا يجد — يعرض آخر 5 جولات كاملة
-                if not rows and uid == ADMIN_ID:
-                    cur.execute("""
-                        SELECT id, b_num, suit, rank, bonus_last_digit,
-                               winner, prediction, created_at, user_id
-                        FROM history
-                        WHERE prediction IS NOT NULL
-                        ORDER BY id DESC LIMIT 5
+                        FROM history ORDER BY id DESC LIMIT 5
                     """)
                     rows = cur.fetchall()
     except Exception as e:
