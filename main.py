@@ -2764,25 +2764,44 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             last_digit = get_last_digit(b_num)
             correct    = (winner == pred)
 
+            saved_id   = None
+            save_error = None
             try:
                 with db_pool.get_conn() as conn:
                     with conn.cursor() as cur:
-                        cur.execute("""
-                            INSERT INTO history
-                                (b_num, suit, rank, bonus_last_digit, winner,
-                                 prediction, user_id, timestamp, created_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
-                            RETURNING id
-                        """, (b_num, suit, rank, last_digit,
-                              WINNER_NAMES[winner], WINNER_NAMES.get(pred, ''),
-                              query.from_user.id))
-                        saved_id = cur.fetchone()[0]
+                        # ── جرّب مع timestamp أولاً ────────────────────
+                        try:
+                            cur.execute("""
+                                INSERT INTO history
+                                    (b_num, suit, rank, bonus_last_digit, winner,
+                                     prediction, user_id, "timestamp", created_at)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                                RETURNING id
+                            """, (b_num, suit, rank, last_digit,
+                                  WINNER_NAMES[winner], WINNER_NAMES.get(pred, ''),
+                                  query.from_user.id))
+                        except Exception:
+                            # ── fallback بدون timestamp ─────────────────
+                            conn.rollback()
+                            cur.execute("""
+                                INSERT INTO history
+                                    (b_num, suit, rank, bonus_last_digit, winner,
+                                     prediction, user_id, created_at)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                                RETURNING id
+                            """, (b_num, suit, rank, last_digit,
+                                  WINNER_NAMES[winner], WINNER_NAMES.get(pred, ''),
+                                  query.from_user.id))
+                        row = cur.fetchone()
+                        saved_id = row[0] if row else None
                         conn.commit()
-                        # ✅ احفظ ID الجولة في context للحذف السريع لاحقاً
                         context.user_data['last_saved_id']   = saved_id
+                        context.user_data['last_saved_bnum'] = b_num
                         context.user_data['last_saved_time'] = __import__('time').time()
+                        logger.info(f"✅ Saved round id={saved_id} b_num={b_num}")
             except Exception as e:
-                logger.error(f"Save error: {e}")
+                save_error = str(e)
+                logger.error(f"Save FAILED: {e}", exc_info=True)
 
             update_pattern_db(suit, rank, last_digit, winner)
 
@@ -2816,6 +2835,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # مدير القوانين الذاتي
             auto_manage_laws()
 
+            # ── إذا فشل الحفظ، أبلغ المستخدم ─────────────────────────
+            if save_error:
+                await safe_edit(query,
+                    f"⚠️ <b>فشل حفظ الجولة!</b>\n<code>{save_error[:300]}</code>\n\n""اضغط /start وأعد إدخال الجولة.",
+                    reply_markup=None)
+                return
+
             verdict = "<b>صحيح! 🎯</b>" if correct else "خاطئ ❌"
             icon    = "✅" if correct else "❌"
             # احسب الدقة الحديثة (آخر 20 جولة)
@@ -2833,15 +2859,29 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 acc_txt = f"\n📈 دقة آخر 20: <b>{recent_acc:.0%}</b>  <code>{streak_disp}</code>"
             except Exception:
                 acc_txt = ""
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎴 جولة جديدة", callback_data="choose_suit"),
-                 InlineKeyboardButton("📊 إحصاءات",    callback_data="stats")],
-            ])
+            # بناء الأزرار — مع زر الحذف إن حُفظت الجولة
+            buttons = [[
+                InlineKeyboardButton("🎴 جولة جديدة", callback_data="choose_suit"),
+                InlineKeyboardButton("📊 إحصاءات",    callback_data="stats"),
+            ]]
+            if saved_id:
+                buttons.append([InlineKeyboardButton(
+                    f"🗑️ حذف هذه الجولة (#{saved_id})",
+                    callback_data=f"del_confirm_{saved_id}"
+                )])
+
+            save_note = ""
+            if save_error:
+                save_note = f"\n⚠️ <b>خطأ في الحفظ:</b> <code>{save_error[:120]}</code>"
+            elif saved_id:
+                save_note = f"\n💾 محفوظة  ID: <code>{saved_id}</code>"
+
             await safe_edit(
                 query,
                 f"{icon} <b>{WINNER_NAMES[winner]}</b>  ({verdict})\n"
-                f"التوقع: {WINNER_NAMES.get(pred, '?')}  |  {suit} {rank}  |  #{b_num}{acc_txt}",
-                reply_markup=kb
+                f"التوقع: {WINNER_NAMES.get(pred, '?')}  |  {suit} {rank}  |  #{b_num}"
+                f"{acc_txt}{save_note}",
+                reply_markup=InlineKeyboardMarkup(buttons)
             )
 
         elif data == "stats":
@@ -3368,20 +3408,32 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                         parse_mode="HTML")
         return
 
-    # ── ابحث عن الجولة بالـ b_num ────────────────────────────────────
+    # ── ابحث عن الجولة بالـ b_num (جرّب أكثر من استراتيجية) ──────────
+    rows = []
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
-                # قد يكون هناك أكثر من جولة بنفس b_num — خذ الأحدث
+                # استراتيجية 1: b_num::text = input
                 cur.execute("""
                     SELECT id, b_num, suit, rank, bonus_last_digit,
                            winner, prediction, created_at, user_id
                     FROM history
                     WHERE b_num::text = %s
-                    ORDER BY id DESC
-                    LIMIT 3
+                    ORDER BY id DESC LIMIT 3
                 """, (bnum_input,))
                 rows = cur.fetchall()
+
+                # استراتيجية 2: b_num LIKE (إن فشل الأول)
+                if not rows:
+                    cur.execute("""
+                        SELECT id, b_num, suit, rank, bonus_last_digit,
+                               winner, prediction, created_at, user_id
+                        FROM history
+                        WHERE b_num::text LIKE %s
+                        ORDER BY id DESC LIMIT 3
+                    """, (f"%{bnum_input}%",))
+                    rows = cur.fetchall()
+
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
         return
@@ -3435,6 +3487,57 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+
+
+# ════════════════════════════════════════════════════════════════════
+# 📋 /last — عرض آخر 5 جولات مُدخَلة فعلياً في قاعدة البيانات
+# ════════════════════════════════════════════════════════════════════
+async def cmd_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعرض آخر 5 جولات محفوظة فعلياً — للتشخيص والحذف السريع."""
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, b_num, suit, rank, bonus_last_digit,
+                           winner, prediction, created_at, user_id
+                    FROM history
+                    ORDER BY id DESC LIMIT 5
+                """)
+                rows = cur.fetchall()
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
+        return
+
+    if not rows:
+        await update.message.reply_text("⚠️ لا توجد جولات في قاعدة البيانات.")
+        return
+
+    lines = ["📋 <b>آخر 5 جولات محفوظة في DB:</b>", "━━━━━━━━━━━━━━━━━━━━━━"]
+    buttons = []
+    for r in rows:
+        rid, bnum, suit, rank, digit, winner_str, pred_str, created_at, uid = r
+        t = created_at.strftime("%m/%d %H:%M") if created_at else "?"
+        w_icon = {"الراعي 🔴":"🔴","الثور 🔵":"🔵","تعادل ⚪":"⚪"}.get(winner_str,"?")
+        p_icon = {"الراعي 🔴":"🔴","الثور 🔵":"🔵","تعادل ⚪":"⚪"}.get(pred_str,"—")
+        match = "✅" if winner_str and pred_str and winner_str==pred_str else ("❌" if pred_str else "—")
+        lines.append(
+            f"<code>#{rid}</code>  B:{bnum}  {suit or'?'}{rank or'?'}  "
+            f"{w_icon} نتيجة | {p_icon} توقع {match}  <i>{t}</i>"
+        )
+        buttons.append([InlineKeyboardButton(
+            f"🗑️ #{rid}  {w_icon} {suit or'?'}{rank or'?'}  {t}",
+            callback_data=f"del_confirm_{rid}"
+        )])
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("<i>اضغط على أي جولة لحذفها</i>")
+    buttons.append([InlineKeyboardButton("❌ إغلاق", callback_data="del_cancel")])
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
 # ==================== /download: تصدير احترافي شامل ====================
 def _safe(v, fmt=None) -> str:
@@ -3627,6 +3730,7 @@ def main():
     app.add_handler(CommandHandler("stats",       cmd_stats))
     app.add_handler(CommandHandler("prune",       cmd_prune))
     app.add_handler(CommandHandler("reset_laws",  cmd_reset_laws))
+    app.add_handler(CommandHandler("last",        cmd_last))
     app.add_handler(CommandHandler("delete",      cmd_delete))
     app.add_handler(CommandHandler("download",    cmd_download))
     app.add_handler(CommandHandler("engine",      cmd_engine_status))
