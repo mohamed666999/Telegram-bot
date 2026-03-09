@@ -2770,6 +2770,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 with db_pool.get_conn() as conn:
                     with conn.cursor() as cur:
                         # ── جرّب مع timestamp أولاً ────────────────────
+                        # prediction مخزّن كـ INTEGER (0/1/2)، winner كـ TEXT عربي
+                        # تحويل آمن: يقبل int أو نص عربي أو None
+                        if isinstance(pred, int) and pred in [0, 1, 2]:
+                            pred_int = pred
+                        elif isinstance(pred, str):
+                            pred_int = WINNER_MAP.get(pred, None)
+                        else:
+                            pred_int = None
                         try:
                             cur.execute("""
                                 INSERT INTO history
@@ -2778,7 +2786,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
                                 RETURNING id
                             """, (b_num, suit, rank, last_digit,
-                                  WINNER_NAMES[winner], WINNER_NAMES.get(pred, ''),
+                                  WINNER_NAMES[winner], pred_int,
                                   query.from_user.id))
                         except Exception:
                             # ── fallback بدون timestamp ─────────────────
@@ -2790,7 +2798,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
                                 RETURNING id
                             """, (b_num, suit, rank, last_digit,
-                                  WINNER_NAMES[winner], WINNER_NAMES.get(pred, ''),
+                                  WINNER_NAMES[winner], pred_int,
                                   query.from_user.id))
                         row = cur.fetchone()
                         saved_id = row[0] if row else None
