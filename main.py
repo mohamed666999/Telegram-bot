@@ -2772,14 +2772,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 (b_num, suit, rank, bonus_last_digit, winner,
                                  prediction, user_id, timestamp, created_at)
                             VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
-                            RETURNING id
                         """, (b_num, suit, rank, last_digit,
                               WINNER_NAMES[winner], WINNER_NAMES.get(pred, ''),
                               query.from_user.id))
-                        new_id = cur.fetchone()[0]
                         conn.commit()
-                # ← احفظ id الجولة الجديدة لاستخدامه في /delete
-                context.user_data['last_saved_history_id'] = new_id
             except Exception as e:
                 logger.error(f"Save error: {e}")
 
@@ -3175,68 +3171,47 @@ async def cmd_reset_laws(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
 
-# ════════════════════════════════════════════════════════════════════
-# 🗑️ /delete: حذف آخر جولة تم إدخالها (بالـ id المحفوظ فعلياً)
-# ════════════════════════════════════════════════════════════════════
+# ==================== /delete: حذف آخر جولة ====================
 async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    يحذف الجولة الأخيرة التي أدخلها هذا المستخدم تحديداً.
-    يعتمد على last_saved_history_id المخزَّن لحظة الحفظ،
-    وإن لم يوجد يلجأ إلى آخر صف لهذا المستخدم.
-    """
-    msg = await update.message.reply_text("🗑️ جارٍ حذف آخر جولة...")
+    """يحذف أحدث جولة مُدخَلة في قاعدة البيانات."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ هذا الأمر للمشرف فقط.")
+        return
     try:
-        target_id = context.user_data.get('last_saved_history_id')
-
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
-
-                if target_id:
-                    # الحالة المثلى: نعرف id الجولة بالضبط
-                    cur.execute("""
-                        SELECT id, b_num, suit, rank, winner, prediction, created_at
-                        FROM history WHERE id = %s
-                    """, (target_id,))
-                else:
-                    # احتياطي: آخر صف لهذا المستخدم
-                    cur.execute("""
-                        SELECT id, b_num, suit, rank, winner, prediction, created_at
-                        FROM history
-                        WHERE user_id = %s
-                        ORDER BY id DESC LIMIT 1
-                    """, (update.effective_user.id,))
-
+                # اجلب آخر جولة أولاً لعرضها
+                cur.execute("""
+                    SELECT id, b_num, suit, rank, bonus_last_digit,
+                           winner, prediction, created_at
+                    FROM history
+                    ORDER BY id DESC LIMIT 1
+                """)
                 row = cur.fetchone()
                 if not row:
-                    await msg.edit_text("⚠️ لا توجد جولة محفوظة لحذفها.")
+                    await update.message.reply_text("⚠️ لا توجد جولات في قاعدة البيانات.")
                     return
-
-                last_id     = row[0]
-                last_b_num  = row[1] or "—"
-                last_suit   = row[2] or "—"
-                last_rank   = row[3] or "—"
-                last_winner = row[4] or "—"
-                last_pred   = row[5] or "—"
-                last_time   = row[6].strftime("%Y-%m-%d %H:%M:%S") if row[6] else "—"
-
-                cur.execute("DELETE FROM history WHERE id = %s", (last_id,))
+                rid, bnum, suit, rank, dig, winner, pred, created = row
+                # احذفها
+                cur.execute("DELETE FROM history WHERE id = %s", (rid,))
                 conn.commit()
-
-        # امسح المخزَّن حتى لا يُحذف مرتين
-        context.user_data.pop('last_saved_history_id', None)
-
-        await msg.edit_text(
-            f"✅ <b>تم حذف آخر جولة</b>\n"
-            f"{'━'*22}\n"
-            f"🆔 ID: <code>{last_id}</code>\n"
-            f"🎴 البطاقة: {last_suit} {last_rank}  |  #{last_b_num}\n"
-            f"🏆 النتيجة: {last_winner}  |  التوقع: {last_pred}\n"
-            f"🕐 الوقت: <code>{last_time}</code>",
+        # أيضاً أعد تحميل ذاكرة التخزين المؤقت
+        live_cache._cache.clear()
+        await update.message.reply_text(
+            f"🗑️ <b>تم حذف آخر جولة</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 ID: <code>{rid}</code>\n"
+            f"🎴 البذلة: {suit}  |  الرتبة: {rank}  |  رقم: {dig}\n"
+            f"🔢 B_NUM: <code>{bnum}</code>\n"
+            f"🏆 النتيجة: {winner}  |  التوقع: {pred or 'NULL'}\n"
+            f"🕐 الوقت: <code>{created}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ تم الحذف بنجاح.",
             parse_mode="HTML"
         )
     except Exception as e:
-        logger.error(f"cmd_delete error: {e}", exc_info=True)
-        await msg.edit_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
+        logger.error(f"delete error: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
 
 # ==================== /download: تصدير احترافي شامل ====================
 def _safe(v, fmt=None) -> str:
@@ -3429,8 +3404,8 @@ def main():
     app.add_handler(CommandHandler("stats",       cmd_stats))
     app.add_handler(CommandHandler("prune",       cmd_prune))
     app.add_handler(CommandHandler("reset_laws",  cmd_reset_laws))
-    app.add_handler(CommandHandler("download",    cmd_download))
     app.add_handler(CommandHandler("delete",      cmd_delete))
+    app.add_handler(CommandHandler("download",    cmd_download))
     app.add_handler(CommandHandler("engine",      cmd_engine_status))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
