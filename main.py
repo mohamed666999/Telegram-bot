@@ -69,7 +69,7 @@ RANK_VALUE = {k: v for k, v in zip(
     [14, 13, 12, 11, 10,  9,  8,  7,  6,  5,  4,  3,  2]
 )}
 WEIGHTS = {
-    'SD': 2.8, 'SUIT': 1.8, 'DIGIT': 1.2, 'RANK': 1.5,
+    'SD': 1.4, 'SUIT': 0.9, 'DIGIT': 0.7, 'RANK': 0.8,
     'MOMENTUM': 1.5, 'AI': 2.5,
     'LAW': 3.5,      # قوانين الذاكرة السياقية — أعلى وزن
 }
@@ -2361,6 +2361,33 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         w = get_adaptive_weight('OVERDUE', 1.5)
         scores[od_pred] += od_conf * w
         logs.append(f"⏳ {od_log} → {WINNER_NAMES[od_pred]} ({od_conf:.0%})")
+
+    # ── B1: مُوازن التنوع (Diversity Balancer) ───────────────────────
+    # يمنع هيمنة لون واحد على التوقعات المتتالية
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT prediction FROM history
+                    WHERE prediction IS NOT NULL AND prediction != ''
+                    ORDER BY id DESC LIMIT 12
+                """)
+                last_preds = [WINNER_MAP.get(r[0], -1) for r in cur.fetchall()]
+                last_preds = [p for p in last_preds if p in [0, 1]]
+        if len(last_preds) >= 8:
+            red_ratio  = last_preds.count(0) / len(last_preds)
+            blue_ratio = last_preds.count(1) / len(last_preds)
+            # إذا تجاوز لون واحد 75% من آخر 8+ توقعات → دفعة للون الآخر
+            if red_ratio >= 0.75:
+                boost = (red_ratio - 0.5) * 3.0
+                scores[1] += boost
+                logs.append(f"⚖️ موازن: آخر {len(last_preds)} توقعات {last_preds.count(0)}🔴/{last_preds.count(1)}🔵 → دفعة 🔵 +{boost:.2f}")
+            elif blue_ratio >= 0.75:
+                boost = (blue_ratio - 0.5) * 3.0
+                scores[0] += boost
+                logs.append(f"⚖️ موازن: آخر {len(last_preds)} توقعات {last_preds.count(0)}🔴/{last_preds.count(1)}🔵 → دفعة 🔴 +{boost:.2f}")
+    except Exception:
+        pass
 
     # ── M4: مضخّم الإجماع ────────────────────────────────────────────
     active_signal_count = sum(1 for x in [
