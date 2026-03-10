@@ -542,23 +542,84 @@ def _score_pattern(raw: Dict) -> Dict:
             "log": f"[{int(r)}🔴:{int(b)}🔵:{int(t)}⚪]", "tie_ratio": tie_ratio}
 
 def get_pattern(pattern_id: str) -> Dict:
+    """
+    يجلب إحصاءات النمط من آخر 120 جولة فقط (rolling window)
+    مع decay factor يُضعف الأنماط القديمة تدريجياً.
+    """
     cached = live_cache.get(pattern_id)
     if cached:
         return cached
+
+    # استخرج نوع النمط والقيمة من pattern_id
+    # مثال: SUIT_♣️ | DIGIT_2 | RANK_J | SD_♣️_2
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT red_count, blue_count, tie_count FROM pattern_stats WHERE pattern_id = %s",
-                    (pattern_id,)
-                )
-                row = cur.fetchone()
-                if row:
-                    result = _score_pattern({"r": row[0], "b": row[1], "t": row[2]})
-                    live_cache.set(pattern_id, result)
-                    return result
-    except Exception as e:
-        logger.warning(f"DB pattern fetch ({pattern_id}): {e}")
+
+                # حدد عمود الفلترة بناءً على نوع النمط
+                if pattern_id.startswith("SD_"):
+                    parts = pattern_id[3:].rsplit("_", 1)
+                    suit_val, digit_val = parts[0], parts[1]
+                    cur.execute("""
+                        SELECT winner FROM history
+                        WHERE winner IS NOT NULL AND suit = %s AND bonus_last_digit = %s
+                        ORDER BY id DESC LIMIT 120
+                    """, (suit_val, int(digit_val)))
+                elif pattern_id.startswith("SUIT_"):
+                    suit_val = pattern_id[5:]
+                    cur.execute("""
+                        SELECT winner FROM history
+                        WHERE winner IS NOT NULL AND suit = %s
+                        ORDER BY id DESC LIMIT 120
+                    """, (suit_val,))
+                elif pattern_id.startswith("DIGIT_"):
+                    digit_val = pattern_id[6:]
+                    cur.execute("""
+                        SELECT winner FROM history
+                        WHERE winner IS NOT NULL AND bonus_last_digit = %s
+                        ORDER BY id DESC LIMIT 120
+                    """, (int(digit_val),))
+                elif pattern_id.startswith("RANK_"):
+                    rank_val = pattern_id[5:]
+                    cur.execute("""
+                        SELECT winner FROM history
+                        WHERE winner IS NOT NULL AND rank = %s
+                        ORDER BY id DESC LIMIT 120
+                    """, (rank_val,))
+                else:
+                    cur.execute(
+                        "SELECT red_count, blue_count, tie_count FROM pattern_stats WHERE pattern_id = %s",
+                        (pattern_id,)
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        result = _score_pattern({"r": row[0], "b": row[1], "t": row[2]})
+                        live_cache.set(pattern_id, result)
+                        return result
+                    raise ValueError("fallback")
+
+                rows = cur.fetchall()
+                if len(rows) < 10:
+                    raise ValueError("not enough")
+
+                # Decay: الأحدث وزنه أعلى — exp(-age/60)
+                r_w = b_w = t_w = 0.0
+                for i, row in enumerate(rows):
+                    age    = i          # 0 = الأحدث
+                    weight = math.exp(-age / 60.0)
+                    w_val  = WINNER_MAP.get(row[0], 2)
+                    if w_val == 0:   r_w += weight
+                    elif w_val == 1: b_w += weight
+                    else:            t_w += weight
+
+                result = _score_pattern({"r": r_w, "b": b_w, "t": t_w})
+                live_cache.set(pattern_id, result)
+                return result
+
+    except Exception:
+        pass
+
+    # fallback: EMBEDDED_PATTERNS
     raw = EMBEDDED_PATTERNS.get(pattern_id)
     if raw:
         result = _score_pattern(raw)
@@ -2363,7 +2424,7 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         logs.append(f"⏳ {od_log} → {WINNER_NAMES[od_pred]} ({od_conf:.0%})")
 
     # ── B1: مُوازن التنوع (Diversity Balancer) ───────────────────────
-    # يمنع هيمنة لون واحد على التوقعات المتتالية
+    # يمنع هيمنة لون واحد على التوقعات المتتالية — دفعة خفيفة فقط
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
@@ -2377,15 +2438,15 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         if len(last_preds) >= 8:
             red_ratio  = last_preds.count(0) / len(last_preds)
             blue_ratio = last_preds.count(1) / len(last_preds)
-            # إذا تجاوز لون واحد 75% من آخر 8+ توقعات → دفعة للون الآخر
+            # دفعة خفيفة فقط (max 0.6) لا تُجبر لوناً بل تُعدّل الميزان
             if red_ratio >= 0.75:
-                boost = (red_ratio - 0.5) * 3.0
+                boost = min(0.6, (red_ratio - 0.5) * 1.2)
                 scores[1] += boost
-                logs.append(f"⚖️ موازن: آخر {len(last_preds)} توقعات {last_preds.count(0)}🔴/{last_preds.count(1)}🔵 → دفعة 🔵 +{boost:.2f}")
+                logs.append(f"⚖️ موازن: {last_preds.count(0)}🔴/{last_preds.count(1)}🔵 → دفعة 🔵 +{boost:.2f}")
             elif blue_ratio >= 0.75:
-                boost = (blue_ratio - 0.5) * 3.0
+                boost = min(0.6, (blue_ratio - 0.5) * 1.2)
                 scores[0] += boost
-                logs.append(f"⚖️ موازن: آخر {len(last_preds)} توقعات {last_preds.count(0)}🔴/{last_preds.count(1)}🔵 → دفعة 🔴 +{boost:.2f}")
+                logs.append(f"⚖️ موازن: {last_preds.count(0)}🔴/{last_preds.count(1)}🔵 → دفعة 🔴 +{boost:.2f}")
     except Exception:
         pass
 
