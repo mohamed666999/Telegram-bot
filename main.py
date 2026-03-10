@@ -79,12 +79,16 @@ WEIGHTS = {
 DATA_LAWS: List[Dict] = [
     # Gap micro (100-500) → RED (bias=0.20, n=122)
     {"id": -1, "law_type": "data_gap_micro", "conditions": {"b_gap_gte": 100, "b_gap_lt": 500},
-     "prediction": 0, "confidence": 62, "accuracy": 60.0, "times_used": 122,
+     "prediction": 0, "confidence": 55, "accuracy": 55.0, "times_used": 122,
      "description": "فجوة 100-500 → الراعي 🔴 (تحليل حقيقي)", "active": True},
     # Gap nano (0-100) → BLUE (bias=0.20, n=35)
     {"id": -2, "law_type": "data_gap_nano", "conditions": {"b_gap_lt": 100},
-     "prediction": 1, "confidence": 60, "accuracy": 60.0, "times_used": 35,
+     "prediction": 1, "confidence": 55, "accuracy": 55.0, "times_used": 35,
      "description": "فجوة 0-100 → الثور 🔵 (تحليل حقيقي)", "active": True},
+    # Gap large (500+) → BLUE (balance)
+    {"id": -9, "law_type": "data_gap_large", "conditions": {"b_gap_gte": 500},
+     "prediction": 1, "confidence": 54, "accuracy": 54.0, "times_used": 80,
+     "description": "فجوة 500+ → الثور 🔵 (موازنة)", "active": True},
     # After 4+ RED streak → BLUE (bias=0.29, n=34)
     {"id": -3, "law_type": "data_after_4x_red", "conditions": {"streak": {"length": 4, "value": 0}},
      "prediction": 1, "confidence": 64, "accuracy": 64.0, "times_used": 34,
@@ -2207,6 +2211,13 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         suit, rank, last_digit, recent_history,
         b_num=clean_b, b_gap=b_gap, gap_sec=gap_sec, round_index=round_index
     )
+    # ── تقييد تأثير القوانين حتى لا تطغى على الإشارات الأخرى ──────────
+    _law_total = law_scores[0] + law_scores[1]
+    _law_cap   = 4.0   # حد أقصى للمجموع الكلي لأوزان القوانين
+    if _law_total > _law_cap:
+        _scale = _law_cap / _law_total
+        law_scores[0] *= _scale
+        law_scores[1] *= _scale
     for k in [0, 1]:
         scores[k] += law_scores[k]
     logs.extend(law_logs)
