@@ -17,6 +17,7 @@ import logging
 import math
 import asyncio
 import time
+import random
 from typing import Tuple, Dict, Optional, List, Any
 from contextlib import contextmanager
 from datetime import datetime
@@ -2525,6 +2526,7 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     # ── الحساب النهائي ──────────────────────────────────────────────
     total_score = scores[0] + scores[1]
     if total_score == 0:
+        # حتى الاحتياطي لا يعطي أحمر دائماً
         padded   = clean_b.zfill(3)
         math_res = ((sum(int(d) for d in padded[-3:]) * RANK_VALUE.get(rank.upper(), 1)) + last_digit) % 2
         logs.append("🧮 تحليل رياضي احتياطي")
@@ -2534,20 +2536,26 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     p0 = scores[0] / total_score
     p1 = scores[1] / total_score
     entropy = -(p0 * math.log2(p0 + 1e-9) + p1 * math.log2(p1 + 1e-9))
+    delta = abs(scores[0] - scores[1])
 
     # ── Entropy Control Engine ──────────────────────────────────────
-    # يمنع هيمنة لون واحد: إذا كانت النسبة < 1.35 → احكم بالانتروبيا
-    import random as _random
+    # 3 مناطق واضحة — لا >= تُجبر الأحمر عند التعادل
     if scores[0] > scores[1] * 1.35:
-        final = 0   # أحمر بوضوح
+        final = 0                          # 🔴 أحمر بفارق واضح
     elif scores[1] > scores[0] * 1.35:
-        final = 1   # أزرق بوضوح
+        final = 1                          # 🔵 أزرق بفارق واضح
+    elif delta < 0.4:
+        final = random.choice([0, 1])      # 🎲 منطقة رمادية → عشوائي
+    elif scores[0] > scores[1]:
+        final = 0
     else:
-        # المنطقة الرمادية: دع الفارق الدقيق يحسم
-        final = 0 if scores[0] >= scores[1] else 1
+        final = 1
 
-    # سجّل النسب للمراقبة
-    logs.append(f"📊 نسب النهائية: 🔴{p0:.0%} vs 🔵{p1:.0%} | Δ={abs(scores[0]-scores[1]):.2f}")
+    # سجّل النسب والسكور للمراقبة
+    logs.append(
+        f"📊 🔴{scores[0]:.2f} vs 🔵{scores[1]:.2f} "
+        f"| نسبة {p0:.0%}/{p1:.0%} | Δ={delta:.2f}"
+    )
 
     # ضبط الثقة بناءً على دقة حالية + إجماع
     base_conf   = 55 + 40 * (1 - entropy)
