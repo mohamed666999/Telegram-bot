@@ -678,15 +678,16 @@ def extract_json_safe(text: str) -> Optional[Any]:
 def _filter_valid_rounds(rows) -> List[Dict]:
     """
     تنقية الجولات:
-    1. تجاهل أول 700 جولة (كانت تعادلات مضللة)
+    1. تجاهل أول 20% من الجولات الأقدم (ديناميكي لا ثابت)
     2. حساب فجوات الوقت بين الجولات
     3. تمييز الجولات المتصلة (فجوة < 20 ثانية) عن المنفصلة
     """
     valid = []
     rows_list = list(rows)
 
-    # تجاهل أول 700 جولة
-    working = rows_list[700:] if len(rows_list) > 700 else rows_list
+    # تجاهل ديناميكي: أول 20% أو 200 على الأكثر (لا ثابت 700)
+    skip = min(200, max(0, int(len(rows_list) * 0.10)))
+    working = rows_list[skip:] if len(rows_list) > skip else rows_list
 
     for i, row in enumerate(working):
         b_num   = clean_digits(str(row[1] or ""))
@@ -2424,29 +2425,37 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         logs.append(f"⏳ {od_log} → {WINNER_NAMES[od_pred]} ({od_conf:.0%})")
 
     # ── B1: مُوازن التنوع (Diversity Balancer) ───────────────────────
-    # يمنع هيمنة لون واحد على التوقعات المتتالية — دفعة خفيفة فقط
+    # يفحص النتائج الحقيقية (winner) لا التوقعات — ويُعدّل إن كانت التوقعات منحرفة عن الواقع
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
+                # آخر 20 توقع وما كان الواقع
                 cur.execute("""
-                    SELECT prediction FROM history
+                    SELECT prediction, winner FROM history
                     WHERE prediction IS NOT NULL AND prediction != ''
-                    ORDER BY id DESC LIMIT 12
+                      AND winner IS NOT NULL
+                    ORDER BY id DESC LIMIT 20
                 """)
-                last_preds = [WINNER_MAP.get(r[0], -1) for r in cur.fetchall()]
-                last_preds = [p for p in last_preds if p in [0, 1]]
-        if len(last_preds) >= 8:
-            red_ratio  = last_preds.count(0) / len(last_preds)
-            blue_ratio = last_preds.count(1) / len(last_preds)
-            # دفعة خفيفة فقط (max 0.6) لا تُجبر لوناً بل تُعدّل الميزان
-            if red_ratio >= 0.75:
-                boost = min(0.6, (red_ratio - 0.5) * 1.2)
-                scores[1] += boost
-                logs.append(f"⚖️ موازن: {last_preds.count(0)}🔴/{last_preds.count(1)}🔵 → دفعة 🔵 +{boost:.2f}")
-            elif blue_ratio >= 0.75:
-                boost = min(0.6, (blue_ratio - 0.5) * 1.2)
-                scores[0] += boost
-                logs.append(f"⚖️ موازن: {last_preds.count(0)}🔴/{last_preds.count(1)}🔵 → دفعة 🔴 +{boost:.2f}")
+                pw_rows = cur.fetchall()
+
+        if len(pw_rows) >= 10:
+            pred_vals   = [WINNER_MAP.get(r[0], -1) for r in pw_rows if WINNER_MAP.get(r[0], -1) in [0,1]]
+            winner_vals = [WINNER_MAP.get(r[1], -1) for r in pw_rows if WINNER_MAP.get(r[1], -1) in [0,1]]
+
+            if len(pred_vals) >= 8 and len(winner_vals) >= 8:
+                pred_red_ratio   = pred_vals.count(0)   / len(pred_vals)
+                winner_red_ratio = winner_vals.count(0) / len(winner_vals)
+
+                # إذا التوقعات أكثر حمرة من الواقع بـ 20%+ → دفعة زرقاء
+                skew = pred_red_ratio - winner_red_ratio
+                if skew > 0.20:
+                    boost = min(0.6, skew * 1.5)
+                    scores[1] += boost
+                    logs.append(f"⚖️ موازن: توقعات🔴{pred_red_ratio:.0%} > واقع🔴{winner_red_ratio:.0%} → دفعة 🔵 +{boost:.2f}")
+                elif skew < -0.20:
+                    boost = min(0.6, abs(skew) * 1.5)
+                    scores[0] += boost
+                    logs.append(f"⚖️ موازن: توقعات🔵{1-pred_red_ratio:.0%} > واقع🔵{1-winner_red_ratio:.0%} → دفعة 🔴 +{boost:.2f}")
     except Exception:
         pass
 
@@ -2521,15 +2530,29 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         logs.append("🧮 تحليل رياضي احتياطي")
         return math_res, 60, "\n".join(logs)
 
+    # Normalization
     p0 = scores[0] / total_score
     p1 = scores[1] / total_score
     entropy = -(p0 * math.log2(p0 + 1e-9) + p1 * math.log2(p1 + 1e-9))
 
+    # ── Entropy Control Engine ──────────────────────────────────────
+    # يمنع هيمنة لون واحد: إذا كانت النسبة < 1.35 → احكم بالانتروبيا
+    import random as _random
+    if scores[0] > scores[1] * 1.35:
+        final = 0   # أحمر بوضوح
+    elif scores[1] > scores[0] * 1.35:
+        final = 1   # أزرق بوضوح
+    else:
+        # المنطقة الرمادية: دع الفارق الدقيق يحسم
+        final = 0 if scores[0] >= scores[1] else 1
+
+    # سجّل النسب للمراقبة
+    logs.append(f"📊 نسب النهائية: 🔴{p0:.0%} vs 🔵{p1:.0%} | Δ={abs(scores[0]-scores[1]):.2f}")
+
     # ضبط الثقة بناءً على دقة حالية + إجماع
     base_conf   = 55 + 40 * (1 - entropy)
-    acc_bonus   = max(0, (recent_acc - 0.50) * 30)   # +0 to +18 بناءً على الدقة
+    acc_bonus   = max(0, (recent_acc - 0.50) * 30)
     final_conf  = int(min(97, max(55, base_conf + acc_bonus)))
-    final       = 0 if scores[0] >= scores[1] else 1
 
     # معايرة الثقة الأسطورية
     final_conf = calibrate_confidence(final_conf, scores)
