@@ -3542,6 +3542,67 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+# ==================== /last: آخر جولة مسجّلة ====================
+async def cmd_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعرض تفاصيل آخر جولة مسجّلة في قاعدة البيانات."""
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, b_num, suit, rank, bonus_last_digit,
+                           winner, prediction, created_at
+                    FROM history
+                    WHERE rank IS NOT NULL AND rank NOT IN ('NULL','')
+                      AND suit IS NOT NULL
+                    ORDER BY id DESC LIMIT 1
+                """)
+                row = cur.fetchone()
+                if not row:
+                    cur.execute("""
+                        SELECT id, b_num, suit, rank, bonus_last_digit,
+                               winner, prediction, created_at
+                        FROM history ORDER BY id DESC LIMIT 1
+                    """)
+                    row = cur.fetchone()
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
+        return
+
+    if not row:
+        await update.message.reply_text("⚠️ لا توجد جولات مسجّلة.")
+        return
+
+    rid, bnum, suit, rank, digit, winner_str, pred_str, created_at = row
+    t    = created_at.strftime("%Y-%m-%d %H:%M:%S") if created_at else "?"
+    icon = {"الراعي 🔴": "🔴", "الثور 🔵": "🔵", "تعادل ⚪": "⚪"}.get(winner_str or "", "?")
+
+    if isinstance(pred_str, int):
+        pred_display = WINNER_NAMES.get(pred_str, str(pred_str))
+    else:
+        pred_display = pred_str or "NULL"
+
+    correct = ""
+    if pred_str is not None and winner_str:
+        pred_int = WINNER_MAP.get(pred_str, pred_str) if isinstance(pred_str, str) else pred_str
+        win_int  = WINNER_MAP.get(winner_str, -1)
+        correct  = " ✅" if pred_int == win_int else " ❌"
+
+    await update.message.reply_text(
+        f"🕐 <b>آخر جولة مسجّلة</b>"
+        f"{'━'*22}"
+        f"🆔 ID: <code>{rid}</code>  |  🕐 {t}"
+        f"🔑 B_NUM: <code>{bnum}</code>"
+        f"🃏 {suit or '?'} {rank or '?'}  |  🔢 آخر رقم: <b>{digit}</b>"
+        f"🏆 النتيجة: <b>{winner_str} {icon}</b>"
+        f"🎯 التوقع: {pred_display}{correct}"
+        f"{'━'*22}",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🗑️ حذف هذه الجولة", callback_data=f"del_confirm_{rid}"),
+            InlineKeyboardButton("🎴 جولة جديدة",      callback_data="choose_suit"),
+        ]])
+    )
+
 # ==================== /download: تصدير احترافي شامل ====================
 def _safe(v, fmt=None) -> str:
     """تحويل آمن لأي قيمة — يتجنب NoneType format errors."""
