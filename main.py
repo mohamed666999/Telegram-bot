@@ -42,10 +42,10 @@ TOKEN        = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 ADMIN_ID     = 6033203084
 
-AI_BASE_URL  = "https://integrate.api.nvidia.com/v1"
-AI_API_KEY   = "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"
-AI_MODEL     = "mistralai/devstral-2-123b-instruct-2512"
-AI_TIMEOUT   = 3.0
+AI_BASE_URL   = "https://integrate.api.nvidia.com/v1"
+AI_API_KEY    = "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"
+AI_MODEL      = "deepseek-ai/deepseek-v3.2"
+AI_TIMEOUT    = 5.0
 LEARN_TIMEOUT = 300  # 5 دقائق للتعلم العميق
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -891,7 +891,7 @@ async def force_learn_engine(status_callback) -> Dict:
 
     await status_callback(
         f"✅ <b>المرحلة 2/5</b> — {len(rounds)} جولة صالحة ({conn_cnt} متصلة)\n\n"
-        f"🤖 <b>المرحلة 3/5</b> — Devstral يحلل الأنماط الرياضية...\n"
+        f"🤖 <b>المرحلة 3/5</b> — DeepSeek يحلل الأنماط الرياضية...\n"
         f"<i>لا مهلة زمنية — انتظر حتى الاكتمال</i>"
     )
 
@@ -973,24 +973,36 @@ likely_prediction = التوقع المقترح (0=راعي، 1=ثور)
 """
 
     try:
-        response = await asyncio.wait_for(
+        # DeepSeek-V3.2 مع streaming + reasoning_content
+        raw_text = ""
+        stream = await asyncio.wait_for(
             ai_client.chat.completions.create(
                 model=AI_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.25,
+                temperature=0.6,
+                top_p=0.95,
                 max_tokens=8192,
-                seed=42,
+                extra_body={"chat_template_kwargs": {"thinking": True}},
+                stream=True,
             ),
             timeout=LEARN_TIMEOUT
         )
-        raw_text = response.choices[0].message.content
+        async for chunk in stream:
+            if not getattr(chunk, "choices", None):
+                continue
+            delta = chunk.choices[0].delta
+            # تجاهل reasoning_content — نريد فقط المحتوى النهائي (JSON)
+            if getattr(delta, "reasoning_content", None):
+                continue
+            if delta.content:
+                raw_text += delta.content
     except asyncio.TimeoutError:
         return {"error": "انتهت المهلة الزمنية"}
     except Exception as e:
         return {"error": f"خطأ في AI: {e}"}
 
     await status_callback(
-        "✅ <b>المرحلة 3/5</b> — Devstral أكمل التحليل\n\n"
+        "✅ <b>المرحلة 3/5</b> — DeepSeek أكمل التحليل\n\n"
         "💾 <b>المرحلة 4/5</b> — حفظ القوانين في قاعدة البيانات..."
     )
 
@@ -1804,12 +1816,22 @@ async def _ai_fetch(recent_history: List[int]) -> Tuple[Optional[int], float, st
     stream = await ai_client.chat.completions.create(
         model=AI_MODEL,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.15, max_tokens=150, seed=42, stream=True
+        temperature=0.6,
+        top_p=0.95,
+        max_tokens=512,
+        extra_body={"chat_template_kwargs": {"thinking": True}},
+        stream=True
     )
     full = ""
     async for chunk in stream:
-        if chunk.choices and chunk.choices[0].delta.content:
-            full += chunk.choices[0].delta.content
+        if not getattr(chunk, "choices", None):
+            continue
+        delta = chunk.choices[0].delta
+        # تجاهل reasoning — نريد JSON فقط
+        if getattr(delta, "reasoning_content", None):
+            continue
+        if delta.content:
+            full += delta.content
         if "}" in full:
             break
     data = extract_json_safe(full)
@@ -2237,13 +2259,13 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         ai_pred, ai_conf, ai_log = await asyncio.wait_for(ai_task, timeout=0.8)
         if ai_pred in [0, 1]:
             scores[ai_pred] += (ai_conf / 100) * WEIGHTS['AI']
-            logs.append(f"🤖 Devstral: {WINNER_NAMES[ai_pred]} — {ai_log}")
+            logs.append(f"🤖 DeepSeek: {WINNER_NAMES[ai_pred]} — {ai_log}")
         else:
-            logs.append(f"⚠️ Devstral: {ai_log}")
+            logs.append(f"⚠️ DeepSeek: {ai_log}")
     except asyncio.TimeoutError:
-        logs.append("⚠️ Devstral: لم يكتمل في الوقت المحدد")
+        logs.append("⚠️ DeepSeek: لم يكتمل في الوقت المحدد")
     except Exception:
-        logs.append("⚠️ Devstral: خطأ")
+        logs.append("⚠️ DeepSeek: خطأ")
 
     # ── T1: كاشف الزخم الحقيقي ─────────────────────────────────────
     streak_pred, streak_conf = detect_real_streak(recent_history)
