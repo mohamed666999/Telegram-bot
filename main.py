@@ -15,6 +15,7 @@ import re
 import json
 import logging
 import math
+import html
 import random
 import asyncio
 import time
@@ -2492,7 +2493,9 @@ def format_prediction(pred: int, conf: int, reason: str,
 
     # فرز سطور التحليل — أخفِ السطر المخفي
     analysis_lines = [
-        l for l in reason.split("\n")
+        l if any(t in l for t in ["<b>","</b>","<i>","</i>","<code>","</code>"])
+        else html.escape(l)
+        for l in reason.split("\n")
         if l.strip() and not l.startswith("__signals__")
     ]
     # تمييز: الأولوية لسطور تتفق مع التوقع النهائي
@@ -2694,7 +2697,7 @@ async def cmd_laws(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += (
             f"\n<b>#{law['id']}</b> [{law['law_type']}] → {pred_name}\n"
             f"  دقة: {law['accuracy']:.0f}% | استخدام: {law['times_used']}\n"
-            f"  <i>{law['description'][:70]}</i>\n"
+            f"  <i>{html.escape(str(law['description'] or ''))[:70]}</i>\n"
         )
     if len(laws) > 15:
         text += f"\n<i>... و{len(laws)-15} قانون إضافي</i>"
@@ -3316,7 +3319,7 @@ async def cmd_prune(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ <b>تنظيف اكتمل</b>"
             f"━━━━━━━━━━━━━━━━━━━━━━"
             f"💤 لم تُستخدم قط:   <b>{dead_by_usage}</b>"
-            f"📉 دقة ضعيفة (<30%): <b>{dead_by_acc}</b>"
+            f"📉 دقة ضعيفة (&lt;30%): <b>{dead_by_acc}</b>"
             f"♻️ مكررة:            <b>{dead_dupes}</b>"
             f"━━━━━━━━━━━━━━━━━━━━━━"
             f"⚖️ القوانين الباقية: <b>{remaining}</b>",
