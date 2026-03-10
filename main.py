@@ -15,9 +15,9 @@ import re
 import json
 import logging
 import math
+import random
 import asyncio
 import time
-import random
 from typing import Tuple, Dict, Optional, List, Any
 from contextlib import contextmanager
 from datetime import datetime
@@ -70,7 +70,7 @@ RANK_VALUE = {k: v for k, v in zip(
     [14, 13, 12, 11, 10,  9,  8,  7,  6,  5,  4,  3,  2]
 )}
 WEIGHTS = {
-    'SD': 1.4, 'SUIT': 0.9, 'DIGIT': 0.7, 'RANK': 0.8,
+    'SD': 2.8, 'SUIT': 1.8, 'DIGIT': 1.2, 'RANK': 1.5,
     'MOMENTUM': 1.5, 'AI': 2.5,
     'LAW': 3.5,      # قوانين الذاكرة السياقية — أعلى وزن
 }
@@ -80,16 +80,12 @@ WEIGHTS = {
 DATA_LAWS: List[Dict] = [
     # Gap micro (100-500) → RED (bias=0.20, n=122)
     {"id": -1, "law_type": "data_gap_micro", "conditions": {"b_gap_gte": 100, "b_gap_lt": 500},
-     "prediction": 0, "confidence": 55, "accuracy": 55.0, "times_used": 122,
+     "prediction": 0, "confidence": 62, "accuracy": 60.0, "times_used": 122,
      "description": "فجوة 100-500 → الراعي 🔴 (تحليل حقيقي)", "active": True},
     # Gap nano (0-100) → BLUE (bias=0.20, n=35)
     {"id": -2, "law_type": "data_gap_nano", "conditions": {"b_gap_lt": 100},
-     "prediction": 1, "confidence": 55, "accuracy": 55.0, "times_used": 35,
+     "prediction": 1, "confidence": 60, "accuracy": 60.0, "times_used": 35,
      "description": "فجوة 0-100 → الثور 🔵 (تحليل حقيقي)", "active": True},
-    # Gap large (500+) → BLUE (balance)
-    {"id": -9, "law_type": "data_gap_large", "conditions": {"b_gap_gte": 500},
-     "prediction": 1, "confidence": 54, "accuracy": 54.0, "times_used": 80,
-     "description": "فجوة 500+ → الثور 🔵 (موازنة)", "active": True},
     # After 4+ RED streak → BLUE (bias=0.29, n=34)
     {"id": -3, "law_type": "data_after_4x_red", "conditions": {"streak": {"length": 4, "value": 0}},
      "prediction": 1, "confidence": 64, "accuracy": 64.0, "times_used": 34,
@@ -543,84 +539,23 @@ def _score_pattern(raw: Dict) -> Dict:
             "log": f"[{int(r)}🔴:{int(b)}🔵:{int(t)}⚪]", "tie_ratio": tie_ratio}
 
 def get_pattern(pattern_id: str) -> Dict:
-    """
-    يجلب إحصاءات النمط من آخر 120 جولة فقط (rolling window)
-    مع decay factor يُضعف الأنماط القديمة تدريجياً.
-    """
     cached = live_cache.get(pattern_id)
     if cached:
         return cached
-
-    # استخرج نوع النمط والقيمة من pattern_id
-    # مثال: SUIT_♣️ | DIGIT_2 | RANK_J | SD_♣️_2
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
-
-                # حدد عمود الفلترة بناءً على نوع النمط
-                if pattern_id.startswith("SD_"):
-                    parts = pattern_id[3:].rsplit("_", 1)
-                    suit_val, digit_val = parts[0], parts[1]
-                    cur.execute("""
-                        SELECT winner FROM history
-                        WHERE winner IS NOT NULL AND suit = %s AND bonus_last_digit = %s
-                        ORDER BY id DESC LIMIT 120
-                    """, (suit_val, int(digit_val)))
-                elif pattern_id.startswith("SUIT_"):
-                    suit_val = pattern_id[5:]
-                    cur.execute("""
-                        SELECT winner FROM history
-                        WHERE winner IS NOT NULL AND suit = %s
-                        ORDER BY id DESC LIMIT 120
-                    """, (suit_val,))
-                elif pattern_id.startswith("DIGIT_"):
-                    digit_val = pattern_id[6:]
-                    cur.execute("""
-                        SELECT winner FROM history
-                        WHERE winner IS NOT NULL AND bonus_last_digit = %s
-                        ORDER BY id DESC LIMIT 120
-                    """, (int(digit_val),))
-                elif pattern_id.startswith("RANK_"):
-                    rank_val = pattern_id[5:]
-                    cur.execute("""
-                        SELECT winner FROM history
-                        WHERE winner IS NOT NULL AND rank = %s
-                        ORDER BY id DESC LIMIT 120
-                    """, (rank_val,))
-                else:
-                    cur.execute(
-                        "SELECT red_count, blue_count, tie_count FROM pattern_stats WHERE pattern_id = %s",
-                        (pattern_id,)
-                    )
-                    row = cur.fetchone()
-                    if row:
-                        result = _score_pattern({"r": row[0], "b": row[1], "t": row[2]})
-                        live_cache.set(pattern_id, result)
-                        return result
-                    raise ValueError("fallback")
-
-                rows = cur.fetchall()
-                if len(rows) < 10:
-                    raise ValueError("not enough")
-
-                # Decay: الأحدث وزنه أعلى — exp(-age/60)
-                r_w = b_w = t_w = 0.0
-                for i, row in enumerate(rows):
-                    age    = i          # 0 = الأحدث
-                    weight = math.exp(-age / 60.0)
-                    w_val  = WINNER_MAP.get(row[0], 2)
-                    if w_val == 0:   r_w += weight
-                    elif w_val == 1: b_w += weight
-                    else:            t_w += weight
-
-                result = _score_pattern({"r": r_w, "b": b_w, "t": t_w})
-                live_cache.set(pattern_id, result)
-                return result
-
-    except Exception:
-        pass
-
-    # fallback: EMBEDDED_PATTERNS
+                cur.execute(
+                    "SELECT red_count, blue_count, tie_count FROM pattern_stats WHERE pattern_id = %s",
+                    (pattern_id,)
+                )
+                row = cur.fetchone()
+                if row:
+                    result = _score_pattern({"r": row[0], "b": row[1], "t": row[2]})
+                    live_cache.set(pattern_id, result)
+                    return result
+    except Exception as e:
+        logger.warning(f"DB pattern fetch ({pattern_id}): {e}")
     raw = EMBEDDED_PATTERNS.get(pattern_id)
     if raw:
         result = _score_pattern(raw)
@@ -679,16 +614,15 @@ def extract_json_safe(text: str) -> Optional[Any]:
 def _filter_valid_rounds(rows) -> List[Dict]:
     """
     تنقية الجولات:
-    1. تجاهل أول 20% من الجولات الأقدم (ديناميكي لا ثابت)
+    1. تجاهل أول 700 جولة (كانت تعادلات مضللة)
     2. حساب فجوات الوقت بين الجولات
     3. تمييز الجولات المتصلة (فجوة < 20 ثانية) عن المنفصلة
     """
     valid = []
     rows_list = list(rows)
 
-    # تجاهل ديناميكي: أول 20% أو 200 على الأكثر (لا ثابت 700)
-    skip = min(200, max(0, int(len(rows_list) * 0.10)))
-    working = rows_list[skip:] if len(rows_list) > skip else rows_list
+    # تجاهل أول 700 جولة
+    working = rows_list[700:] if len(rows_list) > 700 else rows_list
 
     for i, row in enumerate(working):
         b_num   = clean_digits(str(row[1] or ""))
@@ -1755,7 +1689,7 @@ def check_anti_mode() -> Tuple[bool, float]:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT winner, prediction FROM history
-                    WHERE winner IS NOT NULL AND prediction IS NOT NULL AND prediction != ''
+                    WHERE winner IS NOT NULL AND prediction IS NOT NULL
                     ORDER BY id DESC LIMIT 15
                 """)
                 rows = cur.fetchall()
@@ -2274,13 +2208,6 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         suit, rank, last_digit, recent_history,
         b_num=clean_b, b_gap=b_gap, gap_sec=gap_sec, round_index=round_index
     )
-    # ── تقييد تأثير القوانين حتى لا تطغى على الإشارات الأخرى ──────────
-    _law_total = law_scores[0] + law_scores[1]
-    _law_cap   = 4.0   # حد أقصى للمجموع الكلي لأوزان القوانين
-    if _law_total > _law_cap:
-        _scale = _law_cap / _law_total
-        law_scores[0] *= _scale
-        law_scores[1] *= _scale
     for k in [0, 1]:
         scores[k] += law_scores[k]
     logs.extend(law_logs)
@@ -2425,41 +2352,6 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         scores[od_pred] += od_conf * w
         logs.append(f"⏳ {od_log} → {WINNER_NAMES[od_pred]} ({od_conf:.0%})")
 
-    # ── B1: مُوازن التنوع (Diversity Balancer) ───────────────────────
-    # يفحص النتائج الحقيقية (winner) لا التوقعات — ويُعدّل إن كانت التوقعات منحرفة عن الواقع
-    try:
-        with db_pool.get_conn() as conn:
-            with conn.cursor() as cur:
-                # آخر 20 توقع وما كان الواقع
-                cur.execute("""
-                    SELECT prediction, winner FROM history
-                    WHERE prediction IS NOT NULL AND prediction != ''
-                      AND winner IS NOT NULL
-                    ORDER BY id DESC LIMIT 20
-                """)
-                pw_rows = cur.fetchall()
-
-        if len(pw_rows) >= 10:
-            pred_vals   = [WINNER_MAP.get(r[0], -1) for r in pw_rows if WINNER_MAP.get(r[0], -1) in [0,1]]
-            winner_vals = [WINNER_MAP.get(r[1], -1) for r in pw_rows if WINNER_MAP.get(r[1], -1) in [0,1]]
-
-            if len(pred_vals) >= 8 and len(winner_vals) >= 8:
-                pred_red_ratio   = pred_vals.count(0)   / len(pred_vals)
-                winner_red_ratio = winner_vals.count(0) / len(winner_vals)
-
-                # إذا التوقعات أكثر حمرة من الواقع بـ 20%+ → دفعة زرقاء
-                skew = pred_red_ratio - winner_red_ratio
-                if skew > 0.20:
-                    boost = min(0.6, skew * 1.5)
-                    scores[1] += boost
-                    logs.append(f"⚖️ موازن: توقعات🔴{pred_red_ratio:.0%} > واقع🔴{winner_red_ratio:.0%} → دفعة 🔵 +{boost:.2f}")
-                elif skew < -0.20:
-                    boost = min(0.6, abs(skew) * 1.5)
-                    scores[0] += boost
-                    logs.append(f"⚖️ موازن: توقعات🔵{1-pred_red_ratio:.0%} > واقع🔵{1-winner_red_ratio:.0%} → دفعة 🔴 +{boost:.2f}")
-    except Exception:
-        pass
-
     # ── M4: مضخّم الإجماع ────────────────────────────────────────────
     active_signal_count = sum(1 for x in [
         mom_pred, streak_pred, mem_pred, sb_pred,
@@ -2474,7 +2366,7 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
 
     # ── X4: Anti-Mode (الانعكاس التلقائي) ────────────────────────────
     anti_active, recent_acc = check_anti_mode()
-    pre_anti_final = 0 if scores[0] >= scores[1] else 1
+    pre_anti_final = 0 if scores[0] > scores[1] else 1
     if anti_active:
         scores[0], scores[1] = scores[1], scores[0]   # اعكس كل الأوزان
         logs.append(f"🔃 وضع الانعكاس (دقة حالية {recent_acc:.0%}) — تم عكس التوقع")
@@ -2526,41 +2418,33 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     # ── الحساب النهائي ──────────────────────────────────────────────
     total_score = scores[0] + scores[1]
     if total_score == 0:
-        # حتى الاحتياطي لا يعطي أحمر دائماً
         padded   = clean_b.zfill(3)
         math_res = ((sum(int(d) for d in padded[-3:]) * RANK_VALUE.get(rank.upper(), 1)) + last_digit) % 2
         logs.append("🧮 تحليل رياضي احتياطي")
         return math_res, 60, "\n".join(logs)
 
-    # Normalization
     p0 = scores[0] / total_score
     p1 = scores[1] / total_score
     entropy = -(p0 * math.log2(p0 + 1e-9) + p1 * math.log2(p1 + 1e-9))
-    delta = abs(scores[0] - scores[1])
-
-    # ── Entropy Control Engine ──────────────────────────────────────
-    # 3 مناطق واضحة — لا >= تُجبر الأحمر عند التعادل
-    if scores[0] > scores[1] * 1.35:
-        final = 0                          # 🔴 أحمر بفارق واضح
-    elif scores[1] > scores[0] * 1.35:
-        final = 1                          # 🔵 أزرق بفارق واضح
-    elif delta < 0.4:
-        final = random.choice([0, 1])      # 🎲 منطقة رمادية → عشوائي
-    elif scores[0] > scores[1]:
-        final = 0
-    else:
-        final = 1
-
-    # سجّل النسب والسكور للمراقبة
-    logs.append(
-        f"📊 🔴{scores[0]:.2f} vs 🔵{scores[1]:.2f} "
-        f"| نسبة {p0:.0%}/{p1:.0%} | Δ={delta:.2f}"
-    )
 
     # ضبط الثقة بناءً على دقة حالية + إجماع
     base_conf   = 55 + 40 * (1 - entropy)
-    acc_bonus   = max(0, (recent_acc - 0.50) * 30)
+    acc_bonus   = max(0, (recent_acc - 0.50) * 30)   # +0 to +18 بناءً على الدقة
     final_conf  = int(min(97, max(55, base_conf + acc_bonus)))
+    # ── قرار نهائي بـ 3 مناطق (بدون تحيّز للأحمر) ─────────────────
+    delta = abs(scores[0] - scores[1])
+    if   scores[0] > scores[1] * 1.35:          final = 0   # أحمر بفارق واضح
+    elif scores[1] > scores[0] * 1.35:          final = 1   # أزرق بفارق واضح
+    elif delta < 0.4 * max(scores[0], scores[1], 0.01):
+        final = random.choice([0, 1])                        # منطقة رمادية → عشوائي
+    elif scores[0] > scores[1]:                  final = 0
+    else:                                        final = 1
+
+    # أضف معلومات التوازن للـ logs
+    if total_score > 0:
+        r_pct = scores[0] / total_score * 100
+        b_pct = scores[1] / total_score * 100
+        logs.append(f"📊 🔴{scores[0]:.2f} vs 🔵{scores[1]:.2f} | {r_pct:.0f}%/{b_pct:.0f}% | Δ={delta:.2f}")
 
     # معايرة الثقة الأسطورية
     final_conf = calibrate_confidence(final_conf, scores)
@@ -2894,24 +2778,57 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             last_digit = get_last_digit(b_num)
             correct    = (winner == pred)
 
+            saved_id   = None
+            save_error = None
             try:
                 with db_pool.get_conn() as conn:
                     with conn.cursor() as cur:
-                        cur.execute("""
-                            INSERT INTO history
-                                (b_num, suit, rank, bonus_last_digit, winner,
-                                 prediction, user_id, timestamp, created_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
-                            RETURNING id
-                        """, (b_num, suit, rank, last_digit,
-                              WINNER_NAMES[winner], WINNER_NAMES.get(pred, ''),
-                              query.from_user.id))
-                        new_id = cur.fetchone()[0]
+                        # ── جرّب مع timestamp أولاً ────────────────────
+                        # prediction مخزّن كـ INTEGER (0/1/2)، winner كـ TEXT عربي
+                        # تحويل آمن: يقبل int أو نص عربي أو None
+                        # winner_int: 0=راعي 1=ثور 2=تعادل
+                        winner_int = int(winner) if isinstance(winner, int) and winner in [0,1,2] else WINNER_MAP.get(winner, 0)
+                        # pred_int: integer أو NULL
+                        if isinstance(pred, int) and pred in [0, 1, 2]:
+                            pred_int = pred
+                        elif isinstance(pred, str):
+                            pred_int = WINNER_MAP.get(pred, None)
+                        else:
+                            pred_int = None
+                        # winner نخزّنه نصاً عربياً (TEXT column)
+                        winner_text = WINNER_NAMES.get(winner_int, WINNER_NAMES.get(winner, "تعادل ⚪"))
+                        try:
+                            cur.execute("""
+                                INSERT INTO history
+                                    (b_num, suit, rank, bonus_last_digit, winner,
+                                     prediction, user_id, "timestamp", created_at)
+                                VALUES (%s, %s, %s, %s, %s, %s::integer, %s, NOW(), NOW())
+                                RETURNING id
+                            """, (b_num, suit, rank, last_digit,
+                                  winner_text, pred_int,
+                                  query.from_user.id))
+                        except Exception:
+                            # ── fallback بدون timestamp ─────────────────
+                            conn.rollback()
+                            cur.execute("""
+                                INSERT INTO history
+                                    (b_num, suit, rank, bonus_last_digit, winner,
+                                     prediction, user_id, created_at)
+                                VALUES (%s, %s, %s, %s, %s, %s::integer, %s, NOW())
+                                RETURNING id
+                            """, (b_num, suit, rank, last_digit,
+                                  winner_text, pred_int,
+                                  query.from_user.id))
+                        row = cur.fetchone()
+                        saved_id = row[0] if row else None
                         conn.commit()
-                # ← احفظ id الجولة الجديدة لاستخدامه في /delete
-                context.user_data['last_saved_history_id'] = new_id
+                        context.user_data['last_saved_id']   = saved_id
+                        context.user_data['last_saved_bnum'] = b_num
+                        context.user_data['last_saved_time'] = __import__('time').time()
+                        logger.info(f"✅ Saved round id={saved_id} b_num={b_num}")
             except Exception as e:
-                logger.error(f"Save error: {e}")
+                save_error = str(e)
+                logger.error(f"Save FAILED: {e}", exc_info=True)
 
             update_pattern_db(suit, rank, last_digit, winner)
 
@@ -2945,6 +2862,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # مدير القوانين الذاتي
             auto_manage_laws()
 
+            # ── إذا فشل الحفظ، أبلغ المستخدم ─────────────────────────
+            if save_error:
+                await safe_edit(query,
+                    f"⚠️ <b>فشل حفظ الجولة!</b>\n<code>{save_error[:300]}</code>\n\n""اضغط /start وأعد إدخال الجولة.",
+                    reply_markup=None)
+                return
+
             verdict = "<b>صحيح! 🎯</b>" if correct else "خاطئ ❌"
             icon    = "✅" if correct else "❌"
             # احسب الدقة الحديثة (آخر 20 جولة)
@@ -2953,24 +2877,43 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     with conn.cursor() as cur:
                         cur.execute("""
                             SELECT winner, prediction FROM history
-                            WHERE winner IS NOT NULL AND prediction IS NOT NULL AND prediction != ''
+                            WHERE winner IS NOT NULL AND prediction IS NOT NULL
                             ORDER BY id DESC LIMIT 20
                         """)
                         recent_results = cur.fetchall()
-                recent_acc = sum(1 for r in recent_results if r[0] == r[1]) / max(len(recent_results), 1)
-                streak_disp = "".join("✅" if r[0]==r[1] else "❌" for r in recent_results[:10])
+                # winner=TEXT, prediction=INTEGER — قارن بعد تحويل
+                def _is_correct(w, p):
+                    if p is None: return False
+                    expected = {"الراعي 🔴": 0, "الثور 🔵": 1, "تعادل ⚪": 2}
+                    return expected.get(w, -1) == int(p)
+                recent_acc = sum(1 for r in recent_results if _is_correct(r[0], r[1])) / max(len(recent_results), 1)
+                streak_disp = "".join("✅" if _is_correct(r[0], r[1]) else "❌" for r in recent_results[:10])
                 acc_txt = f"\n📈 دقة آخر 20: <b>{recent_acc:.0%}</b>  <code>{streak_disp}</code>"
             except Exception:
                 acc_txt = ""
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎴 جولة جديدة", callback_data="choose_suit"),
-                 InlineKeyboardButton("📊 إحصاءات",    callback_data="stats")],
-            ])
+            # بناء الأزرار — مع زر الحذف إن حُفظت الجولة
+            buttons = [[
+                InlineKeyboardButton("🎴 جولة جديدة", callback_data="choose_suit"),
+                InlineKeyboardButton("📊 إحصاءات",    callback_data="stats"),
+            ]]
+            if saved_id:
+                buttons.append([InlineKeyboardButton(
+                    f"🗑️ حذف هذه الجولة (#{saved_id})",
+                    callback_data=f"del_confirm_{saved_id}"
+                )])
+
+            save_note = ""
+            if save_error:
+                save_note = f"\n⚠️ <b>خطأ في الحفظ:</b> <code>{save_error[:120]}</code>"
+            elif saved_id:
+                save_note = f"\n💾 محفوظة  ID: <code>{saved_id}</code>"
+
             await safe_edit(
                 query,
                 f"{icon} <b>{WINNER_NAMES[winner]}</b>  ({verdict})\n"
-                f"التوقع: {WINNER_NAMES.get(pred, '?')}  |  {suit} {rank}  |  #{b_num}{acc_txt}",
-                reply_markup=kb
+                f"التوقع: {WINNER_NAMES.get(pred, '?')}  |  {suit} {rank}  |  #{b_num}"
+                f"{acc_txt}{save_note}",
+                reply_markup=InlineKeyboardMarkup(buttons)
             )
 
         elif data == "stats":
@@ -2982,7 +2925,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         total = cur.fetchone()[0]
                         cur.execute("SELECT winner, COUNT(*) FROM history WHERE winner IS NOT NULL GROUP BY winner")
                         dist = {r[0]: r[1] for r in cur.fetchall()}
-                        cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL AND prediction IS NOT NULL AND prediction != '' AND winner::text = prediction::text")
+                        cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL AND prediction IS NOT NULL AND winner = CASE prediction WHEN 0 THEN 'الراعي 🔴' WHEN 1 THEN 'الثور 🔵' WHEN 2 THEN 'تعادل ⚪' END")
                         correct_cnt = cur.fetchone()[0]
                         cur.execute("SELECT COUNT(*) FROM ai_laws WHERE active = TRUE")
                         laws_cnt = cur.fetchone()[0]
@@ -3031,6 +2974,114 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("🔄 تحديث", callback_data="stats"),
             ]])
             await safe_edit(query, msg, reply_markup=kb)
+
+        elif data.startswith("del_confirm_"):
+            target_id = int(data.split("_")[2])
+            await safe_edit(query, f"⏳ جارٍ الحذف...", reply_markup=None)
+            # جلب بيانات الجولة أولاً
+            try:
+                with db_pool.get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT id, b_num, suit, rank, bonus_last_digit,
+                                   winner, prediction, created_at, user_id
+                            FROM history WHERE id = %s
+                        """, (target_id,))
+                        r = cur.fetchone()
+            except Exception as e:
+                await safe_edit(query, f"❌ خطأ: <code>{e}</code>")
+                return
+            if not r:
+                await safe_edit(query, f"⚠️ لا توجد جولة بالـ ID {target_id}.")
+                return
+            _, bnum, suit, rank, digit, winner_str, pred_str, created_at, _ = r
+            t = created_at.strftime("%Y-%m-%d %H:%M") if created_at else "?"
+            res = await _exec_delete(target_id, bnum, suit, rank, digit,
+                                     winner_str, pred_str, created_at)
+            if res["error"]:
+                await safe_edit(query, f"❌ خطأ: <code>{res['error']}</code>")
+            else:
+                await safe_edit(
+                    query,
+                    f"✅ <b>تم الحذف — كأن الجولة لم تحدث</b>"
+                    f"{'━'*22}"
+                    f"🔑 B_NUM: <code>{bnum}</code>  |  🕐 {t}"
+                    f"🃏 {suit or '?'} {rank or '?'}  |  🏆 {winner_str}"
+                    f"{'━'*22}"
+                    f"♻️ rollback: <b>{res['rolled_back']}</b> نمط  |  ⚖️ <b>{res['laws_adjusted']}</b> قانون",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🗑️ حذف أخرى", callback_data="del_list"),
+                        InlineKeyboardButton("🎴 جولة جديدة", callback_data="choose_suit"),
+                    ]])
+                )
+
+        elif data == "del_list":
+            # عرض قائمة الجولات الأخيرة
+            try:
+                with db_pool.get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT id, b_num, suit, rank, bonus_last_digit,
+                                   winner, prediction, created_at, user_id
+                            FROM history
+                            WHERE rank IS NOT NULL AND rank != 'NULL'
+                              AND suit IS NOT NULL
+                            ORDER BY created_at DESC, id DESC LIMIT 8
+                        """)
+                        rows = cur.fetchall()
+            except Exception as e:
+                await safe_edit(query, f"❌ خطأ: <code>{e}</code>")
+                return
+            if not rows:
+                await safe_edit(query, "⚠️ لا توجد جولات.")
+                return
+            buttons = [[InlineKeyboardButton(_delete_row_label(r),
+                        callback_data=f"del_confirm_{r[0]}")] for r in rows]
+            buttons.append([InlineKeyboardButton("❌ إلغاء", callback_data="del_cancel")])
+            await safe_edit(query, "🗑️ <b>اختر الجولة للحذف:</b>",
+                            reply_markup=InlineKeyboardMarkup(buttons))
+
+        elif data == "del_cancel":
+            await safe_edit(query, "✅ تم الإلغاء.")
+
+        elif data == "del_more":
+            # إعادة عرض قائمة الجولات للحذف
+            uid = query.from_user.id
+            try:
+                with db_pool.get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT id, b_num, suit, rank, bonus_last_digit,
+                                   winner, prediction, created_at, user_id
+                            FROM history
+                            WHERE rank IS NOT NULL AND rank != 'NULL'
+                              AND suit IS NOT NULL
+                            ORDER BY id DESC LIMIT 5
+                        """)
+                        rows = cur.fetchall()
+                        if not rows:
+                            cur.execute("""
+                                SELECT id, b_num, suit, rank, bonus_last_digit,
+                                       winner, prediction, created_at, user_id
+                                FROM history ORDER BY id DESC LIMIT 5
+                            """)
+                            rows = cur.fetchall()
+            except Exception as e:
+                await safe_edit(query, f"❌ خطأ: <code>{e}</code>")
+                return
+            if not rows:
+                await safe_edit(query, "⚠️ لا توجد جولات إضافية.")
+                return
+            buttons = []
+            for row in rows:
+                label = _delete_row_label(row)
+                buttons.append([InlineKeyboardButton(label, callback_data=f"del_confirm_{row[0]}")])
+            buttons.append([InlineKeyboardButton("❌ إلغاء", callback_data="del_cancel")])
+            await safe_edit(
+                query,
+                f"🗑️ <b>اختر الجولة التي تريد حذفها:</b>",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
 
         else:
             logger.warning(f"Unhandled callback: {data!r}")
@@ -3107,8 +3158,8 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cur.execute("""
                     SELECT COUNT(*) FROM history
                     WHERE winner IS NOT NULL
-                      AND prediction IS NOT NULL AND prediction != ''
-                      AND winner::text = prediction::text
+                      AND prediction IS NOT NULL
+                      AND winner = CASE prediction WHEN 0 THEN 'الراعي 🔴' WHEN 1 THEN 'الثور 🔵' WHEN 2 THEN 'تعادل ⚪' END
                 """)
                 correct_cnt = cur.fetchone()[0]
                 cur.execute("SELECT COUNT(*) FROM ai_laws WHERE active = TRUE")
@@ -3305,68 +3356,191 @@ async def cmd_reset_laws(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
 
+
 # ════════════════════════════════════════════════════════════════════
-# 🗑️ /delete: حذف آخر جولة تم إدخالها (بالـ id المحفوظ فعلياً)
+# 🗑️ /delete — حذف جولة (يعرض آخر 8 دائماً + بحث برقم البونص)
 # ════════════════════════════════════════════════════════════════════
-async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    يحذف الجولة الأخيرة التي أدخلها هذا المستخدم تحديداً.
-    يعتمد على last_saved_history_id المخزَّن لحظة الحفظ،
-    وإن لم يوجد يلجأ إلى آخر صف لهذا المستخدم.
-    """
-    msg = await update.message.reply_text("🗑️ جارٍ حذف آخر جولة...")
+
+def _row_btn_label(row) -> str:
+    rid, bnum, suit, rank, digit, winner_str, pred_str, created_at, _ = row
+    t    = created_at.strftime("%d/%m %H:%M") if created_at else "?"
+    icon = {"الراعي 🔴": "🔴", "الثور 🔵": "🔵", "تعادل ⚪": "⚪"}.get(winner_str or "", "?")
+    ok   = " ✅" if (pred_str and winner_str and pred_str == winner_str) else (
+           " ❌" if pred_str else "")
+    b    = str(bnum or "?")
+    return f"{b} | {suit or '?'}{rank or '?'} {icon}{ok} | {t}"
+
+
+async def _fetch_last_rounds(n: int = 8):
+    """يجلب آخر N جولة حقيقية من DB (rank+suit موجودَين)."""
     try:
-        target_id = context.user_data.get('last_saved_history_id')
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, b_num, suit, rank, bonus_last_digit,
+                           winner, prediction, created_at, user_id
+                    FROM history
+                    WHERE rank IS NOT NULL
+                      AND rank NOT IN ('NULL','')
+                      AND suit IS NOT NULL
+                    ORDER BY id DESC LIMIT %s
+                """, (n,))
+                rows = cur.fetchall()
+                if not rows:
+                    # fallback: أي جولة
+                    cur.execute("""
+                        SELECT id, b_num, suit, rank, bonus_last_digit,
+                               winner, prediction, created_at, user_id
+                        FROM history ORDER BY id DESC LIMIT %s
+                    """, (n,))
+                    rows = cur.fetchall()
+                return rows
+    except Exception as e:
+        logger.error(f"_fetch_last_rounds: {e}")
+        return []
+
+
+async def _exec_delete(rid: int, bnum, suit, rank, digit,
+                       winner_str: str, pred_str, created_at) -> dict:
+    result = {"rolled_back": 0, "laws_adjusted": 0, "error": None}
+    try:
+        winner_int = WINNER_MAP.get(winner_str, 2)
+        digit_int  = int(digit) if digit is not None else 0
 
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
-
-                if target_id:
-                    # الحالة المثلى: نعرف id الجولة بالضبط
-                    cur.execute("""
-                        SELECT id, b_num, suit, rank, winner, prediction, created_at
-                        FROM history WHERE id = %s
-                    """, (target_id,))
-                else:
-                    # احتياطي: آخر صف لهذا المستخدم
-                    cur.execute("""
-                        SELECT id, b_num, suit, rank, winner, prediction, created_at
-                        FROM history
-                        WHERE user_id = %s
-                        ORDER BY id DESC LIMIT 1
-                    """, (update.effective_user.id,))
-
-                row = cur.fetchone()
-                if not row:
-                    await msg.edit_text("⚠️ لا توجد جولة محفوظة لحذفها.")
-                    return
-
-                last_id     = row[0]
-                last_b_num  = row[1] or "—"
-                last_suit   = row[2] or "—"
-                last_rank   = row[3] or "—"
-                last_winner = row[4] or "—"
-                last_pred   = row[5] or "—"
-                last_time   = row[6].strftime("%Y-%m-%d %H:%M:%S") if row[6] else "—"
-
-                cur.execute("DELETE FROM history WHERE id = %s", (last_id,))
+                cur.execute("DELETE FROM history WHERE id = %s", (rid,))
+                col = {0: "red_count", 1: "blue_count", 2: "tie_count"}.get(winner_int)
+                if col and suit and rank:
+                    for pid in [f"SUIT_{suit}", f"DIGIT_{digit_int}",
+                                f"RANK_{rank}", f"SD_{suit}_{digit_int}"]:
+                        cur.execute(f"""
+                            UPDATE pattern_stats
+                            SET {col} = GREATEST(0, {col} - 1)
+                            WHERE pattern_id = %s
+                        """, (pid,))
+                        result["rolled_back"] += cur.rowcount
+                        live_cache.cache.pop(pid, None)
                 conn.commit()
 
-        # امسح المخزَّن حتى لا يُحذف مرتين
-        context.user_data.pop('last_saved_history_id', None)
+        for law in load_laws():
+            if match_law(law, suit or "", str(rank or ""), digit_int, []) >= 0.5:
+                try:
+                    was_ok   = (law["prediction"] == winner_int)
+                    restored = max(0.0, min(100.0,
+                        (law["accuracy"] - 0.10 * (100.0 if was_ok else 0.0)) / 0.90))
+                    with db_pool.get_conn() as c2:
+                        with c2.cursor() as cx:
+                            cx.execute("""UPDATE ai_laws SET accuracy=%s,
+                                times_used=GREATEST(0,times_used-1) WHERE id=%s""",
+                                (restored, law["id"]))
+                            c2.commit()
+                    result["laws_adjusted"] += 1
+                except Exception:
+                    pass
 
-        await msg.edit_text(
-            f"✅ <b>تم حذف آخر جولة</b>\n"
-            f"{'━'*22}\n"
-            f"🆔 ID: <code>{last_id}</code>\n"
-            f"🎴 البطاقة: {last_suit} {last_rank}  |  #{last_b_num}\n"
-            f"🏆 النتيجة: {last_winner}  |  التوقع: {last_pred}\n"
-            f"🕐 الوقت: <code>{last_time}</code>",
-            parse_mode="HTML"
-        )
+        live_cache.cache.clear()
+        global _markov_cache, _full_history_cache, _gravity_cache
+        _markov_cache = None
+        _full_history_cache = []
+        _gravity_cache = (None, 0.0, "")
+        load_laws(force=True)
+
     except Exception as e:
-        logger.error(f"cmd_delete error: {e}", exc_info=True)
-        await msg.edit_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
+        result["error"] = str(e)
+        logger.error(f"_exec_delete: {e}", exc_info=True)
+    return result
+
+
+async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /delete          → يعرض آخر 8 جولات حقيقية كأزرار فورية
+    /delete BNUM     → يبحث عن الجولة بالبونص أولاً، وإن لم يجدها يعرض القائمة
+    """
+    args       = context.args or []
+    bnum_input = clean_digits(args[0]) if args else ""
+
+    # ── إذا أُعطي رقم — ابحث أولاً ──────────────────────────────────
+    found_rows = []
+    if bnum_input:
+        try:
+            with db_pool.get_conn() as conn:
+                with conn.cursor() as cur:
+                    # مطابقة تامة
+                    cur.execute("""
+                        SELECT id, b_num, suit, rank, bonus_last_digit,
+                               winner, prediction, created_at, user_id
+                        FROM history
+                        WHERE TRIM(b_num::text) = %s
+                        ORDER BY id DESC LIMIT 3
+                    """, (bnum_input,))
+                    found_rows = cur.fetchall()
+
+                    # بحث جزئي
+                    if not found_rows:
+                        cur.execute("""
+                            SELECT id, b_num, suit, rank, bonus_last_digit,
+                                   winner, prediction, created_at, user_id
+                            FROM history
+                            WHERE b_num::text LIKE %s
+                            ORDER BY id DESC LIMIT 3
+                        """, (f"%{bnum_input}%",))
+                        found_rows = cur.fetchall()
+        except Exception as e:
+            await update.message.reply_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
+            return
+
+    # ── إن وجد جولة واحدة → تأكيد مباشر ────────────────────────────
+    if len(found_rows) == 1:
+        r = found_rows[0]
+        rid, bnum, suit, rank, digit, winner_str, pred_str, created_at, _ = r
+        t    = created_at.strftime("%Y-%m-%d %H:%M") if created_at else "?"
+        icon = {"الراعي 🔴": "🔴", "الثور 🔵": "🔵", "تعادل ⚪": "⚪"}.get(winner_str or "", "?")
+        await update.message.reply_text(
+            f"🗑️ <b>تأكيد الحذف</b>"
+            f"{'━'*22}"
+            f"🔑 B_NUM: <code>{bnum}</code>"
+            f"🃏 {suit or '?'} {rank or '?'}  |  🔢 آخر رقم: <b>{digit}</b>"
+            f"🏆 {winner_str} {icon}  |  التوقع: {pred_str or 'NULL'}"
+            f"🕐 {t}"
+            f"{'━'*22}"
+            f"هل تريد حذف هذه الجولة؟",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ نعم احذف", callback_data=f"del_confirm_{rid}"),
+                InlineKeyboardButton("❌ إلغاء",    callback_data="del_cancel"),
+            ]])
+        )
+        return
+
+    # ── عرض قائمة (إما نتائج البحث أو آخر 8 جولات) ─────────────────
+    display_rows = found_rows if len(found_rows) > 1 else await _fetch_last_rounds(8)
+
+    if not display_rows:
+        await update.message.reply_text("⚠️ لا توجد جولات مسجّلة في قاعدة البيانات.")
+        return
+
+    header = (
+        f"🔍 نتائج البحث عن <code>{bnum_input}</code> — اختر جولة:"
+        if found_rows else
+        "🗑️ <b>اختر الجولة التي تريد حذفها</b> — آخر 8 جولات مسجّلة"
+    )
+
+    buttons = []
+    for row in display_rows:
+        buttons.append([InlineKeyboardButton(
+            _row_btn_label(row),
+            callback_data=f"del_confirm_{row[0]}"
+        )])
+    buttons.append([InlineKeyboardButton("❌ إلغاء", callback_data="del_cancel")])
+
+    await update.message.reply_text(
+        header,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+
 
 # ==================== /download: تصدير احترافي شامل ====================
 def _safe(v, fmt=None) -> str:
@@ -3417,7 +3591,7 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     cur.execute(f"SELECT COUNT(*) FROM {tbl}")
                     counts[tbl] = cur.fetchone()[0]
 
-                cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL AND prediction IS NOT NULL AND prediction != '' AND winner::text = prediction::text")
+                cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL AND prediction IS NOT NULL AND winner = CASE prediction WHEN 0 THEN 'الراعي 🔴' WHEN 1 THEN 'الثور 🔵' WHEN 2 THEN 'تعادل ⚪' END")
                 correct = cur.fetchone()[0]
                 played  = max(counts["history"], 1)
                 acc     = round(correct / played * 100, 1)
@@ -3559,8 +3733,9 @@ def main():
     app.add_handler(CommandHandler("stats",       cmd_stats))
     app.add_handler(CommandHandler("prune",       cmd_prune))
     app.add_handler(CommandHandler("reset_laws",  cmd_reset_laws))
-    app.add_handler(CommandHandler("download",    cmd_download))
+    app.add_handler(CommandHandler("last",        cmd_last))
     app.add_handler(CommandHandler("delete",      cmd_delete))
+    app.add_handler(CommandHandler("download",    cmd_download))
     app.add_handler(CommandHandler("engine",      cmd_engine_status))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
