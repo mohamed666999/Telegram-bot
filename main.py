@@ -603,6 +603,54 @@ def update_pattern_db(suit: str, rank: str, last_digit: int, winner: int):
 # ==================== 🤖 AI Client ====================
 # AI calls via aiohttp directly (Qwen3.5 NVIDIA REST)
 
+async def _nvidia_chat(messages: list, max_tokens: int = 512,
+                       temperature: float = 0.6, enable_thinking: bool = False,
+                       timeout: int = 60) -> str:
+    """يرسل طلباً إلى NVIDIA Qwen API ويعيد النص النهائي."""
+    headers = {
+        "Authorization": f"Bearer {AI_API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+    }
+    payload = {
+        "model": AI_MODEL,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "top_p": 0.95,
+        "top_k": 20,
+        "stream": True,
+        "chat_template_kwargs": {"enable_thinking": enable_thinking},
+    }
+    result = ""
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=timeout)
+    ) as session:
+        async with session.post(AI_INVOKE_URL, headers=headers, json=payload) as resp:
+            async for raw_line in resp.content:
+                line = raw_line.decode("utf-8").strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data_str)
+                    choices = chunk.get("choices", [])
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta", {})
+                    if delta.get("reasoning_content"):
+                        continue
+                    content = delta.get("content", "")
+                    if content:
+                        result += content
+                except Exception:
+                    continue
+    result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL).strip()
+    return result
+
+
 def extract_json_safe(text: str) -> Optional[Any]:
     """استخراج JSON من ردود Qwen التي قد تحتوي نصاً قبل/بعد الـ JSON."""
     if not text:
