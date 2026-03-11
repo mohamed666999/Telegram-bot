@@ -596,6 +596,9 @@ def extract_json_safe(text: str) -> Optional[Any]:
     if not text:
         return None
 
+    # 0. إزالة <think>...</think> أولاً (DeepSeek reasoning)
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+
     # 1. مباشر
     try:
         return json.loads(text.strip())
@@ -1033,15 +1036,23 @@ likely_prediction = التوقع المقترح (0=راعي، 1=ثور)
             ),
             timeout=LEARN_TIMEOUT
         )
+        reasoning_buf = ""
         async for chunk in stream:
             if not getattr(chunk, "choices", None):
                 continue
             delta = chunk.choices[0].delta
-            # تجاهل reasoning_content — نريد فقط المحتوى النهائي (JSON)
-            if getattr(delta, "reasoning_content", None):
+            # reasoning_content = تفكير داخلي (قد يكون في حقل منفصل)
+            rc = getattr(delta, "reasoning_content", None)
+            if rc:
+                reasoning_buf += rc
                 continue
             if delta.content:
                 raw_text += delta.content
+        # بعض النماذج تُدمج التفكير داخل content كـ <think>...</think>
+        # نُزيله قبل استخراج JSON
+        raw_text = re.sub(r'<think>.*?</think>', '', raw_text, flags=re.DOTALL).strip()
+        logger.info(f"DeepSeek raw_text length={len(raw_text)}, reasoning_len={len(reasoning_buf)}")
+        logger.info(f"raw_text preview: {raw_text[:300]}")
     except asyncio.TimeoutError:
         return {"error": "انتهت المهلة الزمنية"}
     except Exception as e:
@@ -1070,7 +1081,9 @@ likely_prediction = التوقع المقترح (0=راعي، 1=ثور)
             logger.info(f"Recovered {len(recovered)} laws from partial JSON")
             laws_data = recovered
         else:
-            return {"error": f"فشل استخراج JSON من رد AI:\n{raw_text[:500]}"}
+            # أرسل النص الخام للمستخدم للمساعدة في التشخيص
+            preview = raw_text[:400] if raw_text else "فارغ تماماً"
+            return {"error": f"فشل استخراج JSON\nطول الرد: {len(raw_text)} حرف\nأول 400 حرف:\n<code>{html.escape(preview)}</code>"}
 
     saved = 0
     skipped = 0
@@ -1888,13 +1901,16 @@ async def _ai_fetch(recent_history: List[int]) -> Tuple[Optional[int], float, st
         if not getattr(chunk, "choices", None):
             continue
         delta = chunk.choices[0].delta
-        # تجاهل reasoning — نريد JSON فقط
-        if getattr(delta, "reasoning_content", None):
+        rc = getattr(delta, "reasoning_content", None)
+        if rc:
             continue
         if delta.content:
             full += delta.content
-        if "}" in full:
+        # توقف بعد إغلاق أول JSON object
+        if "}" in full and full.count("{") <= full.count("}"):
             break
+    # إزالة <think> إن وُجد داخل content
+    full = re.sub(r'<think>.*?</think>', '', full, flags=re.DOTALL).strip()
     data = extract_json_safe(full)
     if data and isinstance(data, dict):
         return int(data.get("winner", 2)), float(data.get("confidence", 50)), data.get("reason", "")
