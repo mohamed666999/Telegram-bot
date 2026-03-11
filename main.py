@@ -1028,12 +1028,10 @@ likely_prediction = التوقع المقترح (0=راعي، 1=ثور)
         stream = await ai_client.chat.completions.create(
             model=AI_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.6,
+            temperature=0.3,
             top_p=0.95,
-            max_tokens=8192,
-            extra_body={"chat_template_kwargs": {"thinking": True}},
+            max_tokens=4096,
             stream=True,
-            timeout=LEARN_TIMEOUT,
         )
         reasoning_buf = ""
         async for chunk in stream:
@@ -1889,10 +1887,9 @@ async def _ai_fetch(recent_history: List[int]) -> Tuple[Optional[int], float, st
     stream = await ai_client.chat.completions.create(
         model=AI_MODEL,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.6,
+        temperature=0.3,
         top_p=0.95,
-        max_tokens=512,
-        extra_body={"chat_template_kwargs": {"thinking": True}},
+        max_tokens=256,
         stream=True
     )
     full = ""
