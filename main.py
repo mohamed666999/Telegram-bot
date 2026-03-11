@@ -256,9 +256,8 @@ def load_laws(force: bool = False) -> List[Dict]:
                            description, created_at
                     FROM ai_laws
                     WHERE active = TRUE
-                      AND times_used >= 20
                     ORDER BY accuracy DESC, confidence DESC
-                    LIMIT 12
+                    LIMIT 15
                 """)
                 rows = cur.fetchall()
         laws = []
@@ -387,8 +386,11 @@ def apply_laws(suit: str, rank: str, last_digit: int,
         if pred not in [0, 1]:
             continue
 
-        # DATA_LAWS (id سالب) تأخذ وزناً أقل لمنع overfitting
-        law_weight = WEIGHTS['LAW'] * 0.5 if law.get('id', 0) < 0 else WEIGHTS['LAW']
+        # وزن تصاعدي: قانون جديد (USED=0) → 50%، مجرّب (≥20) → 100%
+        # DATA_LAWS (id سالب) تأخذ وزناً أقل دائماً
+        used = law.get("times_used", 0)
+        trust = min(1.0, 0.5 + 0.5 * (used / 20.0))  # 0.5 → 1.0 خلال 20 استخدام
+        law_weight = WEIGHTS['LAW'] * 0.5 if law.get('id', 0) < 0 else WEIGHTS['LAW'] * trust
         weight = (law["confidence"] / 100) * max(0.5, law["accuracy"] / 100) * match
         scores[pred] += weight * law_weight
 
@@ -1121,6 +1123,24 @@ likely_prediction = التوقع المقترح (0=راعي، 1=ثور)
             # أرسل النص الخام للمستخدم للمساعدة في التشخيص
             preview = raw_text[:400] if raw_text else "فارغ تماماً"
             return {"error": f"فشل استخراج JSON\nطول الرد: {len(raw_text)} حرف\nأول 400 حرف:\n<code>{html.escape(preview)}</code>"}
+
+    # تفعيل القوانين ذات الدقة العالية التي عُطِّلت سابقاً
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE ai_laws SET active = TRUE
+                    WHERE active = FALSE
+                      AND accuracy >= 85
+                      AND times_used < 5
+                      AND created_at > NOW() - INTERVAL '24 hours'
+                """)
+                reactivated = cur.rowcount
+                conn.commit()
+                if reactivated:
+                    logger.info(f"Reactivated {reactivated} high-accuracy laws")
+    except Exception:
+        pass
 
     saved = 0
     skipped = 0
@@ -3402,15 +3422,15 @@ async def cmd_prune(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # احذف القوانين التي لم تُستخدم قط بعد 100+ جولة
                 cur.execute("""
                     UPDATE ai_laws SET active = FALSE
-                    WHERE times_used < 20
-                      AND created_at < NOW() - INTERVAL '2 hours'
+                    WHERE times_used = 0
+                      AND created_at < NOW() - INTERVAL '7 days'
                       AND active = TRUE
                 """)
                 dead_by_usage = cur.rowcount
                 # احذف القوانين دقتها < 30% وتمت أكثر من 8 مرات
                 cur.execute("""
                     UPDATE ai_laws SET active = FALSE
-                    WHERE accuracy < 40 AND times_used >= 20 AND active = TRUE
+                    WHERE accuracy < 40 AND times_used >= 50 AND active = TRUE
                 """)
                 dead_by_acc = cur.rowcount
                 # احذف قوانين مكررة (نفس law_type + prediction، احتفظ بالأفضل)
