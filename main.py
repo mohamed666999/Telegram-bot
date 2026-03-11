@@ -592,24 +592,68 @@ def update_pattern_db(suit: str, rank: str, last_digit: int, winner: int):
 ai_client = AsyncOpenAI(api_key=AI_API_KEY, base_url=AI_BASE_URL)
 
 def extract_json_safe(text: str) -> Optional[Any]:
-    # محاولة مباشرة
+    """استخراج JSON من ردود DeepSeek التي قد تحتوي نصاً قبل/بعد الـ JSON."""
+    if not text:
+        return None
+
+    # 1. مباشر
     try:
         return json.loads(text.strip())
     except Exception:
         pass
-    # استخراج أول كائن JSON
-    match = re.search(r'(\{.*\}|\[.*\])', text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except Exception:
-            pass
-    # إزالة code blocks
-    cleaned = re.sub(r'```(?:json)?\n?', '', text).replace('```', '').strip()
+
+    # 2. إزالة code blocks أولاً ثم حاول
+    cleaned = re.sub(r'```(?:json)?\s*', '', text).replace('```', '').strip()
     try:
         return json.loads(cleaned)
     except Exception:
-        return None
+        pass
+
+    # 3. ابحث عن أول مصفوفة JSON كاملة [...] 
+    bracket_start = cleaned.find('[')
+    if bracket_start != -1:
+        depth = 0
+        for i, ch in enumerate(cleaned[bracket_start:], bracket_start):
+            if ch == '[': depth += 1
+            elif ch == ']':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(cleaned[bracket_start:i+1])
+                    except Exception:
+                        break
+
+    # 4. ابحث عن أول كائن JSON كامل {...}
+    brace_start = cleaned.find('{')
+    if brace_start != -1:
+        depth = 0
+        for i, ch in enumerate(cleaned[brace_start:], brace_start):
+            if ch == '{': depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(cleaned[brace_start:i+1])
+                    except Exception:
+                        break
+
+    # 5. regex greedy للمصفوفة
+    for pattern in [r'\[\s*\{.*?\}\s*\]', r'\{[^{}]*\}']:
+        match = re.search(pattern, cleaned, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group())
+            except Exception:
+                pass
+
+    # 6. محاولة إصلاح JSON مكسور — تنظيف trailing commas
+    try:
+        fixed = re.sub(r',\s*([}\]])', r'\1', cleaned)
+        return json.loads(fixed)
+    except Exception:
+        pass
+
+    return None
 
 # ==================== 🧬 /force_learn: التعلم الرياضي العميق ====================
 def _filter_valid_rounds(rows) -> List[Dict]:
@@ -939,14 +983,16 @@ likely_prediction = التوقع المقترح (0=راعي، 1=ثور)
 - "streak": {{"length": N, "value": 0أو1}}
 - "after_big_gap": true (بعد انقطاع > 2000)
 
-أعد JSON فقط — مصفوفة:
+⚠️ مهم جداً: ردّ بـ JSON خالص فقط — لا تكتب أي نص قبل [ أو بعد ]
+المصفوفة يجب أن تبدأ بـ [ مباشرة وتنتهي بـ ]
+
 [
   {{
     "law_type": "اسم_نوع_القانون",
     "conditions": {{ ... }},
-    "prediction": 0أو1,
-    "confidence": 50-97,
-    "description": "شرح رياضي مختصر بالعربية — لماذا هذا القانون يعمل"
+    "prediction": 0,
+    "confidence": 85,
+    "description": "وصف قصير"
   }}
 ]
 
@@ -1009,7 +1055,22 @@ likely_prediction = التوقع المقترح (0=راعي، 1=ثور)
     # ── استخراج وحفظ القوانين ────────────────────────────────────────
     laws_data = extract_json_safe(raw_text)
     if not laws_data or not isinstance(laws_data, list):
-        return {"error": f"فشل استخراج JSON من رد AI:\n{raw_text[:300]}"}
+        logger.error(f"DeepSeek raw response (first 500):\n{raw_text[:500]}")
+        # محاولة أخيرة: قطّع النص وخذ كل ما يبدو JSON
+        parts = re.findall(r'\{[^{}]{20,}\}', raw_text, re.DOTALL)
+        recovered = []
+        for p in parts:
+            try:
+                obj = json.loads(p)
+                if "law_type" in obj and "prediction" in obj:
+                    recovered.append(obj)
+            except Exception:
+                pass
+        if recovered:
+            logger.info(f"Recovered {len(recovered)} laws from partial JSON")
+            laws_data = recovered
+        else:
+            return {"error": f"فشل استخراج JSON من رد AI:\n{raw_text[:500]}"}
 
     saved = 0
     skipped = 0
