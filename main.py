@@ -256,6 +256,8 @@ def load_laws(force: bool = False) -> List[Dict]:
                            description, created_at
                     FROM ai_laws
                     WHERE active = TRUE
+                      AND accuracy >= 55
+                      AND confidence >= 70
                     ORDER BY accuracy DESC, confidence DESC
                     LIMIT 15
                 """)
@@ -1698,7 +1700,7 @@ def auto_manage_laws():
                 # تعطيل القوانين السيئة
                 cur.execute("""
                     UPDATE ai_laws SET active = FALSE
-                    WHERE accuracy < 35 AND times_used > 5 AND active = TRUE
+                    WHERE accuracy < 55 AND times_used >= 30 AND active = TRUE
                 """)
                 disabled = cur.rowcount
 
