@@ -2327,22 +2327,23 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
 
     # ── تاريخ حديث + فجوة b_num الأخيرة ────────────────────────────
     recent_history: List[int] = []
+    all_history:    List[int] = []
     b_gap:   Optional[float] = None
     gap_sec: Optional[float] = None
     round_index: int = 0
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
+                # جلب آخر 40 جولة مع الوقت لتحديد الجلسة الحالية
                 cur.execute("""
                     SELECT winner, b_num, created_at
                     FROM history
                     WHERE winner IS NOT NULL
-                    ORDER BY id DESC LIMIT 20
+                      AND rank IS NOT NULL AND rank NOT IN ('NULL','')
+                    ORDER BY id DESC LIMIT 40
                 """)
                 rows = cur.fetchall()
                 if rows:
-                    recent_history = [WINNER_MAP.get(r[0], 2) for r in rows]
-                    recent_history.reverse()
                     # فجوة رقم البونص مع آخر جولة
                     last_b = clean_digits(str(rows[0][1] or ""))
                     if last_b and clean_b:
@@ -2353,21 +2354,72 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
                     # فجوة زمنية
                     if rows[0][2]:
                         gap_sec = (datetime.now() - rows[0][2]).total_seconds()
+
+                    # ── تحديد الجولات المتسلسلة فقط ──────────────────
+                    # جلسة متصلة: فجوة زمنية بين جولتين متتاليتين < 5 دقائق
+                    SESSION_GAP_SEC = 300   # 5 دقائق
+                    SESSION_BGAP    = 10000 # فرق b_num كبير
+
+                    connected_rows = [rows[0]]  # أحدث جولة دائماً تُضاف
+                    for i in range(1, len(rows)):
+                        t_curr = rows[i-1][2]
+                        t_prev = rows[i][2]
+                        if t_curr and t_prev:
+                            dt = (t_curr - t_prev).total_seconds()
+                            if dt > SESSION_GAP_SEC:
+                                break  # انقطاع في الجلسة — نوقف
+                        # تحقق b_gap بين الجولتين
+                        b_curr = clean_digits(str(rows[i-1][1] or ""))
+                        b_prev = clean_digits(str(rows[i][1] or ""))
+                        if b_curr and b_prev:
+                            try:
+                                bg = abs(int(b_curr) - int(b_prev))
+                                if bg > SESSION_BGAP:
+                                    break
+                            except Exception:
+                                pass
+                        connected_rows.append(rows[i])
+
+                    # recent_history = الجولات المتصلة بالجلسة الحالية (مرتبة تصاعدياً)
+                    connected_rows.reverse()
+                    recent_history = [WINNER_MAP.get(r[0], 2) for r in connected_rows]
+
+                    # للمحركات التي تحتاج تاريخاً أطول نُرفق الكل (تنازلياً)
+                    all_history = [WINNER_MAP.get(r[0], 2) for r in rows]
+                    all_history.reverse()
+
                     # موضع الجولة
                     cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL")
                     round_index = cur.fetchone()[0]
+                else:
+                    all_history = []
+                    connected_rows = []
     except Exception as e:
         logger.warning(f"History fetch: {e}")
 
     # ── تسجيل معلومات الفجوة في السجل ──────────────────────────────
+    # ── تحديد وضع الجلسة (متسلسلة / منفصلة) ────────────────────────
+    # إذا كانت الفجوة > 5 دقائق أو b_gap > 5000 → جلسة جديدة منفصلة
+    is_new_session = False
+    if gap_sec is not None and gap_sec > 300:
+        is_new_session = True
+    elif b_gap is not None and b_gap > 5000:
+        is_new_session = True
+
     if b_gap is not None:
-        gap_label = "🟢 متصلة" if b_gap < 500 else "🔴 منفصلة"
-        logs.append(f"🔗 فجوة b_num: {int(b_gap)} ({gap_label})")
-    if gap_sec is not None:
-        logs.append(f"⏱️ فجوة زمنية: {gap_sec:.0f}ث {'(جولات مفقودة محتملة)' if gap_sec > 20 else ''}")
+        gap_label = "🟢 متسلسلة" if not is_new_session else "🔴 جلسة جديدة"
+        session_len = len(recent_history)
+        logs.append(f"🔗 b_gap={int(b_gap)} | ⏱️ {gap_sec:.0f}ث | {gap_label} | جلسة: {session_len} جولة")
+    elif gap_sec is not None:
+        gap_label = "🟢 متسلسلة" if not is_new_session else "🔴 جلسة جديدة"
+        logs.append(f"⏱️ فجوة زمنية: {gap_sec:.0f}ث ({gap_label})")
+
+    # وزن المحركات التسلسلية بناءً على الجلسة
+    # جلسة جديدة → أنماط السلاسل والماركوف غير موثوقة
+    seq_weight = 0.2 if is_new_session else 1.0
 
     # ── AI متوازٍ ────────────────────────────────────────────────────
-    ai_task = asyncio.create_task(ai_predict(recent_history))
+    ai_task = asyncio.create_task(ai_predict(all_history[-20:] if all_history else recent_history))
 
     # ── 1. القوانين الذكية (الذاكرة السياقية) ──────────────────────
     law_scores, law_logs = apply_laws(
@@ -2412,17 +2464,19 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
 
     # ── T1: كاشف الزخم الحقيقي ─────────────────────────────────────
     streak_pred, streak_conf = detect_real_streak(recent_history)
-    if streak_pred is not None:
+    if streak_pred is not None and not is_new_session:
         w = get_adaptive_weight('STREAK', WEIGHTS['MOMENTUM'])
         scores[streak_pred] += streak_conf * w
         logs.append(f"⚡ كسر سلسلة: {WINNER_NAMES[streak_pred]} ({streak_conf:.0%}) w={w:.1f}")
+    elif streak_pred is not None:
+        logs.append(f"⚡ كسر سلسلة (معطّل — جلسة جديدة)")
 
     # ── T2: الذاكرة القصيرة ──────────────────────────────────────────
     mem_pred, mem_conf = short_memory_bias(recent_history)
     if mem_pred is not None:
-        w = get_adaptive_weight('SHORT_MEM', 1.4)
+        w = get_adaptive_weight('SHORT_MEM', 1.4) * seq_weight
         scores[mem_pred] += mem_conf * w
-        logs.append(f"🧠 ذاكرة قصيرة: {WINNER_NAMES[mem_pred]} ({mem_conf:.0%})")
+        logs.append(f"🧠 ذاكرة قصيرة: {WINNER_NAMES[mem_pred]} ({mem_conf:.0%}) {'⚠️ جديدة' if is_new_session else ''}")
 
     # ── T3: انحياز البذلة الذكي ──────────────────────────────────────
     sb_pred, sb_conf = suit_bias_from_history(suit)
@@ -2432,14 +2486,14 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         logs.append(f"📊 انحياز البذلة: {WINNER_NAMES[sb_pred]} ({sb_conf:.0%})")
 
     # ── M1: ماركوف ───────────────────────────────────────────────────
-    mkv_pred, mkv_conf, mkv_log = markov_predict(recent_history)
+    mkv_pred, mkv_conf, mkv_log = markov_predict(recent_history if len(recent_history) >= 4 else all_history)
     if mkv_pred is not None:
-        w = get_adaptive_weight('MARKOV', 2.2)
+        w = get_adaptive_weight('MARKOV', 2.2) * seq_weight
         scores[mkv_pred] += mkv_conf * w
-        logs.append(f"🔗 {mkv_log} → {WINNER_NAMES[mkv_pred]} ({mkv_conf:.0%}) w={w:.1f}")
+        logs.append(f"🔗 {mkv_log} → {WINNER_NAMES[mkv_pred]} ({mkv_conf:.0%}) w={w:.1f} {'⚠️ جلسة جديدة' if is_new_session else ''}")
 
     # ── M2: كاشف الدورات ─────────────────────────────────────────────
-    cyc_pred, cyc_conf, cyc_log = detect_cycle(recent_history)
+    cyc_pred, cyc_conf, cyc_log = detect_cycle(recent_history if len(recent_history) >= 6 else all_history)
     if cyc_pred is not None:
         w = get_adaptive_weight('CYCLE', 2.0)
         scores[cyc_pred] += cyc_conf * w
@@ -3093,7 +3147,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         total = cur.fetchone()[0]
                         cur.execute("SELECT winner, COUNT(*) FROM history WHERE winner IS NOT NULL GROUP BY winner")
                         dist = {r[0]: r[1] for r in cur.fetchall()}
-                        cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL AND prediction IS NOT NULL AND winner = CASE prediction WHEN 0 THEN 'الراعي 🔴' WHEN 1 THEN 'الثور 🔵' WHEN 2 THEN 'تعادل ⚪' END")
+                        cur.execute("""
+                        SELECT
+                            COUNT(*) FILTER (WHERE winner = CASE prediction WHEN 0 THEN 'الراعي 🔴' WHEN 1 THEN 'الثور 🔵' END),
+                            COUNT(*) FILTER (WHERE prediction IN (0,1) AND winner IN ('الراعي 🔴','الثور 🔵') AND rank IS NOT NULL AND rank NOT IN ('NULL',''))
+                        FROM history WHERE winner IS NOT NULL AND prediction IS NOT NULL
+                    """)
                         correct_cnt = cur.fetchone()[0]
                         cur.execute("SELECT COUNT(*) FROM ai_laws WHERE active = TRUE")
                         laws_cnt = cur.fetchone()[0]
@@ -3109,7 +3168,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 b_cnt  = dist.get("الثور 🔵",  0)
                 t_cnt  = dist.get("تعادل ⚪",  0)
                 played = max(r_cnt + b_cnt + t_cnt, 1)
-                acc    = round(correct_cnt / max(played, 1) * 100, 1)
+                acc    = round(correct_cnt / max(predicted_total, 1) * 100, 1)
                 last_l = last_learn_time.strftime("%Y-%m-%d %H:%M") if last_learn_time else "لم يُجرَ"
                 streak_str = ""
                 for row in last15:
@@ -3323,13 +3382,23 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     WHERE winner IS NOT NULL GROUP BY winner
                 """)
                 dist = {r[0]: r[1] for r in cur.fetchall()}
+                # الدقة الحقيقية: فقط جولات بها توقع + لم تكن تعادل
                 cur.execute("""
-                    SELECT COUNT(*) FROM history
+                    SELECT
+                        COUNT(*) FILTER (WHERE winner = CASE prediction
+                            WHEN 0 THEN 'الراعي 🔴' WHEN 1 THEN 'الثور 🔵' END) AS correct,
+                        COUNT(*) FILTER (WHERE prediction IN (0,1)
+                            AND winner IN ('الراعي 🔴','الثور 🔵')) AS total_predicted
+                    FROM history
                     WHERE winner IS NOT NULL
                       AND prediction IS NOT NULL
-                      AND winner = CASE prediction WHEN 0 THEN 'الراعي 🔴' WHEN 1 THEN 'الثور 🔵' WHEN 2 THEN 'تعادل ⚪' END
+                      AND prediction IN (0, 1)
+                      AND winner IN ('الراعي 🔴', 'الثور 🔵')
+                      AND rank IS NOT NULL AND rank NOT IN ('NULL','')
                 """)
-                correct_cnt = cur.fetchone()[0]
+                acc_row = cur.fetchone()
+                correct_cnt   = acc_row[0] or 0
+                predicted_total = acc_row[1] or 1
                 cur.execute("SELECT COUNT(*) FROM ai_laws WHERE active = TRUE")
                 laws_cnt = cur.fetchone()[0]
                 cur.execute("SELECT COUNT(*) FROM ai_laws WHERE active = FALSE")
@@ -3364,7 +3433,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         b_cnt  = dist.get("الثور 🔵",  0)
         t_cnt  = dist.get("تعادل ⚪",  0)
         played = max(r_cnt + b_cnt + t_cnt, 1)
-        acc    = round(correct_cnt / max(played, 1) * 100, 1)
+        acc    = round(correct_cnt / max(predicted_total, 1) * 100, 1)
         last_l = last_learn_time.strftime("%Y-%m-%d %H:%M") if last_learn_time else "لم يُجرَ"
 
         # سلسلة آخر 20 جولة
@@ -3405,7 +3474,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             f"<b>🧠 HADES — لوحة الإحصاءات الأسطورية</b>\n"
             f"{'━'*24}\n"
-            f"🎮 الجولات: <b>{total}</b>  |  🎯 الدقة: <b>{acc}%</b>  {perf_emoji}\n"
+            f"🎮 الجولات: <b>{total}</b>  |  🎯 الدقة: <b>{acc}%</b> ({correct_cnt}/{predicted_total})  {perf_emoji}\n"
             f"🔴 الراعي: {r_cnt} ({round(r_cnt/played*100,1)}%)  "
             f"🔵 الثور: {b_cnt} ({round(b_cnt/played*100,1)}%)  "
             f"⚪ تعادل: {t_cnt}\n"
@@ -3820,9 +3889,15 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     cur.execute(f"SELECT COUNT(*) FROM {tbl}")
                     counts[tbl] = cur.fetchone()[0]
 
-                cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL AND prediction IS NOT NULL AND winner = CASE prediction WHEN 0 THEN 'الراعي 🔴' WHEN 1 THEN 'الثور 🔵' WHEN 2 THEN 'تعادل ⚪' END")
-                correct = cur.fetchone()[0]
-                played  = max(counts["history"], 1)
+                cur.execute("""
+                        SELECT
+                            COUNT(*) FILTER (WHERE winner = CASE prediction WHEN 0 THEN 'الراعي 🔴' WHEN 1 THEN 'الثور 🔵' END),
+                            COUNT(*) FILTER (WHERE prediction IN (0,1) AND winner IN ('الراعي 🔴','الثور 🔵') AND rank IS NOT NULL AND rank NOT IN ('NULL',''))
+                        FROM history WHERE winner IS NOT NULL AND prediction IS NOT NULL
+                    """)
+                row2    = cur.fetchone()
+                correct = row2[0] or 0
+                played  = row2[1] or 1   # فقط الجولات الحقيقية بتوقع
                 acc     = round(correct / played * 100, 1)
 
                 cur.execute("SELECT COUNT(*) FROM ai_laws WHERE active = TRUE")
@@ -3832,7 +3907,7 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append(f"  Pattern stats  : {counts['pattern_stats']}")
                 lines.append(f"  AI Laws total  : {counts['ai_laws']}  (active: {active_laws})")
                 lines.append(f"  Learn sessions : {counts['learn_sessions']}")
-                lines.append(f"  Prediction acc : {acc}%  ({correct}/{played})")
+                lines.append(f"  Prediction acc : {acc}%  ({correct}/{played} non-tie predicted)")
 
                 # ── PATTERN STATS ───────────────────────────────────
                 sec("PATTERN_STATS")
