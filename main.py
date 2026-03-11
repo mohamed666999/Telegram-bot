@@ -35,18 +35,18 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from openai import AsyncOpenAI
+import aiohttp  # Qwen via NVIDIA REST API
 
 # ==================== الإعدادات ====================
 TOKEN        = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 ADMIN_ID     = 6033203084
 
-AI_BASE_URL   = "https://integrate.api.nvidia.com/v1"
-AI_API_KEY    = "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"
-AI_MODEL      = "deepseek-ai/deepseek-v3.2"
-AI_TIMEOUT    = 5.0
-LEARN_TIMEOUT = 900  # 15 دقيقة — DeepSeek يحتاج وقتاً للـ thinking
+AI_INVOKE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+AI_API_KEY    = "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"
+AI_MODEL      = "qwen/qwen3.5-397b-a17b"
+AI_TIMEOUT    = 8.0
+LEARN_TIMEOUT = 900  # 15 دقيقة — Qwen يحتاج وقتاً للـ thinking
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -256,8 +256,9 @@ def load_laws(force: bool = False) -> List[Dict]:
                            description, created_at
                     FROM ai_laws
                     WHERE active = TRUE
+                      AND times_used >= 20
                     ORDER BY accuracy DESC, confidence DESC
-                    LIMIT 50
+                    LIMIT 12
                 """)
                 rows = cur.fetchall()
         laws = []
@@ -372,20 +373,24 @@ def apply_laws(suit: str, rank: str, last_digit: int,
     logs   = []
 
     # ── قوانين مستخلصة من البيانات الحقيقية ──────────────────────────
-    all_laws = list(DATA_LAWS) + laws
+    # DATA_LAWS ثابتة من الماضي — تُضاف بوزن أقل لمنع طغيانها على AI
+    # القوانين الديناميكية من DB تأتي أولاً (أعلى أولوية)
+    all_laws = laws + list(DATA_LAWS)
     for law in all_laws:
         match = match_law(law, suit, rank, last_digit, recent,
                           b_num=b_num, b_gap=b_gap,
                           gap_sec=gap_sec, round_index=round_index)
-        if match < 0.5:
+        if match < 0.7:
             continue
 
         pred = law.get("prediction")
         if pred not in [0, 1]:
             continue
 
+        # DATA_LAWS (id سالب) تأخذ وزناً أقل لمنع overfitting
+        law_weight = WEIGHTS['LAW'] * 0.5 if law.get('id', 0) < 0 else WEIGHTS['LAW']
         weight = (law["confidence"] / 100) * max(0.5, law["accuracy"] / 100) * match
-        scores[pred] += weight * WEIGHTS['LAW']
+        scores[pred] += weight * law_weight
 
         if match >= 0.8:
             logs.append(
@@ -523,11 +528,18 @@ def generate_bar(pct: int, width: int = 10) -> str:
     return "█" * filled + "░" * (width - filled)
 
 # ==================== محرك الأنماط ====================
-def _score_pattern(raw: Dict) -> Dict:
+def _score_pattern(raw: Dict, pattern_id: str = "") -> Dict:
     r, b, t = raw.get("r", 0), raw.get("b", 0), raw.get("t", 0)
     total = r + b + t
     if total == 0:
         return {"w": 2, "c": 0.0, "log": "[No Data]", "tie_ratio": 0.0}
+    # فلترة الضجيج: EXACT تحتاج >= 15 عينة، SD >= 10، غيرها >= 5
+    if pattern_id.startswith("EXACT_") and total < 15:
+        return {"w": 2, "c": 0.0, "log": f"[Noise:{total}<15]", "tie_ratio": 0.0}
+    if pattern_id.startswith("SD_") and total < 10:
+        return {"w": 2, "c": 0.0, "log": f"[Noise:{total}<10]", "tie_ratio": 0.0}
+    if total < 5:
+        return {"w": 2, "c": 0.0, "log": f"[Noise:{total}<5]", "tie_ratio": 0.0}
     sr = r + 2; sb = b + 2; st = t + 1
     sm = sr + sb + st
     p_r = sr / sm; p_b = sb / sm
@@ -552,14 +564,14 @@ def get_pattern(pattern_id: str) -> Dict:
                 )
                 row = cur.fetchone()
                 if row:
-                    result = _score_pattern({"r": row[0], "b": row[1], "t": row[2]})
+                    result = _score_pattern({"r": row[0], "b": row[1], "t": row[2]}, pattern_id)
                     live_cache.set(pattern_id, result)
                     return result
     except Exception as e:
         logger.warning(f"DB pattern fetch ({pattern_id}): {e}")
     raw = EMBEDDED_PATTERNS.get(pattern_id)
     if raw:
-        result = _score_pattern(raw)
+        result = _score_pattern(raw, pattern_id)
         live_cache.set(pattern_id, result)
         return result
     return {"w": 2, "c": 0.0, "log": "[No Data]", "tie_ratio": 0.0}
@@ -589,14 +601,14 @@ def update_pattern_db(suit: str, rank: str, last_digit: int, winner: int):
         logger.error(f"Pattern update error: {e}")
 
 # ==================== 🤖 AI Client ====================
-ai_client = AsyncOpenAI(api_key=AI_API_KEY, base_url=AI_BASE_URL)
+# AI calls via aiohttp directly (Qwen3.5 NVIDIA REST)
 
 def extract_json_safe(text: str) -> Optional[Any]:
-    """استخراج JSON من ردود DeepSeek التي قد تحتوي نصاً قبل/بعد الـ JSON."""
+    """استخراج JSON من ردود Qwen التي قد تحتوي نصاً قبل/بعد الـ JSON."""
     if not text:
         return None
 
-    # 0. إزالة <think>...</think> أولاً (DeepSeek reasoning)
+    # 0. إزالة <think>...</think> أولاً (Qwen reasoning)
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
 
     # 1. مباشر
@@ -938,7 +950,7 @@ async def force_learn_engine(status_callback) -> Dict:
 
     await status_callback(
         f"✅ <b>المرحلة 2/5</b> — {len(rounds)} جولة صالحة ({conn_cnt} متصلة)\n\n"
-        f"🤖 <b>المرحلة 3/5</b> — DeepSeek يحلل الأنماط الرياضية...\n"
+        f"🤖 <b>المرحلة 3/5</b> — Qwen يحلل الأنماط الرياضية...\n"
         f"<i>لا مهلة زمنية — انتظر حتى الاكتمال</i>"
     )
 
@@ -999,7 +1011,7 @@ likely_prediction = التوقع المقترح (0=راعي، 1=ثور)
   }}
 ]
 
-أنشئ 25-35 قانوناً. اتبع هذا التوزيع:
+أنشئ 8-12 قانوناً. اتبع هذا التوزيع:
 - 10 قوانين رياضية بسيطة (mod, cycle, gap)
 - 10 قوانين متعددة الشروط (AND): ادمج شرطين في conditions مثل: digit_sum_mod + gap_sec_lt
 - 8 قوانين زمنية (استخدم gap_sec لاكتشاف أنماط الوقت الفعلي)
@@ -1022,48 +1034,28 @@ likely_prediction = التوقع المقترح (0=راعي، 1=ثور)
 """
 
     try:
-        # DeepSeek-V3.2 مع streaming + reasoning_content
-        raw_text = ""
-        # لا نستخدم wait_for — نترك DeepSeek يأخذ وقته كاملاً
-        stream = await ai_client.chat.completions.create(
-            model=AI_MODEL,
+        raw_text = await _nvidia_chat(
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            top_p=0.95,
             max_tokens=4096,
-            stream=True,
+            temperature=0.3,
+            enable_thinking=False,
+            timeout=LEARN_TIMEOUT,
         )
-        reasoning_buf = ""
-        async for chunk in stream:
-            if not getattr(chunk, "choices", None):
-                continue
-            delta = chunk.choices[0].delta
-            # reasoning_content = تفكير داخلي (قد يكون في حقل منفصل)
-            rc = getattr(delta, "reasoning_content", None)
-            if rc:
-                reasoning_buf += rc
-                continue
-            if delta.content:
-                raw_text += delta.content
-        # بعض النماذج تُدمج التفكير داخل content كـ <think>...</think>
-        # نُزيله قبل استخراج JSON
-        raw_text = re.sub(r'<think>.*?</think>', '', raw_text, flags=re.DOTALL).strip()
-        logger.info(f"DeepSeek raw_text length={len(raw_text)}, reasoning_len={len(reasoning_buf)}")
-        logger.info(f"raw_text preview: {raw_text[:300]}")
+        logger.info(f"Qwen raw_text length={len(raw_text)}, preview: {raw_text[:300]}")
     except asyncio.TimeoutError:
         return {"error": "انتهت المهلة الزمنية"}
     except Exception as e:
         return {"error": f"خطأ في AI: {e}"}
 
     await status_callback(
-        "✅ <b>المرحلة 3/5</b> — DeepSeek أكمل التحليل\n\n"
+        "✅ <b>المرحلة 3/5</b> — Qwen أكمل التحليل\n\n"
         "💾 <b>المرحلة 4/5</b> — حفظ القوانين في قاعدة البيانات..."
     )
 
     # ── استخراج وحفظ القوانين ────────────────────────────────────────
     laws_data = extract_json_safe(raw_text)
     if not laws_data or not isinstance(laws_data, list):
-        logger.error(f"DeepSeek raw response (first 500):\n{raw_text[:500]}")
+        logger.error(f"Qwen raw response (first 500):\n{raw_text[:500]}")
         # محاولة أخيرة: قطّع النص وخذ كل ما يبدو JSON
         parts = re.findall(r'\{[^{}]{20,}\}', raw_text, re.DOTALL)
         recovered = []
@@ -1884,29 +1876,13 @@ async def _ai_fetch(recent_history: List[int]) -> Tuple[Optional[int], float, st
         f"توقّع الجولة التالية. أعد JSON فقط:\n"
         f'{{"winner":0أو1,"confidence":50-95,"reason":"سبب"}}'
     )
-    stream = await ai_client.chat.completions.create(
-        model=AI_MODEL,
+    full = await _nvidia_chat(
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
-        top_p=0.95,
         max_tokens=256,
-        stream=True
+        temperature=0.3,
+        enable_thinking=False,
+        timeout=int(AI_TIMEOUT),
     )
-    full = ""
-    async for chunk in stream:
-        if not getattr(chunk, "choices", None):
-            continue
-        delta = chunk.choices[0].delta
-        rc = getattr(delta, "reasoning_content", None)
-        if rc:
-            continue
-        if delta.content:
-            full += delta.content
-        # توقف بعد إغلاق أول JSON object
-        if "}" in full and full.count("{") <= full.count("}"):
-            break
-    # إزالة <think> إن وُجد داخل content
-    full = re.sub(r'<think>.*?</think>', '', full, flags=re.DOTALL).strip()
     data = extract_json_safe(full)
     if data and isinstance(data, dict):
         return int(data.get("winner", 2)), float(data.get("confidence", 50)), data.get("reason", "")
@@ -2332,13 +2308,13 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         ai_pred, ai_conf, ai_log = await asyncio.wait_for(ai_task, timeout=0.8)
         if ai_pred in [0, 1]:
             scores[ai_pred] += (ai_conf / 100) * WEIGHTS['AI']
-            logs.append(f"🤖 DeepSeek: {WINNER_NAMES[ai_pred]} — {ai_log}")
+            logs.append(f"🤖 Qwen: {WINNER_NAMES[ai_pred]} — {ai_log}")
         else:
-            logs.append(f"⚠️ DeepSeek: {ai_log}")
+            logs.append(f"⚠️ Qwen: {ai_log}")
     except asyncio.TimeoutError:
-        logs.append("⚠️ DeepSeek: لم يكتمل في الوقت المحدد")
+        logs.append("⚠️ Qwen: لم يكتمل في الوقت المحدد")
     except Exception:
-        logs.append("⚠️ DeepSeek: خطأ")
+        logs.append("⚠️ Qwen: خطأ")
 
     # ── T1: كاشف الزخم الحقيقي ─────────────────────────────────────
     streak_pred, streak_conf = detect_real_streak(recent_history)
@@ -3378,7 +3354,7 @@ async def cmd_prune(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # احذف القوانين التي لم تُستخدم قط بعد 100+ جولة
                 cur.execute("""
                     UPDATE ai_laws SET active = FALSE
-                    WHERE times_used = 0
+                    WHERE times_used < 20
                       AND created_at < NOW() - INTERVAL '2 hours'
                       AND active = TRUE
                 """)
@@ -3386,7 +3362,7 @@ async def cmd_prune(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # احذف القوانين دقتها < 30% وتمت أكثر من 8 مرات
                 cur.execute("""
                     UPDATE ai_laws SET active = FALSE
-                    WHERE accuracy < 30 AND times_used >= 8 AND active = TRUE
+                    WHERE accuracy < 40 AND times_used >= 20 AND active = TRUE
                 """)
                 dead_by_acc = cur.rowcount
                 # احذف قوانين مكررة (نفس law_type + prediction، احتفظ بالأفضل)
