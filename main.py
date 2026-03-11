@@ -627,30 +627,54 @@ async def _nvidia_chat(messages: list, max_tokens: int = 512,
         "chat_template_kwargs": {"enable_thinking": enable_thinking},
     }
     result = ""
-    async with aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(total=timeout)
-    ) as session:
-        async with session.post(AI_INVOKE_URL, headers=headers, json=payload) as resp:
-            async for raw_line in resp.content:
-                line = raw_line.decode("utf-8").strip()
-                if not line or not line.startswith("data:"):
-                    continue
-                data_str = line[5:].strip()
-                if data_str == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data_str)
-                    choices = chunk.get("choices", [])
-                    if not choices:
+    raw_lines_seen = 0
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=timeout)
+        ) as session:
+            async with session.post(AI_INVOKE_URL, headers=headers, json=payload) as resp:
+                # سجّل HTTP status أولاً
+                logger.info(f"_nvidia_chat HTTP {resp.status} — model={AI_MODEL}")
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise RuntimeError(f"HTTP {resp.status}: {body[:300]}")
+                async for raw_line in resp.content:
+                    raw_lines_seen += 1
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line:
                         continue
-                    delta = choices[0].get("delta", {})
-                    if delta.get("reasoning_content"):
+                    if not line.startswith("data:"):
+                        logger.debug(f"non-data line: {line[:80]}")
                         continue
-                    content = delta.get("content", "")
-                    if content:
-                        result += content
-                except Exception:
-                    continue
+                    data_str = line[5:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                        choices = chunk.get("choices", [])
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta", {})
+                        # تجاهل thinking tokens
+                        if delta.get("reasoning_content"):
+                            continue
+                        content = delta.get("content") or ""
+                        if content:
+                            result += content
+                    except Exception as parse_err:
+                        logger.debug(f"chunk parse error: {parse_err} — {data_str[:80]}")
+                        continue
+    except asyncio.TimeoutError:
+        raise
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f"_nvidia_chat error: {e}")
+
+    logger.info(f"_nvidia_chat done: raw_lines={raw_lines_seen}, result_len={len(result)}")
+    if not result and raw_lines_seen == 0:
+        raise RuntimeError("الاستجابة فارغة تماماً — تحقق من API Key والنموذج")
+
     result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL).strip()
     return result
 
