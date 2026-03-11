@@ -46,7 +46,7 @@ AI_BASE_URL   = "https://integrate.api.nvidia.com/v1"
 AI_API_KEY    = "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"
 AI_MODEL      = "deepseek-ai/deepseek-v3.2"
 AI_TIMEOUT    = 5.0
-LEARN_TIMEOUT = 300  # 5 دقائق للتعلم العميق
+LEARN_TIMEOUT = 900  # 15 دقيقة — DeepSeek يحتاج وقتاً للـ thinking
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -1024,17 +1024,16 @@ likely_prediction = التوقع المقترح (0=راعي، 1=ثور)
     try:
         # DeepSeek-V3.2 مع streaming + reasoning_content
         raw_text = ""
-        stream = await asyncio.wait_for(
-            ai_client.chat.completions.create(
-                model=AI_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.6,
-                top_p=0.95,
-                max_tokens=8192,
-                extra_body={"chat_template_kwargs": {"thinking": True}},
-                stream=True,
-            ),
-            timeout=LEARN_TIMEOUT
+        # لا نستخدم wait_for — نترك DeepSeek يأخذ وقته كاملاً
+        stream = await ai_client.chat.completions.create(
+            model=AI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.6,
+            top_p=0.95,
+            max_tokens=8192,
+            extra_body={"chat_template_kwargs": {"thinking": True}},
+            stream=True,
+            timeout=LEARN_TIMEOUT,
         )
         reasoning_buf = ""
         async for chunk in stream:
