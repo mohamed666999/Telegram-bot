@@ -278,6 +278,13 @@ def load_laws(force: bool = False) -> List[Dict]:
         _laws_cache     = laws
         _laws_loaded_at = time.time()
         logger.info(f"✅ Loaded {len(laws)} active laws from DB")
+
+        # تصحيح: القوانين غير المختبرة (used=0) تأخذ accuracy=50 في الذاكرة فقط
+        # (لا نغير DB هنا — فقط للحساب الفوري)
+        for law in _laws_cache:
+            if law.get('times_used', 0) == 0:
+                law['accuracy'] = 50.0   # إبطال الثقة المزيفة من Qwen
+
         return laws
     except Exception as e:
         logger.error(f"load_laws error: {e}")
@@ -388,11 +395,21 @@ def apply_laws(suit: str, rank: str, last_digit: int,
         if pred not in [0, 1]:
             continue
 
-        # وزن تصاعدي: قانون جديد (USED=0) → 50%، مجرّب (≥20) → 100%
-        # DATA_LAWS (id سالب) تأخذ وزناً أقل دائماً
+        # ── وزن تصاعدي مبني على الاستخدام الفعلي ──────────────────────
+        # قانون جديد (used<5): trust=0.1 فقط — لا نثق حتى يُختبر
+        # used 5-20: trust يرتفع 0.1→1.0 تدريجياً
+        # used>=20: trust=1.0 (موثوق تماماً)
+        # DATA_LAWS (id سالب): trust ثابت 0.5
         used = law.get("times_used", 0)
-        trust = min(1.0, 0.5 + 0.5 * (used / 20.0))  # 0.5 → 1.0 خلال 20 استخدام
-        law_weight = WEIGHTS['LAW'] * 0.5 if law.get('id', 0) < 0 else WEIGHTS['LAW'] * trust
+        if law.get('id', 0) < 0:
+            trust = 0.5
+        elif used < 5:
+            trust = 0.1  # تجميد: تأثير ضعيف جداً للقوانين غير المختبرة
+        elif used < 20:
+            trust = 0.1 + 0.9 * ((used - 5) / 15.0)
+        else:
+            trust = 1.0
+        law_weight = WEIGHTS['LAW'] * trust
         weight = (law["confidence"] / 100) * max(0.5, law["accuracy"] / 100) * match
         scores[pred] += weight * law_weight
 
@@ -409,12 +426,11 @@ def apply_laws(suit: str, rank: str, last_digit: int,
         except Exception:
             pass
 
-    # تطبيع الأوزان لمنع هيمنة جهة واحدة
-    total_law_score = scores[0] + scores[1]
-    if total_law_score > 4.0:
-        factor = 4.0 / total_law_score
-        scores[0] = round(scores[0] * factor, 4)
-        scores[1] = round(scores[1] * factor, 4)
+    # تطبيع: cap لمنع هيمنة القوانين على بقية المحركات
+    # الحد الأقصى لكل جهة من القوانين = WEIGHTS['LAW'] * 3 (أفضل 3 قوانين)
+    max_law_score = WEIGHTS['LAW'] * 3
+    scores[0] = min(scores[0], max_law_score)
+    scores[1] = min(scores[1], max_law_score)
 
     return scores, logs
 
@@ -1276,15 +1292,17 @@ likely_prediction = التوقع المقترح (0=راعي، 1=ثور)
                             SET conditions  = EXCLUDED.conditions,
                                 prediction  = EXCLUDED.prediction,
                                 confidence  = EXCLUDED.confidence,
+                                accuracy    = 50.0,
                                 description = EXCLUDED.description,
-                                active      = TRUE
+                                active      = TRUE,
+                                times_used  = 0
                     """, (
                         law_name,
                         law.get("law_type", "COMBINED"),
                         json.dumps(cond, ensure_ascii=False),
                         int(pred),
                         float(law.get("confidence", 70)),
-                        float(law.get("confidence", 70)),
+                        50.0,  # accuracy ابتدائية = 50% — ترتفع مع الاستخدام الفعلي
                         law.get("description", ""),
                     ))
                     saved += 1
