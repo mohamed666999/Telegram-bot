@@ -3149,11 +3149,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         dist = {r[0]: r[1] for r in cur.fetchall()}
                         cur.execute("""
                         SELECT
-                            COUNT(*) FILTER (WHERE winner = CASE prediction WHEN 0 THEN 'الراعي 🔴' WHEN 1 THEN 'الثور 🔵' END),
-                            COUNT(*) FILTER (WHERE prediction IN (0,1) AND winner IN ('الراعي 🔴','الثور 🔵') AND rank IS NOT NULL AND rank NOT IN ('NULL',''))
-                        FROM history WHERE winner IS NOT NULL AND prediction IS NOT NULL
+                            SUM(CASE WHEN winner = CASE prediction
+                                    WHEN 0 THEN 'الراعي 🔴'
+                                    WHEN 1 THEN 'الثور 🔵' END
+                                THEN 1 ELSE 0 END),
+                            COUNT(*)
+                        FROM history
+                        WHERE winner IS NOT NULL
+                          AND prediction IN (0,1)
+                          AND winner IN ('الراعي 🔴','الثور 🔵')
+                          AND rank IS NOT NULL AND rank NOT IN ('NULL','')
                     """)
-                        correct_cnt = cur.fetchone()[0]
+                        acc_r2 = cur.fetchone()
+                        correct_cnt     = int(acc_r2[0] or 0)
+                        predicted_total = int(acc_r2[1] or 1)
                         cur.execute("SELECT COUNT(*) FROM ai_laws WHERE active = TRUE")
                         laws_cnt = cur.fetchone()[0]
                         cur.execute("SELECT COUNT(*), MAX(created_at) FROM learn_sessions")
@@ -3384,21 +3393,24 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 dist = {r[0]: r[1] for r in cur.fetchall()}
                 # الدقة الحقيقية: فقط جولات بها توقع + لم تكن تعادل
                 cur.execute("""
+
                     SELECT
-                        COUNT(*) FILTER (WHERE winner = CASE prediction
-                            WHEN 0 THEN 'الراعي 🔴' WHEN 1 THEN 'الثور 🔵' END) AS correct,
-                        COUNT(*) FILTER (WHERE prediction IN (0,1)
-                            AND winner IN ('الراعي 🔴','الثور 🔵')) AS total_predicted
+                        SUM(CASE WHEN winner = CASE prediction
+                                WHEN 0 THEN 'الراعي 🔴'
+                                WHEN 1 THEN 'الثور 🔵' END
+                            THEN 1 ELSE 0 END) AS correct,
+                        COUNT(*) AS total
                     FROM history
                     WHERE winner IS NOT NULL
-                      AND prediction IS NOT NULL
                       AND prediction IN (0, 1)
                       AND winner IN ('الراعي 🔴', 'الثور 🔵')
-                      AND rank IS NOT NULL AND rank NOT IN ('NULL','')
-                """)
+                      AND rank IS NOT NULL
+                      AND rank NOT IN ('NULL', '')
+                """
+                )
                 acc_row = cur.fetchone()
-                correct_cnt   = acc_row[0] or 0
-                predicted_total = acc_row[1] or 1
+                correct_cnt     = int(acc_row[0] or 0)
+                predicted_total = int(acc_row[1] or 1)
                 cur.execute("SELECT COUNT(*) FROM ai_laws WHERE active = TRUE")
                 laws_cnt = cur.fetchone()[0]
                 cur.execute("SELECT COUNT(*) FROM ai_laws WHERE active = FALSE")
@@ -3890,14 +3902,24 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     counts[tbl] = cur.fetchone()[0]
 
                 cur.execute("""
-                        SELECT
-                            COUNT(*) FILTER (WHERE winner = CASE prediction WHEN 0 THEN 'الراعي 🔴' WHEN 1 THEN 'الثور 🔵' END),
-                            COUNT(*) FILTER (WHERE prediction IN (0,1) AND winner IN ('الراعي 🔴','الثور 🔵') AND rank IS NOT NULL AND rank NOT IN ('NULL',''))
-                        FROM history WHERE winner IS NOT NULL AND prediction IS NOT NULL
-                    """)
+
+                    SELECT
+                        SUM(CASE WHEN winner = CASE prediction
+                                WHEN 0 THEN 'الراعي 🔴'
+                                WHEN 1 THEN 'الثور 🔵' END
+                            THEN 1 ELSE 0 END) AS correct,
+                        COUNT(*) AS total
+                    FROM history
+                    WHERE winner IS NOT NULL
+                      AND prediction IN (0, 1)
+                      AND winner IN ('الراعي 🔴', 'الثور 🔵')
+                      AND rank IS NOT NULL
+                      AND rank NOT IN ('NULL', '')
+                """
+                    )
                 row2    = cur.fetchone()
-                correct = row2[0] or 0
-                played  = row2[1] or 1   # فقط الجولات الحقيقية بتوقع
+                correct = int(row2[0] or 0)
+                played  = int(row2[1] or 1)
                 acc     = round(correct / played * 100, 1)
 
                 cur.execute("SELECT COUNT(*) FROM ai_laws WHERE active = TRUE")
