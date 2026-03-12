@@ -409,6 +409,13 @@ def apply_laws(suit: str, rank: str, last_digit: int,
         except Exception:
             pass
 
+    # تطبيع الأوزان لمنع هيمنة جهة واحدة
+    total_law_score = scores[0] + scores[1]
+    if total_law_score > 4.0:
+        factor = 4.0 / total_law_score
+        scores[0] = round(scores[0] * factor, 4)
+        scores[1] = round(scores[1] * factor, 4)
+
     return scores, logs
 
 def _increment_law_usage(law_id: int):
@@ -679,70 +686,144 @@ async def _nvidia_chat(messages: list, max_tokens: int = 512,
     return result
 
 
-def extract_json_safe(text: str) -> Optional[Any]:
-    """استخراج JSON من ردود Qwen التي قد تحتوي نصاً قبل/بعد الـ JSON."""
-    if not text:
-        return None
-
-    # 0. إزالة <think>...</think> أولاً (Qwen reasoning)
-    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
-
-    # 1. مباشر
-    try:
-        return json.loads(text.strip())
-    except Exception:
-        pass
-
-    # 2. إزالة code blocks أولاً ثم حاول
-    cleaned = re.sub(r'```(?:json)?\s*', '', text).replace('```', '').strip()
-    try:
-        return json.loads(cleaned)
-    except Exception:
-        pass
-
-    # 3. ابحث عن أول مصفوفة JSON كاملة [...] 
-    bracket_start = cleaned.find('[')
-    if bracket_start != -1:
+def _scan_json_objects(text: str) -> List[Dict]:
+    """يستخرج كل JSON object مكتمل من النص — يتعامل مع arrays مقطوعة."""
+    results = []
+    i = 0
+    while i < len(text):
+        if text[i] != '{':
+            i += 1
+            continue
         depth = 0
-        for i, ch in enumerate(cleaned[bracket_start:], bracket_start):
-            if ch == '[': depth += 1
-            elif ch == ']':
+        start = i
+        in_str = False
+        escape = False
+        for j in range(i, len(text)):
+            c = text[j]
+            if escape:
+                escape = False
+                continue
+            if c == '\\' and in_str:
+                escape = True
+                continue
+            if c == '"' and not escape:
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if c == '{':
+                depth += 1
+            elif c == '}':
                 depth -= 1
                 if depth == 0:
                     try:
-                        return json.loads(cleaned[bracket_start:i+1])
+                        obj = json.loads(text[start:j+1])
+                        if isinstance(obj, dict) and 'law_type' in obj and 'prediction' in obj:
+                            results.append(obj)
                     except Exception:
-                        break
+                        pass
+                    i = j
+                    break
+        i += 1
+    return results
 
-    # 4. ابحث عن أول كائن JSON كامل {...}
+
+def extract_json_safe(text: str) -> Optional[Any]:
+    """استخراج JSON من ردود Qwen — يتعامل مع ردود طويلة ومقطوعة."""
+    if not text:
+        return None
+
+    # 0. إزالة <think>...</think> فقط قبل/بعد JSON (لا داخله)
+    text = re.sub(r'(?s)^\s*<think>.*?</think>\s*', '', text).strip()
+    text = re.sub(r'(?s)\s*<think>.*?</think>\s*$', '', text).strip()
+
+    # 1. إزالة code fences
+    cleaned = re.sub(r'```(?:json)?\s*', '', text).replace('```', '').strip()
+
+    # 2. محاولة مباشرة
+    try:
+        result = json.loads(cleaned)
+        if isinstance(result, (list, dict)):
+            return result
+    except Exception:
+        pass
+
+    # 3. استخراج أول array مكتملة بمسح الأقواس
+    for src in [cleaned, text]:
+        bracket_start = src.find('[')
+        if bracket_start == -1:
+            continue
+        depth = 0
+        in_str = False
+        escape = False
+        for i in range(bracket_start, len(src)):
+            c = src[i]
+            if escape:
+                escape = False
+                continue
+            if c == '\\' and in_str:
+                escape = True
+                continue
+            if c == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if c == '[':
+                depth += 1
+            elif c == ']':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        r = json.loads(src[bracket_start:i+1])
+                        if isinstance(r, list) and r:
+                            return r
+                    except Exception:
+                        pass
+                    break
+
+    # 4. الرد مقطوع — استخرج كل object مكتمل بشكل فردي
+    objects = _scan_json_objects(cleaned)
+    if objects:
+        return objects
+
+    # 5. إصلاح trailing commas ثم أعد المحاولة
+    try:
+        fixed = re.sub(r',\s*([}\]])', r'\1', cleaned)
+        result = json.loads(fixed)
+        if isinstance(result, (list, dict)):
+            return result
+    except Exception:
+        pass
+
+    # 6. استخراج object واحد
     brace_start = cleaned.find('{')
     if brace_start != -1:
         depth = 0
-        for i, ch in enumerate(cleaned[brace_start:], brace_start):
-            if ch == '{': depth += 1
-            elif ch == '}':
+        in_str = False
+        escape = False
+        for i in range(brace_start, len(cleaned)):
+            c = cleaned[i]
+            if escape:
+                escape = False
+                continue
+            if c == '\\' and in_str:
+                escape = True
+                continue
+            if c == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if c == '{':
+                depth += 1
+            elif c == '}':
                 depth -= 1
                 if depth == 0:
                     try:
                         return json.loads(cleaned[brace_start:i+1])
                     except Exception:
                         break
-
-    # 5. regex greedy للمصفوفة
-    for pattern in [r'\[\s*\{.*?\}\s*\]', r'\{[^{}]*\}']:
-        match = re.search(pattern, cleaned, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group())
-            except Exception:
-                pass
-
-    # 6. محاولة إصلاح JSON مكسور — تنظيف trailing commas
-    try:
-        fixed = re.sub(r',\s*([}\]])', r'\1', cleaned)
-        return json.loads(fixed)
-    except Exception:
-        pass
 
     return None
 
@@ -1105,14 +1186,17 @@ likely_prediction = التوقع المقترح (0=راعي، 1=ثور)
   "description": "عندما تكون الفجوة صغيرة (<500) ومجموع الأرقام mod 6 = 2"
 }}
 
-تذكير: prediction=0 دائماً يعني الراعي🔴، prediction=1 دائماً يعني الثور🔵.
-القوانين متعددة الشروط ذات الدقة الأعلى يجب أن تشترط شرطين معاً.
+تذكير مهم:
+- prediction=0 يعني الراعي🔴، prediction=1 يعني الثور🔵
+- القوانين متعددة الشروط تشترط شرطين معاً
+- أعد JSON مضغوط بدون مسافات زائدة (minified)
+- أعد المصفوفة مباشرة بدون أي نص قبلها أو بعدها
 """
 
     try:
         raw_text = await _nvidia_chat(
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=4096,
+            max_tokens=8192,
             temperature=0.3,
             enable_thinking=False,
             timeout=LEARN_TIMEOUT,
@@ -1132,18 +1216,10 @@ likely_prediction = التوقع المقترح (0=راعي، 1=ثور)
     laws_data = extract_json_safe(raw_text)
     if not laws_data or not isinstance(laws_data, list):
         logger.error(f"Qwen raw response (first 500):\n{raw_text[:500]}")
-        # محاولة أخيرة: قطّع النص وخذ كل ما يبدو JSON
-        parts = re.findall(r'\{[^{}]{20,}\}', raw_text, re.DOTALL)
-        recovered = []
-        for p in parts:
-            try:
-                obj = json.loads(p)
-                if "law_type" in obj and "prediction" in obj:
-                    recovered.append(obj)
-            except Exception:
-                pass
+        # محاولة أخيرة: استخرج كل object مكتمل (يعمل حتى مع array مقطوعة)
+        recovered = _scan_json_objects(raw_text)
         if recovered:
-            logger.info(f"Recovered {len(recovered)} laws from partial JSON")
+            logger.info(f"Recovered {len(recovered)} laws from partial/truncated JSON")
             laws_data = recovered
         else:
             # أرسل النص الخام للمستخدم للمساعدة في التشخيص
@@ -4048,11 +4124,74 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 # ==================== التشغيل ====================
+
+# ==================== ⏰ Auto-Learn (self-evolving) ====================
+_last_auto_learn: float = 0.0
+_auto_learn_lock = asyncio.Lock()
+
+async def auto_learn_job(context) -> None:
+    """
+    يعمل كل ساعة تلقائياً:
+    - يتحقق إذا كان هناك 30+ جولة جديدة منذ آخر تعلم
+    - يشغل force_learn بدون تدخل المستخدم
+    - يُرسل نتيجة موجزة للمشرف
+    """
+    global _last_auto_learn
+    async with _auto_learn_lock:
+        try:
+            # تحقق عدد الجولات الجديدة منذ آخر تعلم
+            with db_pool.get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT COUNT(*) FROM history
+                        WHERE winner IS NOT NULL
+                          AND rank IS NOT NULL AND rank NOT IN ('NULL','')
+                          AND created_at > (
+                              SELECT COALESCE(MAX(created_at), '2000-01-01')
+                              FROM learn_sessions
+                          )
+                    """)
+                    new_rounds = cur.fetchone()[0]
+
+            if new_rounds < 30:
+                logger.info(f"Auto-learn skipped: only {new_rounds} new rounds")
+                return
+
+            logger.info(f"Auto-learn triggered: {new_rounds} new rounds")
+
+            msgs = []
+            async def status_cb(msg):
+                msgs.append(msg)
+
+            result = await force_learn_engine(status_cb)
+
+            if "error" not in result:
+                summary = (
+                    f"🤖 <b>تعلم تلقائي</b>\n"
+                    f"📊 جولات جديدة: {new_rounds}\n"
+                    f"⚖️ قوانين جديدة: {result.get('saved', 0)}\n"
+                    f"📈 جلسة #{result.get('session_id', '?')}"
+                )
+                try:
+                    await context.bot.send_message(
+                        chat_id=ADMIN_ID,
+                        text=summary,
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+                _last_auto_learn = time.time()
+        except Exception as e:
+            logger.error(f"auto_learn_job error: {e}")
+
 def main():
     ensure_tables()
     load_laws()               # تحميل القوانين
     load_signal_perf_from_db()  # تحميل أداء الإشارات
     app = ApplicationBuilder().token(TOKEN).build()
+    # ⏰ Auto-learn كل ساعة (30+ جولة جديدة شرط)
+    app.job_queue.run_repeating(auto_learn_job, interval=3600, first=300)
+    logger.info("⏰ Auto-learn job: every 60min, starts after 5min")
     app.add_handler(CommandHandler("start",       cmd_start))
     app.add_handler(CommandHandler("force_learn", cmd_force_learn))
     app.add_handler(CommandHandler("laws",        cmd_laws))
