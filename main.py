@@ -902,168 +902,176 @@ def _filter_valid_rounds(rows) -> List[Dict]:
 
 def _build_math_memory(rounds: List[Dict]) -> Dict:
     """
-    يبني ذاكرة رياضية — لا إحصاء عادي.
-    التركيز على: الفجوات، الدورات، المعادلات، الأنماط الزمنية.
+    يحسب الأنماط المثبتة إحصائياً من البيانات الحقيقية.
+    لا يُرسل إحصاءات مجمّعة — يُرسل الأنماط ذات الدلالة فقط.
     """
+    total = len(rounds)
     connected = [r for r in rounds if r["connected"]]
-    total     = len(rounds)
-    conn_cnt  = len(connected)
 
-    # ── تحليل الفجوة الرقمية ────────────────────────────────────────
-    _ga_raw = {"small_bnum_gap_lt200": [0, 0], "medium_bnum_gap_200_1000": [0, 0], "large_bnum_gap_gt1000": [0, 0]}
-    for r in rounds:
-        if r["b_gap"] is None:
-            continue
-        w = r["winner"]
-        if w not in [0, 1]:
-            continue
-        if r["b_gap"] < 200:
-            _ga_raw["small_bnum_gap_lt200"][w] += 1
-        elif r["b_gap"] < 1000:
-            _ga_raw["medium_bnum_gap_200_1000"][w] += 1
-        else:
-            _ga_raw["large_bnum_gap_gt1000"][w] += 1
-    gap_analysis = {
-        k: {"red_banker_0": v[0], "blue_player_1": v[1],
-            "likely_prediction": 0 if v[0] > v[1] else 1,
-            "note": "0=راعي_red_banker | 1=ثور_blue_player"}
-        for k, v in _ga_raw.items()
-    }
+    # ── حساب شامل للأنماط المثبتة ────────────────────────────────────
+    confirmed_patterns = []
+    MIN_N    = 40   # حد أدنى للعينة
+    MIN_BIAS = 0.10  # 10% انحياز
 
-    # ── تحليل آخر رقم من b_num (الرقم الكامل لا digit البونص فقط) ──
-    _ld_raw = defaultdict(lambda: [0, 0])
-    for r in rounds:
-        if r["b_num"] and r["winner"] in [0, 1]:
-            ld = int(r["b_num"][-1])
-            _ld_raw[str(ld)][r["winner"]] += 1
-    last_digit_of_bnum = {
-        k: {"red_banker_0": v[0], "blue_player_1": v[1],
-            "likely_prediction": 0 if v[0] > v[1] else 1}
-        for k, v in _ld_raw.items()
-    }
+    def add_if_significant(label, cond_dict, v, min_n=MIN_N, min_bias=MIN_BIAS):
+        n = v[0] + v[1]
+        if n < min_n:
+            return
+        bias = (v[1] - v[0]) / n
+        if abs(bias) < min_bias:
+            return
+        pred = 1 if bias > 0 else 0
+        confirmed_patterns.append({
+            "pattern": label,
+            "conditions": cond_dict,
+            "prediction": pred,
+            "n": n,
+            "red": v[0], "blue": v[1],
+            "bias_pct": round(abs(bias) * 100, 1),
+            "accuracy_est": round(50 + abs(bias) * 50, 1),
+        })
 
-    # ── تحليل مجموع أرقام b_num mod N ──────────────────────────────
-    digit_sum_mod = {}
-    for mod in [2, 3, 5, 7]:
+    # 1. digit_sum mod N (mod 2..15, كل remainder)
+    for mod in range(2, 16):
         mod_stats = defaultdict(lambda: [0, 0])
         for r in rounds:
             if r["b_num"] and r["winner"] in [0, 1]:
                 s = sum(int(d) for d in r["b_num"]) % mod
-                mod_stats[str(s)][r["winner"]] += 1
-        digit_sum_mod[f"mod_{mod}"] = {
-            k: {"red": v[0], "blue": v[1],
-                "bias": round((v[1]-v[0]) / max(v[0]+v[1], 1) * 100, 1)}
-            for k, v in mod_stats.items()
-        }
+                mod_stats[s][r["winner"]] += 1
+        for rem, v in mod_stats.items():
+            add_if_significant(
+                f"digit_sum mod {mod} == {rem}",
+                {"digit_sum_mod": {"mod": mod, "remainder": rem}},
+                v
+            )
 
-    # ── تحليل الدورة (كل N جولة ماذا يتكرر) ─────────────────────────
-    cycle_analysis = {}
-    for cycle in [3, 4, 5, 6, 7]:
-        cycle_stats = defaultdict(lambda: [0, 0])
-        for i, r in enumerate(connected):
-            if r["winner"] in [0, 1]:
-                pos = i % cycle
-                cycle_stats[str(pos)][r["winner"]] += 1
-        cycle_analysis[f"cycle_{cycle}"] = {
-            k: {"red": v[0], "blue": v[1],
-                "dominant": "red" if v[0] > v[1] else "blue"}
-            for k, v in cycle_stats.items()
-            if v[0] + v[1] >= 5
-        }
+    # 2. آخر رقم من b_num
+    for d in range(10):
+        v = [0, 0]
+        for r in rounds:
+            if r["b_num"] and r["winner"] in [0, 1]:
+                if r["b_num"][-1] == str(d):
+                    v[r["winner"]] += 1
+        add_if_significant(f"last_digit_bnum == {d}", {"digit": d}, v, min_n=50)
 
-    # ── تحليل الانتكاس بعد الفجوة ───────────────────────────────────
-    # 0=راعي🔴(red/banker)  1=ثور🔵(blue/player)
-    _ag = {"after_big_gap": [0, 0], "after_small_gap": [0, 0]}
-    for r in rounds:
-        if r["winner"] not in [0, 1] or r["b_gap"] is None:
-            continue
-        if r["b_gap"] > 2000:
-            _ag["after_big_gap"][r["winner"]] += 1
-        elif r["b_gap"] < 300:
-            _ag["after_small_gap"][r["winner"]] += 1
-    after_gap = {
-        k: {"red_banker_0": v[0], "blue_player_1": v[1],
-            "likely_prediction": 0 if v[0] > v[1] else 1,
-            "note": "0=راعي_red_banker | 1=ثور_blue_player"}
-        for k, v in _ag.items()
-    }
+    # 3. فجوة رقمية (b_gap) + winner
+    gap_ranges = [("lt200", None, 200), ("200_500", 200, 500),
+                  ("500_2000", 500, 2000), ("gt2000", 2000, None)]
+    for label, lo, hi in gap_ranges:
+        v = [0, 0]
+        for r in rounds:
+            if r["b_gap"] is None or r["winner"] not in [0, 1]:
+                continue
+            if lo is not None and r["b_gap"] < lo:
+                continue
+            if hi is not None and r["b_gap"] >= hi:
+                continue
+            v[r["winner"]] += 1
+        cond = {}
+        if lo: cond["b_gap_gte"] = lo
+        if hi: cond["b_gap_lt"]  = hi
+        add_if_significant(f"b_gap_{label}", cond, v)
 
-    # ── تحليل الفجوة الزمنية ────────────────────────────────────────
-    _tg = {"fresh_gap_lt_15s": [0, 0], "stale_gap_gt_15s": [0, 0]}
-    for r in rounds:
-        if r["winner"] not in [0, 1] or r["gap_sec"] is None:
-            continue
-        if r["gap_sec"] <= 15:
-            _tg["fresh_gap_lt_15s"][r["winner"]] += 1
-        else:
-            _tg["stale_gap_gt_15s"][r["winner"]] += 1
-    time_gap_analysis = {
-        k: {"red_banker_0": v[0], "blue_player_1": v[1],
-            "likely_prediction": 0 if v[0] > v[1] else 1}
-        for k, v in _tg.items()
-    }
+    # 4. فجوة زمنية (gap_sec) + winner
+    for cutoff in [10, 15, 20, 30]:
+        v_lt = [0, 0]; v_gt = [0, 0]
+        for r in rounds:
+            if r["gap_sec"] is None or r["winner"] not in [0, 1]:
+                continue
+            if r["gap_sec"] < cutoff:
+                v_lt[r["winner"]] += 1
+            else:
+                v_gt[r["winner"]] += 1
+        add_if_significant(f"gap_sec_lt_{cutoff}", {"gap_sec_lt": cutoff}, v_lt)
+        add_if_significant(f"gap_sec_gt_{cutoff}", {"gap_sec_gt": cutoff}, v_gt)
 
-    # ── تسلسلات الفوز عند الاتصال ───────────────────────────────────
-    _sc = {"connected_after_red_0": [0, 0], "connected_after_blue_1": [0, 0]}
-    for i in range(1, len(connected)):
-        prev_w = connected[i-1]["winner"]
-        curr_w = connected[i]["winner"]
-        if prev_w == 0 and curr_w in [0, 1]:
-            _sc["connected_after_red_0"][curr_w] += 1
-        elif prev_w == 1 and curr_w in [0, 1]:
-            _sc["connected_after_blue_1"][curr_w] += 1
-    streaks_after_connect = {
-        k: {"red_banker_0": v[0], "blue_player_1": v[1],
-            "likely_prediction": 0 if v[0] > v[1] else 1}
-        for k, v in _sc.items()
-    }
+    # 5. دورات (cycle position) على الجولات المتصلة
+    for cycle in range(3, 10):
+        for pos in range(cycle):
+            v = [0, 0]
+            for i, r in enumerate(connected):
+                if r["winner"] in [0, 1] and i % cycle == pos:
+                    v[r["winner"]] += 1
+            add_if_significant(
+                f"cycle{cycle}_pos{pos}",
+                {"cycle_position": {"cycle": cycle, "position": pos}},
+                v, min_n=25
+            )
 
-    # ── قيمة b_num mod (مجموع الأرقام) مقابل الرتبة ─────────────────
-    rank_digit_sum_bias = defaultdict(lambda: defaultdict(lambda: [0, 0]))
-    for r in rounds:
-        if r["b_num"] and r["winner"] in [0, 1] and r["rank"]:
-            s = sum(int(d) for d in r["b_num"]) % 10
-            rank_digit_sum_bias[r["rank"]][str(s)][r["winner"]] += 1
+    # 6. streak reversal: بعد N متتاليين
+    for streak_len in [2, 3, 4]:
+        for streak_val in [0, 1]:
+            v = [0, 0]
+            seq = [r["winner"] for r in connected if r["winner"] in [0, 1]]
+            for i in range(streak_len, len(seq)):
+                if seq[i-streak_len:i] == [streak_val]*streak_len and seq[i] in [0, 1]:
+                    v[seq[i]] += 1
+            add_if_significant(
+                f"after_{streak_len}x_{'red' if streak_val==0 else 'blue'}",
+                {"streak": {"length": streak_len, "value": streak_val}},
+                v, min_n=20
+            )
 
-    top_rank_bias = {}
-    for rank, smap in rank_digit_sum_bias.items():
-        for s, v in smap.items():
-            t = v[0] + v[1]
-            if t >= 5:
-                bias = (v[1] - v[0]) / t
-                if abs(bias) > 0.25:
-                    top_rank_bias[f"{rank}_sum{s}"] = {
-                        "red": v[0], "blue": v[1],
-                        "bias_pct": round(bias * 100, 1)
-                    }
+    # 7. rank + digit_sum_mod (للجولات التي لها rank)
+    ranked = [r for r in rounds if r["rank"] and r["rank"] not in ("", "NULL")]
+    for mod in [3, 5, 7]:
+        for rank in ["A","K","Q","J","10","9","8","7","6","5","4","3","2"]:
+            mod_stats = defaultdict(lambda: [0, 0])
+            for r in ranked:
+                if r["rank"] == rank and r["winner"] in [0, 1]:
+                    s = sum(int(d) for d in r["b_num"]) % mod
+                    mod_stats[s][r["winner"]] += 1
+            for rem, v in mod_stats.items():
+                add_if_significant(
+                    f"rank_{rank}_digsum_mod{mod}_{rem}",
+                    {"rank": rank, "digit_sum_mod": {"mod": mod, "remainder": rem}},
+                    v, min_n=8, min_bias=0.25
+                )
 
-    # ── عينة من الجولات المتصلة للـ AI ──────────────────────────────
-    sample_connected = [
+    # ترتيب بالانحياز (الأقوى أولاً)
+    confirmed_patterns.sort(key=lambda x: -x["bias_pct"])
+    top_patterns = confirmed_patterns[:40]  # أقوى 40 نمط
+
+    # ── عينة الجولات الخام للـ AI ─────────────────────────────────────
+    # نُرسل 80 جولة من الأحدث مع كل التفاصيل
+    sample = [
         {
-            "b_num": r["b_num"], "suit": r["suit"],
-            "rank": r["rank"], "digit": r["digit"],
-            "winner": r["winner"], "b_gap": r["b_gap"],
+            "b_num": r["b_num"],
+            "digit_sum": sum(int(d) for d in r["b_num"]) if r["b_num"] else None,
+            "suit": r["suit"], "rank": r["rank"], "digit": r["digit"],
+            "winner": r["winner"],
+            "b_gap": r["b_gap"],
             "gap_sec": round(r["gap_sec"], 1) if r["gap_sec"] else None,
+            "connected": r["connected"],
         }
-        for r in connected[-150:]  # آخر 150 جولة متصلة
+        for r in rounds[-80:]
     ]
+
+    # ── إحصاءات streak بسيطة ─────────────────────────────────────────
+    seq_all = [r["winner"] for r in rounds if r["winner"] in [0, 1]]
+    streak_stats = {"after_red_next_red": 0, "after_red_next_blue": 0,
+                    "after_blue_next_red": 0, "after_blue_next_blue": 0}
+    for i in range(1, len(seq_all)):
+        if seq_all[i-1] == 0:
+            if seq_all[i] == 0: streak_stats["after_red_next_red"] += 1
+            else: streak_stats["after_red_next_blue"] += 1
+        else:
+            if seq_all[i] == 0: streak_stats["after_blue_next_red"] += 1
+            else: streak_stats["after_blue_next_blue"] += 1
 
     return {
         "overview": {
-            "total_after_filter": total,
-            "connected_rounds":   conn_cnt,
-            "skipped_first_700":  True,
+            "total_valid_rounds": total,
+            "connected_rounds": len(connected),
+            "ranked_rounds": len(ranked),
+            "note": "winner=0 means Banker(red), winner=1 means Player(blue)"
         },
-        "gap_analysis":          gap_analysis,
-        "time_gap_analysis":     time_gap_analysis,
-        "after_gap_winner":      after_gap,
-        "last_digit_of_bnum":    dict(last_digit_of_bnum),
-        "digit_sum_mod":         digit_sum_mod,
-        "cycle_analysis":        cycle_analysis,
-        "streaks_after_connect": streaks_after_connect,
-        "rank_digit_sum_bias":   top_rank_bias,
-        "sample_connected_150":  sample_connected,
+        "confirmed_patterns": top_patterns,   # الأنماط المثبتة إحصائياً ← أهم شيء
+        "transition_stats": streak_stats,
+        "raw_sample_last80": sample,
     }
+
+
 
 async def force_learn_engine(status_callback) -> Dict:
     """
@@ -1128,85 +1136,50 @@ async def force_learn_engine(status_callback) -> Dict:
     )
 
     prompt = f"""
-أنت عقل رياضي متخصص في اكتشاف القوانين الخفية في لعبة الباكارات.
+أنت محلل بيانات رياضي متخصص.
 
-━━━ تعريف المتغيرات — مهم جداً ━━━
-prediction=0  يعني  الراعي 🔴 (red/banker)
-prediction=1  يعني  الثور 🔵  (blue/player)
-red_banker_0  = عدد مرات فوز الراعي
-blue_player_1 = عدد مرات فوز الثور
-likely_prediction = التوقع المقترح (0=راعي، 1=ثور)
+مهمتك: تحويل الأنماط الإحصائية المُثبتة إلى قوانين قابلة للتطبيق.
 
-━━━ السياق ━━━
-- تم تجاهل أول 700 جولة (كانت تعادلات مضللة)
-- الجولات ليست متتالية — هناك جولات لم تُسجَّل بينها
-- الفجوة الزمنية (gap_sec) والفجوة الرقمية (b_gap) مهمتان جداً
-- الفجوة > 20 ثانية أو b_gap > 500 تعني وجود جولات غير مسجلة بينها
+━━━ تعريف أساسي ━━━
+prediction=0 = الراعي 🔴 (Banker/Red)
+prediction=1 = الثور 🔵 (Player/Blue)
 
-━━━ البيانات الرياضية ━━━
-{json.dumps(memory, ensure_ascii=False, indent=1)}
+━━━ الأنماط المُثبتة إحصائياً من {len(rounds)} جولة حقيقية ━━━
+هذه أنماط حقيقية من البيانات، ليست افتراضات:
+
+{json.dumps(memory["confirmed_patterns"][:25], ensure_ascii=False, indent=1)}
+
+━━━ إحصاءات الانتقال ━━━
+{json.dumps(memory["transition_stats"], ensure_ascii=False)}
+
+━━━ عينة من آخر 80 جولة (الأحدث في النهاية) ━━━
+{json.dumps(memory["raw_sample_last80"][-30:], ensure_ascii=False)}
+
+━━━ القوانين الحالية (لا تكررها) ━━━
 {prev_laws_txt}
 
-━━━ المطلوب: قوانين رياضية لا إحصائية ━━━
-اكتشف قوانين من هذا النوع (أمثلة للتوجيه فقط، ابتكر ما هو أفضل):
-1. مجموع أرقام b_num mod N يعطي نتيجة محددة
-2. الجولة بعد فجوة رقمية كبيرة (b_gap > X) تميل لـ red/blue
-3. في الجولة رقم K من كل دورة طولها N، النتيجة غالباً X
-4. إذا كانت الفجوة الزمنية قصيرة (< 15 ث) والبذلة X، النتيجة Y
-5. (digit_sum + rank_value) mod N → نتيجة
-6. بعد انقطاع (فجوة كبيرة) ثم عودة، النمط يبدأ من جديد
+━━━ المطلوب ━━━
+1. لكل نمط في "confirmed_patterns" ببايا >= 12%: أنشئ قانوناً مباشراً
+2. ابحث في عينة الجولات عن أنماط مركبة (شرطان معاً) غير موجودة في القائمة
+3. أنشئ 8-12 قانون فقط — جودة لا كمية
 
-أنواع الشروط المتاحة في conditions:
-- "digit_sum_mod": {{"mod": N, "remainder": K}}
-- "b_gap_gt": عدد (b_gap أكبر من)
-- "b_gap_lt": عدد (b_gap أصغر من)
-- "gap_sec_lt": ثواني (فجوة زمنية أصغر من)
-- "gap_sec_gt": ثواني (فجوة زمنية أكبر من)
-- "cycle_position": {{"cycle": N, "position": K}}
-- "suit": بذلة
-- "digit": آخر رقم من b_num
-- "rank": رتبة الورقة
-- "rank_value_mod": {{"mod": N, "remainder": K}}
-- "digit_plus_rank_mod": {{"mod": N, "remainder": K}}
-- "streak": {{"length": N, "value": 0أو1}}
-- "after_big_gap": true (بعد انقطاع > 2000)
+شكل القانون:
+{{"law_type":"اسم","conditions":{{...}},"prediction":0أو1,"confidence":60-90,"description":"الشرط الحقيقي والانحياز المئوي"}}
 
-⚠️ مهم جداً: ردّ بـ JSON خالص فقط — لا تكتب أي نص قبل [ أو بعد ]
-المصفوفة يجب أن تبدأ بـ [ مباشرة وتنتهي بـ ]
+أنواع conditions المتاحة:
+- {{"digit_sum_mod":{{"mod":N,"remainder":K}}}}
+- {{"digit":N}} — آخر رقم من b_num
+- {{"b_gap_lt":N}} أو {{"b_gap_gte":N}}
+- {{"gap_sec_lt":N}} أو {{"gap_sec_gt":N}}
+- {{"cycle_position":{{"cycle":N,"position":K}}}}
+- {{"streak":{{"length":N,"value":0أو1}}}}
+- {{"rank":"A/K/Q/..."}}
+- مركبة: ادمج شرطين في نفس الـ conditions dict
 
-[
-  {{
-    "law_type": "اسم_نوع_القانون",
-    "conditions": {{ ... }},
-    "prediction": 0,
-    "confidence": 85,
-    "description": "وصف قصير"
-  }}
-]
+⚠️ قاعدة صارمة: confidence يجب أن يعكس bias_pct الحقيقي فقط.
+مثال: bias=15% → confidence=57-65 فقط. لا 90% لأنماط bias=12%.
 
-أنشئ 8-12 قانوناً. اتبع هذا التوزيع:
-- 10 قوانين رياضية بسيطة (mod, cycle, gap)
-- 10 قوانين متعددة الشروط (AND): ادمج شرطين في conditions مثل: digit_sum_mod + gap_sec_lt
-- 8 قوانين زمنية (استخدم gap_sec لاكتشاف أنماط الوقت الفعلي)
-- 7 قوانين من نوع جديد لم تظهر من قبل
-
-لقوانين AND استخدم هذا الشكل:
-{{
-  "law_type": "compound_gap_digit",
-  "conditions": {{
-    "b_gap_lt": 500,
-    "digit_sum_mod": {{"mod": 6, "remainder": 2}}
-  }},
-  "prediction": 1,
-  "confidence": 88,
-  "description": "عندما تكون الفجوة صغيرة (<500) ومجموع الأرقام mod 6 = 2"
-}}
-
-تذكير مهم:
-- prediction=0 يعني الراعي🔴، prediction=1 يعني الثور🔵
-- القوانين متعددة الشروط تشترط شرطين معاً
-- أعد JSON مضغوط بدون مسافات زائدة (minified)
-- أعد المصفوفة مباشرة بدون أي نص قبلها أو بعدها
+أعد JSON array فقط، بدون أي نص خارجه:
 """
 
     try:
