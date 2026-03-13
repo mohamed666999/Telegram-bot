@@ -44,7 +44,8 @@ ADMIN_ID     = 6033203084
 
 AI_INVOKE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 AI_API_KEY    = "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"
-AI_MODEL      = "qwen/qwen3.5-397b-a17b"
+AI_MODEL       = "qwen/qwen3.5-397b-a17b"
+AI_MODEL_SMALL = "meta/llama-3.1-8b-instruct"  # fallback سريع عند 504
 AI_TIMEOUT    = 8.0
 LEARN_TIMEOUT = 900  # 15 دقيقة — Qwen يحتاج وقتاً للـ thinking
 
@@ -259,7 +260,7 @@ def load_laws(force: bool = False) -> List[Dict]:
                       AND accuracy >= 55
                       AND confidence >= 70
                     ORDER BY accuracy DESC, confidence DESC
-                    LIMIT 15
+                    LIMIT 12
                 """)
                 rows = cur.fetchall()
         laws = []
@@ -280,10 +281,27 @@ def load_laws(force: bool = False) -> List[Dict]:
         logger.info(f"✅ Loaded {len(laws)} active laws from DB")
 
         # تصحيح: القوانين غير المختبرة (used=0) تأخذ accuracy=50 في الذاكرة فقط
-        # (لا نغير DB هنا — فقط للحساب الفوري)
         for law in _laws_cache:
             if law.get('times_used', 0) == 0:
-                law['accuracy'] = 50.0   # إبطال الثقة المزيفة من Qwen
+                law['accuracy'] = 50.0
+
+        # تنظيف صامت: deactivate القوانين التي used=0 ولم تُنشأ اليوم
+        # (هذا يمنع تراكم 300+ قانون غير مُختبر)
+        try:
+            with db_pool.get_conn() as _conn:
+                with _conn.cursor() as _cur:
+                    _cur.execute("""
+                        UPDATE ai_laws SET active = FALSE
+                        WHERE active = TRUE
+                          AND times_used = 0
+                          AND created_at < NOW() - INTERVAL '24 hours'
+                    """)
+                    _deact = _cur.rowcount
+                _conn.commit()
+            if _deact > 0:
+                logger.info(f"load_laws: deactivated {_deact} untested laws (>24h old)")
+        except Exception as _e:
+            logger.debug(f"load_laws cleanup: {_e}")
 
         return laws
     except Exception as e:
@@ -451,11 +469,11 @@ def update_law_accuracy(law_id: int, correct: bool):
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
-                # دقة متحركة: 90% وزن للقديم + 10% للجديد
+                # دقة متحركة: 95% وزن للقديم + 5% للجديد (أبطأ = أكثر استقراراً)
                 new_val = 100.0 if correct else 0.0
                 cur.execute("""
                     UPDATE ai_laws
-                    SET accuracy = accuracy * 0.90 + %s * 0.10,
+                    SET accuracy = accuracy * 0.95 + %s * 0.05,
                         active   = CASE WHEN accuracy * 0.90 + %s * 0.10 < 30
                                         THEN FALSE ELSE active END
                     WHERE id = %s
@@ -630,73 +648,103 @@ def update_pattern_db(suit: str, rank: str, last_digit: int, winner: int):
 # ==================== 🤖 AI Client ====================
 # AI calls via aiohttp directly (Qwen3.5 NVIDIA REST)
 
-async def _nvidia_chat(messages: list, max_tokens: int = 512,
-                       temperature: float = 0.6, enable_thinking: bool = False,
-                       timeout: int = 60) -> str:
-    """يرسل طلباً إلى NVIDIA Qwen API ويعيد النص النهائي."""
+async def _nvidia_chat_single(messages: list, model: str, max_tokens: int,
+                               temperature: float, enable_thinking: bool,
+                               timeout: int) -> str:
+    """طلب واحد إلى NVIDIA API — بدون retry."""
     headers = {
         "Authorization": f"Bearer {AI_API_KEY}",
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
     }
     payload = {
-        "model": AI_MODEL,
+        "model": model,
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
         "top_p": 0.95,
         "top_k": 20,
         "stream": True,
-        "chat_template_kwargs": {"enable_thinking": enable_thinking},
     }
+    # enable_thinking فقط للنماذج التي تدعمها
+    if "qwen" in model.lower():
+        payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
+
     result = ""
     raw_lines_seen = 0
-    try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=timeout)
-        ) as session:
-            async with session.post(AI_INVOKE_URL, headers=headers, json=payload) as resp:
-                # سجّل HTTP status أولاً
-                logger.info(f"_nvidia_chat HTTP {resp.status} — model={AI_MODEL}")
-                if resp.status != 200:
-                    body = await resp.text()
-                    raise RuntimeError(f"HTTP {resp.status}: {body[:300]}")
-                async for raw_line in resp.content:
-                    raw_lines_seen += 1
-                    line = raw_line.decode("utf-8", errors="replace").strip()
-                    if not line:
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=timeout)
+    ) as session:
+        async with session.post(AI_INVOKE_URL, headers=headers, json=payload) as resp:
+            logger.info(f"_nvidia_chat_single HTTP {resp.status} — model={model}")
+            if resp.status != 200:
+                body = await resp.text()
+                raise RuntimeError(f"HTTP {resp.status}: {body[:200]}")
+            async for raw_line in resp.content:
+                raw_lines_seen += 1
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data_str)
+                    choices = chunk.get("choices", [])
+                    if not choices:
                         continue
-                    if not line.startswith("data:"):
-                        logger.debug(f"non-data line: {line[:80]}")
+                    delta = choices[0].get("delta", {})
+                    if delta.get("reasoning_content"):
                         continue
-                    data_str = line[5:].strip()
-                    if data_str == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data_str)
-                        choices = chunk.get("choices", [])
-                        if not choices:
-                            continue
-                        delta = choices[0].get("delta", {})
-                        # تجاهل thinking tokens
-                        if delta.get("reasoning_content"):
-                            continue
-                        content = delta.get("content") or ""
-                        if content:
-                            result += content
-                    except Exception as parse_err:
-                        logger.debug(f"chunk parse error: {parse_err} — {data_str[:80]}")
-                        continue
-    except asyncio.TimeoutError:
-        raise
-    except RuntimeError:
-        raise
-    except Exception as e:
-        raise RuntimeError(f"_nvidia_chat error: {e}")
-
-    logger.info(f"_nvidia_chat done: raw_lines={raw_lines_seen}, result_len={len(result)}")
+                    content = delta.get("content") or ""
+                    if content:
+                        result += content
+                except Exception:
+                    continue
     if not result and raw_lines_seen == 0:
-        raise RuntimeError("الاستجابة فارغة تماماً — تحقق من API Key والنموذج")
+        raise RuntimeError("استجابة فارغة")
+    return result
+
+
+async def _nvidia_chat(messages: list, max_tokens: int = 512,
+                       temperature: float = 0.6, enable_thinking: bool = False,
+                       timeout: int = 60) -> str:
+    """
+    يرسل طلباً إلى NVIDIA API مع retry ذكي:
+    - محاولة 1: Qwen3.5-397B  (max_tokens كامل)
+    - محاولة 2: Qwen3.5-397B  (max_tokens مخفض 50%) بعد 5 ث
+    - محاولة 3: Llama-3.1-8B  (نموذج صغير سريع) بعد 5 ث
+    """
+    attempts = [
+        (AI_MODEL,       max_tokens,           timeout),
+        (AI_MODEL,       max(800, max_tokens//2), min(timeout, 120)),
+        (AI_MODEL_SMALL, max(600, max_tokens//3), 90),
+    ]
+    last_err = None
+    for i, (model, tok, tout) in enumerate(attempts):
+        try:
+            if i > 0:
+                wait = 5 * i
+                logger.info(f"_nvidia_chat retry {i+1}/3 — model={model} tokens={tok} (wait {wait}s)")
+                await asyncio.sleep(wait)
+            result = await _nvidia_chat_single(messages, model, tok, temperature,
+                                               enable_thinking, tout)
+            logger.info(f"_nvidia_chat success on attempt {i+1} — len={len(result)}")
+            return result
+        except RuntimeError as e:
+            last_err = e
+            err_str = str(e)
+            # إذا 504 أو 500 → retry مع نموذج مختلف
+            if "504" in err_str or "500" in err_str or "timeout" in err_str.lower():
+                logger.warning(f"_nvidia_chat attempt {i+1} failed: {err_str[:100]}")
+                continue
+            # أخطاء أخرى (401, 400) → لا فائدة من retry
+            raise
+        except asyncio.TimeoutError:
+            last_err = RuntimeError("timeout")
+            logger.warning(f"_nvidia_chat attempt {i+1} timeout")
+            continue
+    raise RuntimeError(f"فشل كل المحاولات: {last_err}")
 
     result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL).strip()
     return result
@@ -1030,7 +1078,7 @@ def _build_math_memory(rounds: List[Dict]) -> Dict:
 
     # ترتيب بالانحياز (الأقوى أولاً)
     confirmed_patterns.sort(key=lambda x: -x["bias_pct"])
-    top_patterns = confirmed_patterns[:40]  # أقوى 40 نمط
+    top_patterns = confirmed_patterns[:20]  # أقوى 20 نمط
 
     # ── عينة الجولات الخام للـ AI ─────────────────────────────────────
     # نُرسل 80 جولة من الأحدث مع كل التفاصيل
@@ -1044,7 +1092,7 @@ def _build_math_memory(rounds: List[Dict]) -> Dict:
             "gap_sec": round(r["gap_sec"], 1) if r["gap_sec"] else None,
             "connected": r["connected"],
         }
-        for r in rounds[-80:]
+        for r in rounds[-40:]
     ]
 
     # ── إحصاءات streak بسيطة ─────────────────────────────────────────
@@ -1068,7 +1116,7 @@ def _build_math_memory(rounds: List[Dict]) -> Dict:
         },
         "confirmed_patterns": top_patterns,   # الأنماط المثبتة إحصائياً ← أهم شيء
         "transition_stats": streak_stats,
-        "raw_sample_last80": sample,
+        "raw_sample_last40": sample,
     }
 
 
@@ -1153,7 +1201,7 @@ prediction=1 = الثور 🔵 (Player/Blue)
 {json.dumps(memory["transition_stats"], ensure_ascii=False)}
 
 ━━━ عينة من آخر 80 جولة (الأحدث في النهاية) ━━━
-{json.dumps(memory["raw_sample_last80"][-30:], ensure_ascii=False)}
+{json.dumps(memory["raw_sample_last40"][-30:], ensure_ascii=False)}
 
 ━━━ القوانين الحالية (لا تكررها) ━━━
 {prev_laws_txt}
@@ -1185,7 +1233,7 @@ prediction=1 = الثور 🔵 (Player/Blue)
     try:
         raw_text = await _nvidia_chat(
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=8192,
+            max_tokens=3000,
             temperature=0.3,
             enable_thinking=False,
             timeout=LEARN_TIMEOUT,
@@ -1562,22 +1610,22 @@ _signal_perf: Dict[str, List[int]] = {}   # signal_name → [correct, total]
 
 def get_adaptive_weight(signal: str, base_weight: float) -> float:
     """
-    يُعيد وزناً ديناميكياً بناءً على دقة الإشارة مؤخراً.
-    إن لم تكن بيانات كافية → يعود للوزن الأساسي.
+    وزن ديناميكي محافظ — يتطلب 20 جولة على الأقل قبل التعديل.
+    الحد الأقصى للزيادة: 20% فقط لمنع overfitting.
     """
     perf = _signal_perf.get(signal)
-    if not perf or perf[1] < 5:
+    if not perf or perf[1] < 20:   # 20 جولة حد أدنى (بدل 5)
         return base_weight
-    acc = perf[0] / perf[1]          # 0.0 – 1.0
-    # خريطة: دقة 80%+ → ×1.6 | 50% → ×1.0 | 30%- → ×0.4
-    if acc >= 0.80:   factor = 1.6
-    elif acc >= 0.65: factor = 1.3
-    elif acc >= 0.50: factor = 1.0
-    elif acc >= 0.35: factor = 0.7
-    else:             factor = 0.4
+    acc = perf[0] / perf[1]
+    # نطاق محدود: 0.7 → 1.2 فقط (بدل 0.4 → 1.6)
+    if acc >= 0.65:   factor = 1.20
+    elif acc >= 0.55: factor = 1.10
+    elif acc >= 0.45: factor = 1.00
+    elif acc >= 0.35: factor = 0.85
+    else:             factor = 0.70
     return base_weight * factor
 
-def update_signal_perf(signal: str, correct: bool, window: int = 30):
+def update_signal_perf(signal: str, correct: bool, window: int = 60):
     """يُحدّث سجل أداء الإشارة (نافذة متحركة)."""
     if signal not in _signal_perf:
         _signal_perf[signal] = [0, 0]
@@ -2702,6 +2750,20 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         scores[mv_pred] += mv_boost
         logs.append(f"🏆 أغلبية: {WINNER_NAMES[mv_pred]} ({mv_agree}/{mv_total} محركات، ثقة {mv_conf:.0%})")
 
+    # ── حماية من overfitting: منع هيمنة اتجاه واحد ────────────────
+    total_score = scores[0] + scores[1]
+    if total_score > 0:
+        ratio = max(scores[0], scores[1]) / total_score
+        if ratio > 0.80:
+            # اسحب نحو 70/30 حداً أقصى
+            correction = (ratio - 0.70) * total_score
+            if scores[0] > scores[1]:
+                scores[0] -= correction
+                scores[1] += correction
+            else:
+                scores[1] -= correction
+                scores[0] += correction
+
     # ── الحساب النهائي ──────────────────────────────────────────────
     total_score = scores[0] + scores[1]
     if total_score == 0:
@@ -3597,7 +3659,7 @@ async def cmd_prune(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cur.execute("""
                     UPDATE ai_laws SET active = FALSE
                     WHERE times_used = 0
-                      AND created_at < NOW() - INTERVAL '7 days'
+                      AND created_at < NOW() - INTERVAL '12 hours'
                       AND active = TRUE
                 """)
                 dead_by_usage = cur.rowcount
