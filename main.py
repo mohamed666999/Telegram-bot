@@ -2892,7 +2892,8 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     active_signal_count = sum(1 for x in [
         mom_pred, streak_pred, mem_pred, sb_pred,
         mkv_pred, cyc_pred, lk_pred, rg_pred, bay_pred,
-        ac_pred, ng_pred, gh_pred, od_pred
+        ac_pred, ng_pred, gh_pred, od_pred,
+        pb_pred, sc_pred,
     ] if x is not None)
     consensus = amplify_consensus(scores, active_signal_count)
     if consensus > 1.05:
@@ -3082,7 +3083,8 @@ def format_prediction(pred: int, conf: int, reason: str,
     if context:
         analysis_txt += "\n".join(context) + "\n"
 
-    if sig_count >= 10:  engine_status = "⚡ 13 محرك نشط"
+    if sig_count >= 15:  engine_status = "⚡ 19 محرك نشط"
+    elif sig_count >= 10: engine_status = "⚡ محركات كاملة"
     elif sig_count >= 6: engine_status = "🔄 محركات متقدمة"
     else:                engine_status = "🔧 تعلم أولي"
 
@@ -3121,11 +3123,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"<b>🧠 HADES V19 — نظام التنبؤ الأسطوري</b>\n"
         f"{'━'*24}\n"
-        f"⚙️ <b>المحركات النشطة: 17</b>\n"
+        f"⚙️ <b>المحركات النشطة: 19</b>\n"
         f"  ⚖️ قوانين AI: <b>{laws_count}</b>  |  📊 قوانين بيانات: <b>{active_data_laws}</b>\n"
-        f"  🔗 ماركوف  |  🔄 دورات  |  🧬 DeepNGram\n"
+        f"  🔗 ماركوف-جلسة  |  🔄 دورات  |  🧬 DeepNGram\n"
         f"  🕰️ ارتباط زمني  |  🎯 EXACT  |  🏆 أغلبية\n"
         f"  ⚡ Hot-Switch  |  🧲 جذب تاريخي  |  ⏳ متأخر\n"
+        f"  🔀 ما بعد الانقطاع  |  🔢 إحصاءات السلسلة\n"
+        f"  ⏱️ حد الاتصال: <b>17 ث</b>  |  كسر ناعم: 17-90 ث\n"
         f"{'━'*24}\n"
         f"📋 <b>الأوامر:</b>\n"
         f"  🎮 /start — بدء جولة جديدة\n"
@@ -3250,7 +3254,9 @@ async def cmd_engine_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 <b>أداء الإشارات (تكيّفي):</b>\n{sig_text}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🤖 المحركات: Lookalike • Regime • Bayesian • Anti-Mode\n"
-        f"  + Markov • Cycle • Streak • MemShort • SuitBias • Laws"
+        f"  + Markov-Session • PostBreak • ChainStats\n"
+        f"  + Cycle • Streak • MemShort • SuitBias • Laws\n"
+        f"  ⏱️ حد الاتصال: 17ث | كسر ناعم: 17-90ث | كسر قوي: >90ث"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
