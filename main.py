@@ -2646,6 +2646,14 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     scores: Dict[int, float] = {0: 0.0, 1: 0.0}
     logs:   List[str]        = []
 
+    # تهيئة متغيرات الإشارات الجديدة لمنع UnboundLocalError
+    pb_pred: Optional[int] = None
+    pb_conf: float = 0.0
+    pb_log:  str   = ""
+    sc_pred: Optional[int] = None
+    sc_conf: float = 0.0
+    sc_log:  str   = ""
+
     # ── تاريخ حديث + فجوة b_num الأخيرة ────────────────────────────
     recent_history: List[int] = []
     all_history:    List[int] = []
@@ -2893,7 +2901,6 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         mom_pred, streak_pred, mem_pred, sb_pred,
         mkv_pred, cyc_pred, lk_pred, rg_pred, bay_pred,
         ac_pred, ng_pred, gh_pred, od_pred,
-        pb_pred, sc_pred,
     ] if x is not None)
     consensus = amplify_consensus(scores, active_signal_count)
     if consensus > 1.05:
@@ -2940,7 +2947,11 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
 
     # ── PB1: كاشف ما بعد الانقطاع ────────────────────────────────
     # يعمل فقط عند كسر ناعم أو قوي — يُكمّل الفراغ الذي تتركه محركات التسلسل
-    pb_pred, pb_conf, pb_log = post_break_predict(session_type, b_gap)
+    pb_pred, pb_conf, pb_log = None, 0.0, ""
+    try:
+        pb_pred, pb_conf, pb_log = post_break_predict(session_type, b_gap)
+    except Exception:
+        pass
     if pb_pred is not None:
         pb_weight = 2.0 if session_type == 'hard_break' else 1.2
         w = get_adaptive_weight('POST_BREAK', pb_weight)
@@ -2949,7 +2960,11 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
 
     # ── SC1: إحصاءات السلسلة المتصلة ────────────────────────────
     # يعمل فقط عندما الجلسة متصلة وبها 4+ جولات
-    sc_pred, sc_conf, sc_log = session_chain_stats(recent_history)
+    sc_pred, sc_conf, sc_log = None, 0.0, ""
+    try:
+        sc_pred, sc_conf, sc_log = session_chain_stats(recent_history)
+    except Exception:
+        pass
     if sc_pred is not None and session_type == 'connected':
         w = get_adaptive_weight('SESSION_CHAIN', 1.6)
         scores[sc_pred] += sc_conf * w
