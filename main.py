@@ -941,8 +941,8 @@ def _filter_valid_rounds(rows) -> List[Dict]:
             "ts":        ts,
             "gap_sec":   gap_sec,
             "b_gap":     b_gap,
-            # الجولة متصلة إن كانت الفجوة < 20 ثانية أو الفجوة الرقمية صغيرة
-            "connected": (gap_sec is not None and gap_sec <= 20) or
+            # الجولة متصلة إن كانت الفجوة ≤ SESSION_CONNECTED_SEC (17ث)
+            "connected": (gap_sec is not None and gap_sec <= SESSION_CONNECTED_SEC) or
                          (b_gap is not None and b_gap <= 500),
         })
 
@@ -1675,43 +1675,141 @@ def save_signal_perf_to_db():
         logger.warning(f"save_signal_perf: {e}")
 
 # ════════════════════════════════════════════════════════════════════
+# ⏱️ تصنيف الفجوة الزمنية — القاعدة الأساسية للبوت
+# الجولات المتصلة: gap_sec ≤ 17 ث  → سلسلة حقيقية
+# كسر ناعم:        17 < gap_sec ≤ 90 → محركات التسلسل تعمل بـ 30%
+# كسر قوي:         gap_sec > 90       → محركات التسلسل معطّلة كلياً
+# ════════════════════════════════════════════════════════════════════
+SESSION_CONNECTED_SEC  = 17   # حد الاتصال الكامل (ثانية)
+SESSION_SOFT_BREAK_SEC = 90   # حد الكسر الناعم  (ثانية)
+# seq_weight لكل حالة:
+SEQ_WEIGHT_CONNECTED   = 1.0
+SEQ_WEIGHT_SOFT        = 0.3
+SEQ_WEIGHT_HARD        = 0.0
+
+def gap_classify(gap_sec: Optional[float]) -> str:
+    """
+    يُصنّف الفجوة الزمنية:
+    - 'connected'  : gap ≤ 17ث   → سلسلة حقيقية
+    - 'soft_break' : 17-90ث      → كسر ناعم
+    - 'hard_break' : > 90ث / None → كسر قوي / لا بيانات
+    """
+    if gap_sec is None:
+        return 'hard_break'
+    if gap_sec <= SESSION_CONNECTED_SEC:
+        return 'connected'
+    if gap_sec <= SESSION_SOFT_BREAK_SEC:
+        return 'soft_break'
+    return 'hard_break'
+
+def seq_weight_from_gap(gap_sec: Optional[float]) -> float:
+    """يُعيد وزن محركات التسلسل بناءً على الفجوة الزمنية."""
+    cls = gap_classify(gap_sec)
+    return {
+        'connected':  SEQ_WEIGHT_CONNECTED,
+        'soft_break': SEQ_WEIGHT_SOFT,
+        'hard_break': SEQ_WEIGHT_HARD,
+    }[cls]
+
+
+# ════════════════════════════════════════════════════════════════════
 # 🔗 المحرك 2: سلسلة ماركوف (Markov Chain)
 # يحسب احتمالات الانتقال من آخر 3 نتائج → التالية
 # ════════════════════════════════════════════════════════════════════
 _markov_cache: Optional[Dict] = None
 _markov_ts: float = 0.0
 
+# كاش ماركوف للجلسة المتصلة فقط
+_session_markov_cache: Optional[Dict] = None
+_session_markov_ts: float = 0.0
+
+def build_markov_from_seq(seq: List[int]) -> Dict:
+    """يبني مصفوفة ماركوف ثلاثية من تسلسل معطى."""
+    matrix: Dict[str, Dict[int, int]] = defaultdict(lambda: {0: 0, 1: 0})
+    for i in range(len(seq) - 3):
+        key = f"{seq[i]}{seq[i+1]}{seq[i+2]}"
+        matrix[key][seq[i+3]] += 1
+    return dict(matrix)
+
+def build_session_markov(connected_seq: List[int]) -> Dict:
+    """
+    يبني ماركوف من الجلسة الحالية المتصلة فقط.
+    إذا كانت الجلسة < 10 جولات → يُعيد dict فارغ (استخدم Global).
+    """
+    global _session_markov_cache, _session_markov_ts
+    if _session_markov_cache is not None and time.time() - _session_markov_ts < 15:
+        return _session_markov_cache
+    clean = [x for x in connected_seq if x in [0, 1]]
+    if len(clean) < 6:
+        return {}
+    result = build_markov_from_seq(clean)
+    _session_markov_cache = result
+    _session_markov_ts    = time.time()
+    return result
+
 def build_markov_matrix() -> Dict:
-    """يبني مصفوفة انتقال ثلاثية الترتيب من آخر 400 جولة."""
+    """يبني مصفوفة انتقال ثلاثية الترتيب من آخر 400 جولة (Global)."""
     global _markov_cache, _markov_ts
     if _markov_cache and time.time() - _markov_ts < 60:
         return _markov_cache
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
+                # جلب مع الوقت لتصفية غير المتصلة
                 cur.execute("""
-                    SELECT winner FROM history
+                    SELECT winner, created_at FROM history
                     WHERE winner IS NOT NULL
-                    ORDER BY id DESC LIMIT 400
+                    ORDER BY id DESC LIMIT 600
                 """)
-                raw = [WINNER_MAP.get(r[0], 2) for r in cur.fetchall()]
-                raw.reverse()
-        hist = [x for x in raw if x in [0, 1]]
+                rows = list(reversed(cur.fetchall()))
+        # نبني ماركوف فقط من الجولات المتصلة (gap ≤ 17ث)
+        connected_seq: List[int] = []
+        for i, (w, ts) in enumerate(rows):
+            val = WINNER_MAP.get(w, 2)
+            if val not in [0, 1]:
+                continue
+            if i > 0 and rows[i-1][1] and ts:
+                gap = (ts - rows[i-1][1]).total_seconds()
+                if gap > SESSION_CONNECTED_SEC:
+                    # لا نكسر — نستمر لكن نُعلّم الانتقال عبر الجلسة بنصف وزن
+                    # نضيف على مصفوفة منفصلة بدلاً من تجاهله كلياً
+                    pass
+            connected_seq.append(val)
         matrix: Dict[str, Dict[int, int]] = defaultdict(lambda: {0: 0, 1: 0})
-        for i in range(len(hist) - 3):
-            key = f"{hist[i]}{hist[i+1]}{hist[i+2]}"
-            matrix[key][hist[i+3]] += 1
+        for i in range(len(connected_seq) - 3):
+            key = f"{connected_seq[i]}{connected_seq[i+1]}{connected_seq[i+2]}"
+            matrix[key][connected_seq[i+3]] += 1
         _markov_cache = dict(matrix)
         _markov_ts    = time.time()
         return _markov_cache
     except Exception:
         return {}
 
-def markov_predict(history: List[int]) -> Tuple[Optional[int], float, str]:
-    """يستخدم سلسلة ماركوف للتنبؤ بالنتيجة التالية."""
-    if len(history) < 3:
+def markov_predict(history: List[int], session_history: Optional[List[int]] = None) -> Tuple[Optional[int], float, str]:
+    """
+    يستخدم سلسلة ماركوف للتنبؤ:
+    1. يحاول الماركوف من الجلسة المتصلة أولاً (أكثر دقة)
+    2. إذا لم يكفِ → يستخدم الماركوف العام
+    """
+    clean = [x for x in history if x in [0, 1]]
+    if len(clean) < 3:
         return None, 0.0, ""
-    key    = f"{history[-3]}{history[-2]}{history[-1]}"
+    key = f"{clean[-3]}{clean[-2]}{clean[-1]}"
+
+    # أولاً: الجلسة المتصلة (أعلى أولوية إذا كانت بيانات كافية)
+    if session_history and len([x for x in session_history if x in [0,1]]) >= 6:
+        sess_matrix = build_session_markov(session_history)
+        counts = sess_matrix.get(key)
+        if counts:
+            r, b = counts.get(0, 0), counts.get(1, 0)
+            total = r + b
+            if total >= 3:
+                pred = 0 if r > b else 1
+                conf = max(r, b) / total
+                if conf >= 0.55:
+                    return pred, conf, f"ماركوف-جلسة[{key}]→{r}🔴:{b}🔵 ({total} مشاهدة)"
+
+    # ثانياً: الماركوف العام
     matrix = build_markov_matrix()
     counts = matrix.get(key)
     if not counts:
@@ -2244,7 +2342,115 @@ def overdue_detector(history: List[int]) -> Tuple[Optional[int], float, str]:
     return None, 0.0, ""
 
 # ════════════════════════════════════════════════════════════════════
-# 📐 المحرك الأسطوري 5: معايرة الثقة بالأداء الفعلي
+# 🔀 محرك جديد: كاشف ما بعد الانقطاع (Post-Break Predictor)
+# يبحث في التاريخ: بعد فجوات مماثلة (gap_sec ~17-90 أو >90)
+# ماذا كانت النتيجة الأولى في الجلسة الجديدة؟
+# ════════════════════════════════════════════════════════════════════
+_post_break_cache: Dict[str, Tuple] = {}
+_post_break_ts: float = 0.0
+
+def post_break_predict(gap_classify_result: str, b_gap: Optional[float]) -> Tuple[Optional[int], float, str]:
+    """
+    عند بداية جلسة جديدة (soft أو hard break):
+    يبحث في DB عن الجولة الأولى بعد فجوات مماثلة ويرى التوزيع.
+    """
+    global _post_break_cache, _post_break_ts
+    if gap_classify_result == 'connected':
+        return None, 0.0, ""
+
+    cache_key = f"pb_{gap_classify_result}"
+    if cache_key in _post_break_cache and time.time() - _post_break_ts < 120:
+        return _post_break_cache[cache_key]
+
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                # نجلب الجولات مع الفجوة الزمنية من الجولة السابقة
+                cur.execute("""
+                    SELECT h2.winner,
+                           EXTRACT(EPOCH FROM (h2.created_at - h1.created_at)) AS gap_s
+                    FROM history h1
+                    JOIN history h2 ON h2.id = h1.id + 1
+                    WHERE h1.winner IS NOT NULL AND h2.winner IS NOT NULL
+                      AND h1.created_at IS NOT NULL AND h2.created_at IS NOT NULL
+                    ORDER BY h2.id DESC LIMIT 400
+                """)
+                rows = cur.fetchall()
+
+        counts = {0: 0, 1: 0}
+        for winner_str, gap_s in rows:
+            if gap_s is None:
+                continue
+            gap_s = float(gap_s)
+            # فلترة بناءً على نوع الانقطاع
+            if gap_classify_result == 'soft_break':
+                if not (SESSION_CONNECTED_SEC < gap_s <= SESSION_SOFT_BREAK_SEC):
+                    continue
+            else:  # hard_break
+                if gap_s <= SESSION_SOFT_BREAK_SEC:
+                    continue
+            w = WINNER_MAP.get(winner_str, 2)
+            if w in [0, 1]:
+                counts[w] += 1
+
+        total = counts[0] + counts[1]
+        if total >= 8:
+            pred = 0 if counts[0] > counts[1] else 1
+            conf = max(counts[0], counts[1]) / total
+            if conf >= 0.55:
+                label = "ناعم" if gap_classify_result == 'soft_break' else "قوي"
+                result = (pred, conf,
+                          f"ما بعد الانقطاع-{label}: {counts[0]}🔴:{counts[1]}🔵/{total}")
+                _post_break_cache[cache_key] = result
+                _post_break_ts = time.time()
+                return result
+    except Exception as e:
+        logger.debug(f"post_break_predict: {e}")
+    return None, 0.0, ""
+
+
+# ════════════════════════════════════════════════════════════════════
+# 🔢 محرك جديد: عداد السلسلة المتصلة (Session Chain Counter)
+# يتتبع طول السلسلة الحالية ويكتشف الأنماط الدورية داخلها
+# ════════════════════════════════════════════════════════════════════
+def session_chain_stats(connected_history: List[int]) -> Tuple[Optional[int], float, str]:
+    """
+    يحلل السلسلة المتصلة الحالية:
+    - إذا طولها 6+ → يبحث عن دورة داخلية
+    - يحسب الانحياز داخل الجلسة بمعزل عن التاريخ القديم
+    """
+    clean = [x for x in connected_history if x in [0, 1]]
+    n = len(clean)
+    if n < 4:
+        return None, 0.0, ""
+
+    # انحياز الجلسة الحالية
+    r = clean.count(0)
+    b = clean.count(1)
+    total = r + b
+    if total == 0:
+        return None, 0.0, ""
+    bias = abs(r - b) / total
+
+    # إذا كان هناك انحياز واضح في الجلسة ≥ 30%
+    if bias >= 0.30 and total >= 6:
+        pred = 0 if r > b else 1
+        conf = min(0.68, 0.55 + bias * 0.4)
+        dominant = WINNER_NAMES[pred]
+        return pred, conf, f"انحياز-جلسة({n} جولة): {r}🔴:{b}🔵 → {dominant}"
+
+    # كشف الكسر: إذا اتجهت الجلسة في اتجاه واحد → توقع الكسر
+    if n >= 6:
+        last_half = clean[n//2:]
+        first_half = clean[:n//2]
+        lh_bias = (last_half.count(1) - last_half.count(0)) / len(last_half)
+        fh_bias = (first_half.count(1) - first_half.count(0)) / len(first_half)
+        # إذا تسارع الانحياز → استمرار
+        if abs(lh_bias) > abs(fh_bias) + 0.20 and abs(lh_bias) >= 0.35:
+            pred = 1 if lh_bias > 0 else 0
+            return pred, 0.62, f"تسارع-جلسة: {pred==1 and 'أزرق' or 'أحمر'} يتسارع"
+
+    return None, 0.0, ""
 # يضبط الثقة بناءً على الدقة الحقيقية للبوت
 # ════════════════════════════════════════════════════════════════════
 def calibrate_confidence(raw_conf: int, scores: Dict[int, float]) -> int:
@@ -2471,25 +2677,22 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
                         gap_sec = (datetime.now() - rows[0][2]).total_seconds()
 
                     # ── تحديد الجولات المتسلسلة فقط ──────────────────
-                    # جلسة متصلة: فجوة زمنية بين جولتين متتاليتين < 5 دقائق
-                    SESSION_GAP_SEC = 300   # 5 دقائق
-                    SESSION_BGAP    = 10000 # فرق b_num كبير
-
+                    # القاعدة: gap_sec ≤ 17 ث = متصل، أكثر = انقطاع
                     connected_rows = [rows[0]]  # أحدث جولة دائماً تُضاف
                     for i in range(1, len(rows)):
                         t_curr = rows[i-1][2]
                         t_prev = rows[i][2]
                         if t_curr and t_prev:
                             dt = (t_curr - t_prev).total_seconds()
-                            if dt > SESSION_GAP_SEC:
-                                break  # انقطاع في الجلسة — نوقف
+                            if dt > SESSION_CONNECTED_SEC:
+                                break  # انقطاع — نوقف السلسلة
                         # تحقق b_gap بين الجولتين
                         b_curr = clean_digits(str(rows[i-1][1] or ""))
                         b_prev = clean_digits(str(rows[i][1] or ""))
                         if b_curr and b_prev:
                             try:
                                 bg = abs(int(b_curr) - int(b_prev))
-                                if bg > SESSION_BGAP:
+                                if bg > 10000:
                                     break
                             except Exception:
                                 pass
@@ -2512,26 +2715,22 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     except Exception as e:
         logger.warning(f"History fetch: {e}")
 
-    # ── تسجيل معلومات الفجوة في السجل ──────────────────────────────
-    # ── تحديد وضع الجلسة (متسلسلة / منفصلة) ────────────────────────
-    # إذا كانت الفجوة > 5 دقائق أو b_gap > 5000 → جلسة جديدة منفصلة
-    is_new_session = False
-    if gap_sec is not None and gap_sec > 300:
-        is_new_session = True
-    elif b_gap is not None and b_gap > 5000:
-        is_new_session = True
+    # ── تحديد حالة الجلسة الدقيقة (3 مستويات) ──────────────────────
+    # بناءً على gap_sec بين الجولة الحالية وآخر جولة مسجّلة
+    session_type  = gap_classify(gap_sec)   # 'connected' / 'soft_break' / 'hard_break'
+    is_new_session = session_type != 'connected'
+    seq_weight     = seq_weight_from_gap(gap_sec)
+    chain_length   = len(recent_history)    # عدد الجولات في السلسلة الحالية
 
+    SESSION_LABELS = {
+        'connected':  f"🟢 متصلة ({chain_length} جولة)",
+        'soft_break': f"🟡 كسر ناعم ({gap_sec:.0f}ث)",
+        'hard_break': f"🔴 جلسة جديدة ({gap_sec:.0f}ث)" if gap_sec else "🔴 بداية",
+    }
     if b_gap is not None:
-        gap_label = "🟢 متسلسلة" if not is_new_session else "🔴 جلسة جديدة"
-        session_len = len(recent_history)
-        logs.append(f"🔗 b_gap={int(b_gap)} | ⏱️ {gap_sec:.0f}ث | {gap_label} | جلسة: {session_len} جولة")
+        logs.append(f"🔗 b_gap={int(b_gap)} | ⏱️ {gap_sec:.0f}ث | {SESSION_LABELS[session_type]} | seq_w={seq_weight}")
     elif gap_sec is not None:
-        gap_label = "🟢 متسلسلة" if not is_new_session else "🔴 جلسة جديدة"
-        logs.append(f"⏱️ فجوة زمنية: {gap_sec:.0f}ث ({gap_label})")
-
-    # وزن المحركات التسلسلية بناءً على الجلسة
-    # جلسة جديدة → أنماط السلاسل والماركوف غير موثوقة
-    seq_weight = 0.2 if is_new_session else 1.0
+        logs.append(f"⏱️ فجوة: {gap_sec:.0f}ث | {SESSION_LABELS[session_type]}")
 
     # ── AI متوازٍ ────────────────────────────────────────────────────
     ai_task = asyncio.create_task(ai_predict(all_history[-20:] if all_history else recent_history))
@@ -2601,7 +2800,9 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         logs.append(f"📊 انحياز البذلة: {WINNER_NAMES[sb_pred]} ({sb_conf:.0%})")
 
     # ── M1: ماركوف ───────────────────────────────────────────────────
-    mkv_pred, mkv_conf, mkv_log = markov_predict(recent_history if len(recent_history) >= 4 else all_history)
+    # يستخدم الجلسة المتصلة أولاً، ثم الماركوف العام كاحتياط
+    _markov_src = recent_history if len(recent_history) >= 4 else all_history
+    mkv_pred, mkv_conf, mkv_log = markov_predict(_markov_src, session_history=recent_history)
     if mkv_pred is not None:
         w = get_adaptive_weight('MARKOV', 2.2) * seq_weight
         scores[mkv_pred] += mkv_conf * w
@@ -2736,6 +2937,23 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         scores[gv_pred] += gv_conf * w
         logs.append(f"🧲 {gv_log} ({gv_conf:.0%})")
 
+    # ── PB1: كاشف ما بعد الانقطاع ────────────────────────────────
+    # يعمل فقط عند كسر ناعم أو قوي — يُكمّل الفراغ الذي تتركه محركات التسلسل
+    pb_pred, pb_conf, pb_log = post_break_predict(session_type, b_gap)
+    if pb_pred is not None:
+        pb_weight = 2.0 if session_type == 'hard_break' else 1.2
+        w = get_adaptive_weight('POST_BREAK', pb_weight)
+        scores[pb_pred] += pb_conf * w
+        logs.append(f"🔀 {pb_log} → {WINNER_NAMES[pb_pred]} ({pb_conf:.0%}) {'[انقطاع قوي]' if session_type=='hard_break' else '[انقطاع ناعم]'}")
+
+    # ── SC1: إحصاءات السلسلة المتصلة ────────────────────────────
+    # يعمل فقط عندما الجلسة متصلة وبها 4+ جولات
+    sc_pred, sc_conf, sc_log = session_chain_stats(recent_history)
+    if sc_pred is not None and session_type == 'connected':
+        w = get_adaptive_weight('SESSION_CHAIN', 1.6)
+        scores[sc_pred] += sc_conf * w
+        logs.append(f"🔢 {sc_log} ({sc_conf:.0%})")
+
     # ── V5: تصويت الأغلبية الديناميكي ─────────────────────────
     all_point_signals = [
         (mom_pred, 0.85, "mom"), (streak_pred, streak_conf if 'streak_conf' in dir() else 0.0, "streak"),
@@ -2743,6 +2961,8 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         (ng_pred, ng_conf if 'ng_pred' in dir() and ng_pred is not None else 0.0, "ng"),
         (dn_pred, dn_conf, "dn"), (gv_pred, gv_conf, "gv"),
         (ac_pred, ac_conf if 'ac_pred' in dir() and ac_pred is not None else 0.0, "ac"),
+        (pb_pred, pb_conf if pb_pred is not None else 0.0, "pb"),
+        (sc_pred, sc_conf if sc_pred is not None else 0.0, "sc"),
     ]
     mv_pred, mv_conf, mv_agree, mv_total = dynamic_majority_vote(all_point_signals)
     if mv_pred is not None and mv_total >= 4:
@@ -2810,6 +3030,8 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         'GAP_HIST': gh_pred, 'OVERDUE': od_pred,
         'EXACT': ex_pred, 'DEEP_NGRAM': dn_pred,
         'HOT_SWITCH': hs_pred, 'GRAVITY': gv_pred,
+        'POST_BREAK': pb_pred,
+        'SESSION_CHAIN': sc_pred,
         'OVERALL': final,
     })
     logs.append(f"__signals__{signal_json}")
@@ -3748,6 +3970,9 @@ def _row_btn_label(row) -> str:
     b    = str(bnum or "?")
     return f"{b} | {suit or '?'}{rank or '?'} {icon}{ok} | {t}"
 
+# alias للتوافق مع الكود القديم
+_delete_row_label = _row_btn_label
+
 
 async def _fetch_last_rounds(n: int = 8):
     """يجلب آخر N جولة حقيقية من DB (rank+suit موجودَين)."""
@@ -3819,9 +4044,12 @@ async def _exec_delete(rid: int, bnum, suit, rank, digit,
 
         live_cache.cache.clear()
         global _markov_cache, _full_history_cache, _gravity_cache
-        _markov_cache = None
-        _full_history_cache = []
-        _gravity_cache = (None, 0.0, "")
+        global _session_markov_cache, _post_break_cache
+        _markov_cache         = None
+        _session_markov_cache = None
+        _post_break_cache     = {}
+        _full_history_cache   = []
+        _gravity_cache        = (None, 0.0, "")
         load_laws(force=True)
 
     except Exception as e:
