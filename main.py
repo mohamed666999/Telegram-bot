@@ -242,8 +242,15 @@ _laws_loaded_at: float  = 0.0
 
 def load_laws(force: bool = False) -> List[Dict]:
     """
-    يُحمِّل القوانين من قاعدة البيانات.
-    يُعيد الكاش إن كان حديثاً (< 5 دقائق)، إلا إذا force=True.
+    يُحمِّل القوانين بنظام طبقتين:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    طبقة A — قوانين مُثبتة (times_used >= 5, accuracy >= 55):
+      تُحمَّل بثقة كاملة، وزن طبيعي.
+
+    طبقة B — قوانين تحت الاختبار (times_used < 5, عمرها < 48 ساعة):
+      تُحمَّل بـ accuracy=50 مؤقتاً لتُختبر فعلياً.
+      بعد 5 استخدامات: إما تثبت نفسها أو تُحذف تلقائياً.
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     """
     global _laws_cache, _laws_loaded_at
     if not force and time.time() - _laws_loaded_at < 300:
@@ -251,20 +258,37 @@ def load_laws(force: bool = False) -> List[Dict]:
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
+                # ── طبقة A: قوانين مُثبتة ──────────────────────────
                 cur.execute("""
                     SELECT id, law_type, conditions, prediction,
                            confidence, accuracy, times_used,
                            description, created_at
                     FROM ai_laws
                     WHERE active = TRUE
+                      AND times_used >= 5
                       AND accuracy >= 55
-                      AND confidence >= 70
-                    ORDER BY accuracy DESC, confidence DESC
-                    LIMIT 12
+                    ORDER BY accuracy DESC, times_used DESC
+                    LIMIT 10
                 """)
-                rows = cur.fetchall()
+                proven = cur.fetchall()
+
+                # ── طبقة B: قوانين تحت الاختبار (حديثة لم تُجرَّب بعد) ──
+                cur.execute("""
+                    SELECT id, law_type, conditions, prediction,
+                           confidence, accuracy, times_used,
+                           description, created_at
+                    FROM ai_laws
+                    WHERE active = TRUE
+                      AND times_used < 5
+                      AND created_at > NOW() - INTERVAL '48 hours'
+                    ORDER BY confidence DESC
+                    LIMIT 6
+                """)
+                probation = cur.fetchall()
+
         laws = []
-        for row in rows:
+        # أضف القوانين المثبتة
+        for row in proven:
             laws.append({
                 "id":          row[0],
                 "law_type":    row[1],
@@ -275,38 +299,60 @@ def load_laws(force: bool = False) -> List[Dict]:
                 "times_used":  int(row[6]),
                 "description": row[7],
                 "created_at":  row[8],
+                "tier":        "proven",
             })
+
+        # أضف القوانين تحت الاختبار — بـ accuracy=50 مؤقتاً
+        for row in probation:
+            laws.append({
+                "id":          row[0],
+                "law_type":    row[1],
+                "conditions":  row[2] if isinstance(row[2], dict) else json.loads(row[2] or "{}"),
+                "prediction":  row[3],
+                "confidence":  float(row[4]),
+                "accuracy":    50.0,   # مؤقت — ستُحدَّث بعد الاستخدام
+                "times_used":  int(row[6]),
+                "description": row[7],
+                "created_at":  row[8],
+                "tier":        "probation",
+            })
+
         _laws_cache     = laws
         _laws_loaded_at = time.time()
-        logger.info(f"✅ Loaded {len(laws)} active laws from DB")
+        n_proven    = sum(1 for l in laws if l.get('tier') == 'proven')
+        n_probation = sum(1 for l in laws if l.get('tier') == 'probation')
+        logger.info(f"✅ Laws loaded: {n_proven} proven + {n_probation} probation")
 
-        # تصحيح: القوانين غير المختبرة (used=0) تأخذ accuracy=50 في الذاكرة فقط
-        for law in _laws_cache:
-            if law.get('times_used', 0) == 0:
-                law['accuracy'] = 50.0
-
-        # تنظيف صامت: deactivate القوانين التي used=0 ولم تُنشأ اليوم
-        # (هذا يمنع تراكم 300+ قانون غير مُختبر)
+        # ── تنظيف صامت: حذف قوانين تحت الاختبار انتهت فرصتها ──────
         try:
             with db_pool.get_conn() as _conn:
                 with _conn.cursor() as _cur:
+                    # قوانين عمرها > 48 ساعة ولم تُستخدم أبداً → حذف
                     _cur.execute("""
                         UPDATE ai_laws SET active = FALSE
                         WHERE active = TRUE
                           AND times_used = 0
-                          AND created_at < NOW() - INTERVAL '24 hours'
+                          AND created_at < NOW() - INTERVAL '48 hours'
                     """)
-                    _deact = _cur.rowcount
+                    _d1 = _cur.rowcount
+                    # قوانين مُستخدمة 5+ مرات لكن دقتها < 40% → ضارة → حذف
+                    _cur.execute("""
+                        UPDATE ai_laws SET active = FALSE
+                        WHERE active = TRUE
+                          AND times_used >= 5
+                          AND accuracy < 40
+                    """)
+                    _d2 = _cur.rowcount
                 _conn.commit()
-            if _deact > 0:
-                logger.info(f"load_laws: deactivated {_deact} untested laws (>24h old)")
+            if _d1 or _d2:
+                logger.info(f"load_laws cleanup: expired={_d1}, harmful={_d2}")
         except Exception as _e:
             logger.debug(f"load_laws cleanup: {_e}")
 
         return laws
     except Exception as e:
         logger.error(f"load_laws error: {e}")
-        return _laws_cache  # أعِد الكاش القديم
+        return _laws_cache
 
 def match_law(law: Dict, suit: str, rank: str, last_digit: int,
               recent: List[int], b_num: str = "", b_gap: Optional[float] = None,
@@ -432,8 +478,9 @@ def apply_laws(suit: str, rank: str, last_digit: int,
         scores[pred] += weight * law_weight
 
         if match >= 0.8:
+            tier_label = " 🔬" if law.get('tier') == 'probation' else ""
             logs.append(
-                f"⚖️ قانون #{law['id']} ({law['law_type']}): "
+                f"⚖️ قانون #{law['id']} ({law['law_type']}){tier_label}: "
                 f"{WINNER_NAMES[pred]} — {law['description'][:60]}"
             )
 
@@ -1927,32 +1974,64 @@ def bnum_fingerprint(b_num: str, rank: str) -> List[Tuple[int, float, str]]:
 # ════════════════════════════════════════════════════════════════════
 def auto_manage_laws():
     """
-    يُشغَّل بعد كل تسجيل نتيجة:
-    - يُعطّل القوانين التي دقتها < 35% (ولُعبت > 5 مرات)
-    - يرفع confidence القوانين التي دقتها > 80%
+    يُشغَّل بعد كل تسجيل نتيجة — يُدير القوانين تلقائياً:
+
+    ① حذف سريع: دقة < 40% بعد 5 استخدامات فقط       ← ضار → يُحذف فوراً
+    ② حذف متوسط: دقة < 50% بعد 15 استخداماً          ← ضعيف → يُحذف
+    ③ حذف بطيء: دقة < 55% بعد 30 استخداماً           ← غير مفيد → يُحذف
+    ④ تعزيز: دقة > 75% بعد 8 استخدامات              ← ممتاز → يرتفع confidence
+    ⑤ ترقية: تحت الاختبار أثبت نفسه → يصبح مثبتاً
     """
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
-                # تعطيل القوانين السيئة
+
+                # ① حذف سريع — قانون ضار يُكتشف بعد 5 استخدامات
                 cur.execute("""
                     UPDATE ai_laws SET active = FALSE
-                    WHERE accuracy < 55 AND times_used >= 30 AND active = TRUE
+                    WHERE active = TRUE
+                      AND times_used >= 5 AND times_used < 15
+                      AND accuracy < 40
                 """)
-                disabled = cur.rowcount
+                d1 = cur.rowcount
 
-                # تعزيز القوانين الممتازة
+                # ② حذف متوسط — قانون ضعيف بعد 15 استخداماً
+                cur.execute("""
+                    UPDATE ai_laws SET active = FALSE
+                    WHERE active = TRUE
+                      AND times_used >= 15 AND times_used < 30
+                      AND accuracy < 50
+                """)
+                d2 = cur.rowcount
+
+                # ③ حذف بطيء — قانون غير مفيد بعد 30 استخداماً
+                cur.execute("""
+                    UPDATE ai_laws SET active = FALSE
+                    WHERE active = TRUE
+                      AND times_used >= 30
+                      AND accuracy < 55
+                """)
+                d3 = cur.rowcount
+
+                # ④ تعزيز — قانون ممتاز يُرفع confidence تدريجياً
                 cur.execute("""
                     UPDATE ai_laws
-                    SET confidence = LEAST(99, confidence * 1.05)
-                    WHERE accuracy > 80 AND times_used > 10 AND active = TRUE
+                    SET confidence = LEAST(97, confidence * 1.04)
+                    WHERE active = TRUE
+                      AND times_used >= 8
+                      AND accuracy > 75
                 """)
                 boosted = cur.rowcount
 
                 conn.commit()
-                if disabled or boosted:
+                total_disabled = d1 + d2 + d3
+                if total_disabled or boosted:
                     load_laws(force=True)
-                    logger.info(f"AutoLaw: disabled={disabled}, boosted={boosted}")
+                    logger.info(
+                        f"AutoLaw: killed={total_disabled} "
+                        f"(fast={d1}, mid={d2}, slow={d3}), "
+                        f"boosted={boosted}"
+                    )
     except Exception as e:
         logger.warning(f"auto_manage_laws: {e}")
 
@@ -3276,24 +3355,104 @@ async def cmd_engine_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="HTML")
 
 async def cmd_laws(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض القوانين النشطة."""
+    """عرض القوانين النشطة مع أزرار حذف (للمشرف)."""
+    is_admin = update.effective_user.id == ADMIN_ID
     laws = load_laws(force=True)
-    if not laws:
+
+    # جلب كل القوانين النشطة (بما فيها غير المُحمَّلة في الكاش)
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, law_type, prediction, confidence, accuracy, times_used, description
+                    FROM ai_laws WHERE active = TRUE
+                    ORDER BY accuracy DESC, times_used DESC
+                    LIMIT 25
+                """)
+                all_active = cur.fetchall()
+    except Exception:
+        all_active = []
+
+    if not all_active:
         await update.message.reply_text("⚠️ لا توجد قوانين نشطة. استخدم /force_learn أولاً.")
         return
 
-    text = f"⚖️ <b>القوانين الذكية النشطة ({len(laws)})</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
-    for i, law in enumerate(laws[:15], 1):
-        pred_name = WINNER_NAMES.get(law["prediction"], "?")
+    text = f"⚖️ <b>القوانين النشطة ({len(all_active)})</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    buttons = []
+    for row in all_active[:20]:
+        lid, ltype, lpred, lconf, lacc, lused, ldesc = row
+        pred_name = WINNER_NAMES.get(lpred, "?")
+        pred_icon = "🔴" if lpred == 0 else "🔵"
         text += (
-            f"\n<b>#{law['id']}</b> [{law['law_type']}] → {pred_name}\n"
-            f"  دقة: {law['accuracy']:.0f}% | استخدام: {law['times_used']}\n"
-            f"  <i>{html.escape(str(law['description'] or ''))[:70]}</i>\n"
+            f"\n<b>#{lid}</b> {pred_icon} [{ltype}] → {pred_name}\n"
+            f"  دقة: {lacc:.0f}% | conf: {lconf:.0f}% | ×{lused}\n"
+            f"  <i>{html.escape(str(ldesc or ''))[:65]}</i>\n"
         )
-    if len(laws) > 15:
-        text += f"\n<i>... و{len(laws)-15} قانون إضافي</i>"
+        if is_admin:
+            buttons.append([InlineKeyboardButton(
+                f"🗑️ حذف #{lid} [{ltype[:20]}]",
+                callback_data=f"deact_law_{lid}"
+            )])
 
-    await update.message.reply_text(text, parse_mode="HTML")
+    if len(all_active) > 20:
+        text += f"\n<i>... و{len(all_active)-20} قانون إضافي — استخدم /prune للتنظيف</i>"
+
+    kb = InlineKeyboardMarkup(buttons) if buttons else None
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+
+
+async def cmd_deactivate_law(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /deactivate <id>  — يُعطّل قانوناً بالـ ID مباشرة (مشرف فقط)
+    مثال: /deactivate 1950
+    """
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ هذا الأمر للمشرف فقط.")
+        return
+
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "⚠️ استخدم: <code>/deactivate &lt;id&gt;</code>\n"
+            "مثال: <code>/deactivate 1950</code>\n\n"
+            "استخدم /laws لرؤية الـ IDs",
+            parse_mode="HTML"
+        )
+        return
+
+    try:
+        law_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ الـ ID يجب أن يكون رقماً.")
+        return
+
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT law_type, prediction, accuracy, times_used FROM ai_laws WHERE id = %s",
+                    (law_id,)
+                )
+                row = cur.fetchone()
+                if not row:
+                    await update.message.reply_text(f"⚠️ لا يوجد قانون بالـ ID {law_id}")
+                    return
+                ltype, lpred, lacc, lused = row
+                cur.execute("UPDATE ai_laws SET active = FALSE WHERE id = %s", (law_id,))
+                conn.commit()
+        load_laws(force=True)
+        pred_name = WINNER_NAMES.get(lpred, "?")
+        await update.message.reply_text(
+            f"✅ <b>تم تعطيل القانون #{law_id}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📌 النوع: [{ltype}] → {pred_name}\n"
+            f"📊 الدقة: {lacc:.0f}% | الاستخدام: {lused}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔄 الذاكرة النشطة تم تحديثها.",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
 
 # ── helper: تعديل آمن ────────────────────────────────────────────────────────
 async def safe_edit(query, text: str, reply_markup=None):
@@ -3651,6 +3810,43 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif data == "del_cancel":
             await safe_edit(query, "✅ تم الإلغاء.")
+
+        elif data.startswith("deact_law_"):
+            # تعطيل قانون من زر /laws — مشرف فقط
+            if query.from_user.id != ADMIN_ID:
+                await safe_edit(query, "⛔ للمشرف فقط.")
+                return
+            try:
+                law_id = int(data.split("_")[2])
+            except (IndexError, ValueError):
+                await safe_edit(query, "❌ بيانات غير صالحة.")
+                return
+            try:
+                with db_pool.get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT law_type, prediction, accuracy FROM ai_laws WHERE id = %s",
+                            (law_id,)
+                        )
+                        row = cur.fetchone()
+                        if not row:
+                            await safe_edit(query, f"⚠️ لا يوجد قانون #{law_id}")
+                            return
+                        ltype, lpred, lacc = row
+                        cur.execute("UPDATE ai_laws SET active = FALSE WHERE id = %s", (law_id,))
+                        conn.commit()
+                load_laws(force=True)
+                pred_name = WINNER_NAMES.get(lpred, "?")
+                pred_icon = "🔴" if lpred == 0 else "🔵"
+                await safe_edit(
+                    query,
+                    f"🗑️ <b>تم تعطيل القانون #{law_id}</b>\n"
+                    f"[{ltype}] → {pred_icon} {pred_name}\n"
+                    f"دقة: {lacc:.0f}%\n\n"
+                    f"✅ الذاكرة تم تحديثها.",
+                )
+            except Exception as e:
+                await safe_edit(query, f"❌ خطأ: <code>{e}</code>")
 
         elif data == "del_more":
             # إعادة عرض قائمة الجولات للحذف
@@ -4497,6 +4693,7 @@ def main():
     app.add_handler(CommandHandler("start",       cmd_start))
     app.add_handler(CommandHandler("force_learn", cmd_force_learn))
     app.add_handler(CommandHandler("laws",        cmd_laws))
+    app.add_handler(CommandHandler("deactivate",  cmd_deactivate_law))
     app.add_handler(CommandHandler("stats",       cmd_stats))
     app.add_handler(CommandHandler("prune",       cmd_prune))
     app.add_handler(CommandHandler("reset_laws",  cmd_reset_laws))
