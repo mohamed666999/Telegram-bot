@@ -1168,6 +1168,98 @@ def _build_math_memory(rounds: List[Dict]) -> Dict:
 
 
 
+def backtest_law(law_dict: Dict, backtest_rows: List) -> Tuple[bool, float, int]:
+    """
+    يختبر القانون على جولات حقيقية من DB قبل حفظه.
+
+    المعايير:
+    - n_matched >= 15  : عينة كافية
+    - real_acc >= 54%  : دقة حقيقية تتفوق على العشوائية
+
+    يُعيد: (passes, real_accuracy, n_matched)
+    """
+    MIN_SAMPLE  = 15    # حد أدنى للعينة
+    MIN_ACC     = 0.54  # 54% حد القبول
+
+    pred = law_dict.get("prediction")
+    if pred not in [0, 1]:
+        return False, 0.0, 0
+
+    correct = 0
+    total   = 0
+
+    for row in backtest_rows:
+        # row: (id, b_num, suit, rank, bonus_last_digit, winner, created_at, b_gap, gap_sec)
+        b_num_r   = str(row[1] or "")
+        suit_r    = str(row[2] or "")
+        rank_r    = str(row[3] or "")
+        digit_r   = int(row[4]) if row[4] is not None else 0
+        winner_r  = WINNER_MAP.get(row[5], 2)
+        b_gap_r   = row[7]
+        gap_sec_r = float(row[8]) if row[8] is not None else None
+
+        if winner_r not in [0, 1]:
+            continue
+
+        clean_b = clean_digits(b_num_r)
+        match = match_law(
+            law_dict, suit_r, rank_r, digit_r,
+            recent=[],          # لا تاريخ في backtest — شروط السلاسل تُتجاهل
+            b_num=clean_b,
+            b_gap=b_gap_r,
+            gap_sec=gap_sec_r,
+            round_index=0,
+        )
+
+        if match < 0.7:
+            continue
+
+        total += 1
+        if winner_r == pred:
+            correct += 1
+
+    if total < MIN_SAMPLE:
+        return False, 0.0, total
+
+    real_acc = correct / total
+    passes   = real_acc >= MIN_ACC
+    return passes, real_acc, total
+
+
+def _fetch_backtest_rows() -> List:
+    """
+    يجلب آخر 400 جولة من DB للـ backtest.
+    يتضمن b_gap المحسوب من الفرق بين b_num المتتالية.
+    """
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        h.id,
+                        h.b_num,
+                        h.suit,
+                        h.rank,
+                        h.bonus_last_digit,
+                        h.winner,
+                        h.created_at,
+                        ABS(h.b_num::bigint -
+                            LAG(h.b_num::bigint) OVER (ORDER BY h.id)) AS b_gap,
+                        EXTRACT(EPOCH FROM
+                            (h.created_at -
+                             LAG(h.created_at) OVER (ORDER BY h.id))) AS gap_sec
+                    FROM history h
+                    WHERE h.winner IS NOT NULL
+                      AND h.rank IS NOT NULL AND h.rank NOT IN ('NULL','')
+                      AND h.b_num ~ '^[0-9]+$'
+                    ORDER BY h.id DESC LIMIT 400
+                """)
+                return cur.fetchall()
+    except Exception as e:
+        logger.warning(f"_fetch_backtest_rows: {e}")
+        return []
+
+
 async def force_learn_engine(status_callback) -> Dict:
     """
     تعلم رياضي عميق:
@@ -1293,8 +1385,12 @@ prediction=1 = الثور 🔵 (Player/Blue)
 
     await status_callback(
         "✅ <b>المرحلة 3/5</b> — Qwen أكمل التحليل\n\n"
-        "💾 <b>المرحلة 4/5</b> — حفظ القوانين في قاعدة البيانات..."
+        "🔬 <b>المرحلة 4/5</b> — Backtest على التاريخ الحقيقي..."
     )
+
+    # ── جلب بيانات الـ backtest مرة واحدة لكل القوانين ──────────────
+    backtest_rows = _fetch_backtest_rows()
+    logger.info(f"Backtest rows: {len(backtest_rows)}")
 
     # ── استخراج وحفظ القوانين ────────────────────────────────────────
     laws_data = extract_json_safe(raw_text)
@@ -1330,6 +1426,8 @@ prediction=1 = الثور 🔵 (Player/Blue)
 
     saved = 0
     skipped = 0
+    rejected_bt = 0   # مرفوض بالـ backtest
+    sample_laws_saved = []
 
     try:
         with db_pool.get_conn() as conn:
@@ -1350,6 +1448,23 @@ prediction=1 = الثور 🔵 (Player/Blue)
                         skipped += 1
                         continue
 
+                    # ── Backtest إجباري قبل الحفظ ────────────────────
+                    # نختبر القانون على آخر 400 جولة حقيقية
+                    # إذا لم يتجاوز 54% أو عينته < 15 → يُرفض
+                    bt_passes, bt_acc, bt_n = backtest_law(law, backtest_rows)
+                    if not bt_passes:
+                        rejected_bt += 1
+                        logger.info(
+                            f"Backtest REJECTED: {law.get('law_type')} "
+                            f"acc={bt_acc:.0%} n={bt_n} "
+                            f"({'عينة صغيرة' if bt_n < 15 else 'دقة ضعيفة'})"
+                        )
+                        continue
+
+                    # ── القانون اجتاز الـ backtest — احفظه ─────────────
+                    # accuracy الابتدائية = الدقة الحقيقية من الـ backtest
+                    initial_acc = round(bt_acc * 100, 1)
+
                     law_name = f"{law.get('law_type', 'COMBINED')}_{saved}_{int(time.time())}"
                     cur.execute("""
                         INSERT INTO ai_laws
@@ -1360,7 +1475,7 @@ prediction=1 = الثور 🔵 (Player/Blue)
                             SET conditions  = EXCLUDED.conditions,
                                 prediction  = EXCLUDED.prediction,
                                 confidence  = EXCLUDED.confidence,
-                                accuracy    = 50.0,
+                                accuracy    = EXCLUDED.accuracy,
                                 description = EXCLUDED.description,
                                 active      = TRUE,
                                 times_used  = 0
@@ -1370,10 +1485,12 @@ prediction=1 = الثور 🔵 (Player/Blue)
                         json.dumps(cond, ensure_ascii=False),
                         int(pred),
                         float(law.get("confidence", 70)),
-                        50.0,  # accuracy ابتدائية = 50% — ترتفع مع الاستخدام الفعلي
-                        law.get("description", ""),
+                        initial_acc,   # دقة حقيقية من backtest وليس من Qwen
+                        f"{law.get('description', '')} [bt:{bt_acc:.0%}/{bt_n}]",
                     ))
                     saved += 1
+                    if len(sample_laws_saved) < 3:
+                        sample_laws_saved.append({**law, "bt_acc": bt_acc, "bt_n": bt_n})
 
                 # احفظ ملخص الجلسة
                 cur.execute("""
@@ -1382,15 +1499,17 @@ prediction=1 = الثور 🔵 (Player/Blue)
                     VALUES (%s, %s, %s, %s, %s)
                 """, (
                     total_rounds, saved, 0,
-                    f"جلسة #{session_id}: {saved} قانون جديد من {total_rounds} جولة",
-                    json.dumps({"memory_keys": list(memory.keys())}, ensure_ascii=False)
+                    f"جلسة #{session_id}: {saved} قانون نجح backtest من أصل {len(laws_data)} ({rejected_bt} مرفوض)",
+                    json.dumps({"memory_keys": list(memory.keys()),
+                                "backtest_rows": len(backtest_rows)}, ensure_ascii=False)
                 ))
                 conn.commit()
     except Exception as e:
         return {"error": f"خطأ في حفظ القوانين: {e}"}
 
     await status_callback(
-        f"✅ <b>المرحلة 4/5</b> — تم حفظ <b>{saved}</b> قانون\n\n"
+        f"✅ <b>المرحلة 4/5</b> — <b>{saved}</b> قانون نجح الـ backtest"
+        f"  |  ❌ {rejected_bt} مرفوض\n\n"
         f"🔄 <b>المرحلة 5/5</b> — تحديث الذاكرة النشطة..."
     )
 
@@ -1398,11 +1517,13 @@ prediction=1 = الثور 🔵 (Player/Blue)
     load_laws(force=True)
 
     return {
-        "total_rounds": total_rounds,
-        "laws_saved":   saved,
-        "laws_skipped": skipped,
-        "session_id":   session_id,
-        "sample_laws":  laws_data[:3],
+        "total_rounds":   total_rounds,
+        "laws_saved":     saved,
+        "laws_skipped":   skipped,
+        "laws_rejected":  rejected_bt,
+        "session_id":     session_id,
+        "sample_laws":    sample_laws_saved,
+        "backtest_rows":  len(backtest_rows),
     }
 
 def _build_statistical_memory(rows) -> Dict:
@@ -3285,8 +3406,10 @@ async def cmd_force_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ <b>اكتملت جلسة التعلم العميق!</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🎮 الجولات المحللة: <b>{result['total_rounds']}</b>\n"
-        f"⚖️ قوانين جديدة حُفظت: <b>{result['laws_saved']}</b>\n"
-        f"⏭️ قوانين مرفوضة: <b>{result['laws_skipped']}</b>\n"
+        f"🔬 Backtest على: <b>{result.get('backtest_rows', 0)}</b> جولة حقيقية\n"
+        f"✅ قوانين نجحت: <b>{result['laws_saved']}</b>\n"
+        f"❌ مرفوضة (backtest): <b>{result.get('laws_rejected', 0)}</b>\n"
+        f"⏭️ غير صالحة: <b>{result['laws_skipped']}</b>\n"
         f"🆔 رقم الجلسة: <b>#{result.get('session_id', '?')}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>عينة من القوانين المكتشفة:</b>"
