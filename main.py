@@ -429,6 +429,17 @@ def match_law(law: Dict, suit: str, rank: str, last_digit: int,
         if "gap_sec_lt" in cond: chk(gap_sec < float(cond["gap_sec_lt"]))
         if "gap_sec_gt" in cond: chk(gap_sec > float(cond["gap_sec_gt"]))
 
+    # ── شروط timestamp mod (RNG seed patterns) ───────────────────────
+    if "ts_mod" in cond:
+        # round_index يُستخدم هنا لتمرير unix timestamp
+        # يُمرَّر في predict() كـ unix_ts بدلاً من round_index
+        c = cond["ts_mod"]
+        try:
+            ts_val = int(time.time()) if round_index == 0 else round_index
+            chk(ts_val % int(c["mod"]) == int(c["remainder"]))
+        except Exception:
+            pass
+
     if total == 0:
         return 0.5
     return score / total
@@ -1123,6 +1134,38 @@ def _build_math_memory(rounds: List[Dict]) -> Dict:
                     v, min_n=8, min_bias=0.25
                 )
 
+    # 8. timestamp mod N → winner
+    # إذا كان الـ RNG مبنياً على الوقت، قد يعطي انحيازاً حقيقياً
+    ts_has_data = any(r.get("ts") is not None for r in rounds)
+    ts_mod_patterns = {}
+    if ts_has_data:
+        for mod in [5, 6, 7, 8, 9, 11, 13, 16, 17]:
+            mod_stats = defaultdict(lambda: [0, 0])
+            for r in rounds:
+                if r.get("ts") and r["winner"] in [0, 1]:
+                    try:
+                        unix_ts = int(r["ts"].timestamp())
+                        rem = unix_ts % mod
+                        mod_stats[rem][r["winner"]] += 1
+                    except Exception:
+                        pass
+            for rem, v in mod_stats.items():
+                add_if_significant(
+                    f"timestamp mod {mod} == {rem}",
+                    {"ts_mod": {"mod": mod, "remainder": rem}},
+                    v, min_n=30, min_bias=0.12
+                )
+            # احفظ الملخص للـ AI
+            summary = {}
+            for rem, v in mod_stats.items():
+                n = v[0] + v[1]
+                if n >= 20:
+                    bias = round((v[1] - v[0]) / n * 100, 1)
+                    summary[str(rem)] = {"n": n, "bias_pct": bias,
+                                         "red": v[0], "blue": v[1]}
+            if summary:
+                ts_mod_patterns[f"ts_mod_{mod}"] = summary
+
     # ترتيب بالانحياز (الأقوى أولاً)
     confirmed_patterns.sort(key=lambda x: -x["bias_pct"])
     top_patterns = confirmed_patterns[:20]  # أقوى 20 نمط
@@ -1161,7 +1204,8 @@ def _build_math_memory(rounds: List[Dict]) -> Dict:
             "ranked_rounds": len(ranked),
             "note": "winner=0 means Banker(red), winner=1 means Player(blue)"
         },
-        "confirmed_patterns": top_patterns,   # الأنماط المثبتة إحصائياً ← أهم شيء
+        "confirmed_patterns": top_patterns,
+        "timestamp_mod_patterns": ts_mod_patterns,  # أنماط الوقت — قد تكشف RNG seed
         "transition_stats": streak_stats,
         "raw_sample_last40": sample,
     }
@@ -1195,6 +1239,7 @@ def backtest_law(law_dict: Dict, backtest_rows: List) -> Tuple[bool, float, int]
         rank_r    = str(row[3] or "")
         digit_r   = int(row[4]) if row[4] is not None else 0
         winner_r  = WINNER_MAP.get(row[5], 2)
+        created_r = row[6]   # created_at timestamp
         b_gap_r   = row[7]
         gap_sec_r = float(row[8]) if row[8] is not None else None
 
@@ -1202,13 +1247,15 @@ def backtest_law(law_dict: Dict, backtest_rows: List) -> Tuple[bool, float, int]
             continue
 
         clean_b = clean_digits(b_num_r)
+        # نمرر unix timestamp كـ round_index لدعم ts_mod conditions
+        unix_ts_r = int(created_r.timestamp()) if created_r else int(time.time())
         match = match_law(
             law_dict, suit_r, rank_r, digit_r,
-            recent=[],          # لا تاريخ في backtest — شروط السلاسل تُتجاهل
+            recent=[],
             b_num=clean_b,
             b_gap=b_gap_r,
             gap_sec=gap_sec_r,
-            round_index=0,
+            round_index=unix_ts_r,   # unix timestamp للـ ts_mod
         )
 
         if match < 0.7:
@@ -1336,6 +1383,9 @@ prediction=1 = الثور 🔵 (Player/Blue)
 
 {json.dumps(memory["confirmed_patterns"][:25], ensure_ascii=False, indent=1)}
 
+━━━ أنماط Timestamp mod N (RNG seed detection) ━━━
+{json.dumps(memory.get("timestamp_mod_patterns", {}), ensure_ascii=False, indent=1) if memory.get("timestamp_mod_patterns") else "لا بيانات timestamp كافية"}
+
 ━━━ إحصاءات الانتقال ━━━
 {json.dumps(memory["transition_stats"], ensure_ascii=False)}
 
@@ -1354,6 +1404,7 @@ prediction=1 = الثور 🔵 (Player/Blue)
 {{"law_type":"اسم","conditions":{{...}},"prediction":0أو1,"confidence":60-90,"description":"الشرط الحقيقي والانحياز المئوي"}}
 
 أنواع conditions المتاحة:
+- {{"ts_mod":{{"mod":N,"remainder":K}}}} — unix timestamp mod N (RNG seed pattern)
 - {{"digit_sum_mod":{{"mod":N,"remainder":K}}}}
 - {{"digit":N}} — آخر رقم من b_num
 - {{"b_gap_lt":N}} أو {{"b_gap_gte":N}}
@@ -2914,9 +2965,9 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
                     all_history = [WINNER_MAP.get(r[0], 2) for r in rows]
                     all_history.reverse()
 
-                    # موضع الجولة
+                    # موضع الجولة + unix timestamp للـ ts_mod conditions
                     cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL")
-                    round_index = cur.fetchone()[0]
+                    round_index = int(time.time())  # unix timestamp للـ ts_mod
                 else:
                     all_history = []
                     connected_rows = []
