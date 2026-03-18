@@ -288,9 +288,21 @@ def load_laws(force: bool = False) -> List[Dict]:
                 """)
                 probation = cur.fetchall()
 
+        # ── دالة مساعدة: هل القانون مشمول بـ aliasing؟ ─────────────────
+        def _is_aliasing_law(cond_raw) -> bool:
+            """يُعيد True إذا كان القانون ts_mod بـ mod مشبوه (aliasing مع gap=33ث)."""
+            try:
+                c = cond_raw if isinstance(cond_raw, dict) else json.loads(cond_raw or "{}")
+                ts_m = c.get("ts_mod", {})
+                return bool(ts_m) and int(ts_m.get("mod", 0)) in (11, 13, 16, 17)
+            except Exception:
+                return False
+
         laws = []
         # أضف القوانين المثبتة
         for row in proven:
+            if _is_aliasing_law(row[2]):
+                continue   # تجاهل قوانين ts_mod الـ aliasing
             laws.append({
                 "id":          row[0],
                 "law_type":    row[1],
@@ -306,6 +318,8 @@ def load_laws(force: bool = False) -> List[Dict]:
 
         # أضف القوانين تحت الاختبار — بـ accuracy=50 مؤقتاً
         for row in probation:
+            if _is_aliasing_law(row[2]):
+                continue   # تجاهل قوانين ts_mod الـ aliasing
             laws.append({
                 "id":          row[0],
                 "law_type":    row[1],
@@ -1163,7 +1177,8 @@ def _build_math_memory(rounds: List[Dict]) -> Dict:
     ts_has_data = any(r.get("ts") is not None for r in rounds)
     ts_mod_patterns = {}
     if ts_has_data:
-        for mod in [5, 6, 7, 8, 9, 11, 13, 16, 17]:
+        # mod 11,13,16,17 محذوفة — aliasing مع gap=33ث (33%11=0, 34%17=0)
+        for mod in [5, 6, 7, 8, 9]:
             mod_stats = defaultdict(lambda: [0, 0])
             for r in rounds:
                 if r.get("ts") and r["winner"] in [0, 1]:
@@ -2223,12 +2238,13 @@ def auto_manage_laws():
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
 
-                # 0️⃣ القتل السريع جداً — قانون فشل في أول 2-4 محاولات (accuracy_recent < 20)
+                # 0️⃣ القتل السريع جداً — قانون نزل دون 60% في أول 2-4 محاولات
+                # EMA بدأ من bt_acc، فشلان متتاليان يخفضانه لـ ~61% → نقتله
                 cur.execute("""
                     UPDATE ai_laws SET active = FALSE
                     WHERE active = TRUE
                       AND times_used IN (2, 3, 4)
-                      AND accuracy_recent < 20
+                      AND accuracy_recent < 60
                 """)
                 d0 = cur.rowcount
 
@@ -3295,14 +3311,14 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         logs.append(f"🔢 {sc_log} ({sc_conf:.0%})")
 
     # ── V5: تصويت الأغلبية الديناميكي ─────────────────────────
+    # تصويت الأغلبية: 5 محركات كبرى فقط — المحركات الصغيرة تُلغي بعضها
+    # Lookalike, Regime, Bayesian, DeepNGram, PostBreak = أعلى دقة إحصائياً
     all_point_signals = [
-        (mom_pred, 0.85, "mom"), (streak_pred, streak_conf if 'streak_conf' in dir() else 0.0, "streak"),
-        (mkv_pred, mkv_conf, "mkv"), (cyc_pred, cyc_conf if 'cyc_pred' in dir() and cyc_pred is not None else 0.0, "cyc"),
-        (ng_pred, ng_conf if 'ng_pred' in dir() and ng_pred is not None else 0.0, "ng"),
-        (dn_pred, dn_conf, "dn"), (gv_pred, gv_conf, "gv"),
-        (ac_pred, ac_conf if 'ac_pred' in dir() and ac_pred is not None else 0.0, "ac"),
-        (pb_pred, pb_conf if pb_pred is not None else 0.0, "pb"),
-        (sc_pred, sc_conf if sc_pred is not None else 0.0, "sc"),
+        (lk_pred,  lk_conf,                                    "lk"),   # Lookalike
+        (rg_pred,  rg_conf,                                    "rg"),   # Regime
+        (bay_pred, bay_conf if bay_pred is not None else 0.0,  "bay"),  # Bayesian
+        (dn_pred,  dn_conf,                                    "dn"),   # DeepNGram
+        (pb_pred,  pb_conf if pb_pred is not None else 0.0,    "pb"),   # Post-break
     ]
     mv_pred, mv_conf, mv_agree, mv_total = dynamic_majority_vote(all_point_signals)
     if mv_pred is not None and mv_total >= 4:
@@ -4360,7 +4376,7 @@ async def cmd_prune(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     WITH ranked AS (
                         SELECT id,
                                ROW_NUMBER() OVER (
-                                   PARTITION BY conditions::text, prediction
+                                   PARTITION BY conditions::text
                                    ORDER BY accuracy DESC, times_used DESC
                                ) as rn
                         FROM ai_laws WHERE active = TRUE
