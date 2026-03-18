@@ -45,7 +45,7 @@ ADMIN_ID     = 6033203084
 
 AI_INVOKE_URL  = "https://integrate.api.nvidia.com/v1"   # base_url للـ OpenAI client
 AI_API_KEY     = "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"
-AI_MODEL       = "deepseek-ai/deepseek-r1-0528"          # DeepSeek R1 — thinking + reasoning
+AI_MODEL       = "deepseek-ai/deepseek-v3.2"             # DeepSeek V3.2 — متاح على NVIDIA
 AI_MODEL_SMALL = "meta/llama-3.1-8b-instruct"            # fallback سريع عند 504
 AI_TIMEOUT    = 8.0
 LEARN_TIMEOUT = 900  # 15 دقيقة — Qwen يحتاج وقتاً للـ thinking
@@ -756,7 +756,7 @@ async def _nvidia_chat_single(messages: list, model: str, max_tokens: int,
             base_url=AI_INVOKE_URL,
             api_key=AI_API_KEY,
         )
-        # DeepSeek thinking mode
+        # DeepSeek V3.2 thinking mode
         extra = {}
         if "deepseek" in model.lower() and enable_thinking:
             extra["extra_body"] = {"chat_template_kwargs": {"thinking": True}}
