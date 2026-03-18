@@ -1288,7 +1288,7 @@ def backtest_law(law_dict: Dict, backtest_rows: List) -> Tuple[bool, float, int]
     - Split يُستخدم فقط لاكتشاف الانهيار:
       يُرفض إذا كان النصف الأحدث (t_new >= 8) أقل من 50% صراحةً
     """
-    MIN_TOTAL_SAMPLE = 18
+    MIN_TOTAL_SAMPLE = 15
     MIN_TOTAL_ACC    = 0.535
 
     pred = law_dict.get("prediction")
@@ -1317,7 +1317,7 @@ def backtest_law(law_dict: Dict, backtest_rows: List) -> Tuple[bool, float, int]
     acc_old = (c_old / t_old) if t_old > 0 else 0.0
 
     # يُرفض فقط إذا كان يفشل صراحةً في البيانات الحديثة
-    if t_new >= 8 and acc_new < 0.50:
+    if t_new >= 6 and acc_new < 0.50:
         logger.info(
             f"Backtest REJECT (drifted): {law_dict.get('law_type')} "
             f"total={acc_total:.0%} new={acc_new:.0%}/{t_new}"
