@@ -3236,14 +3236,10 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         scores[dominant] *= consensus
         logs.append(f"📡 إجماع ×{consensus:.2f} ({active_signal_count}/9 إشارات)")
 
-    # ── X4: Anti-Mode (الانعكاس التلقائي) ────────────────────────────
-    anti_active, recent_acc = check_anti_mode()
-    pre_anti_final = 0 if scores[0] > scores[1] else 1
-    if anti_active:
-        scores[0], scores[1] = scores[1], scores[0]   # اعكس كل الأوزان
-        logs.append(f"🔃 وضع الانعكاس (دقة حالية {recent_acc:.0%}) — تم عكس التوقع")
-    elif recent_acc > 0.62:
-        logs.append(f"✅ دقة حالية ممتازة: {recent_acc:.0%}")
+    # ── X4: Anti-Mode — مُعطَّل (كان يسبب حلقة عكس مفرغة) ──────────────
+    # التحليل أثبت: المحركات الأساسية دقتها 67% لكن anti-mode كان يعكسها → 33%
+    # نحتفظ بـ recent_acc فقط لضبط الثقة
+    _, recent_acc = check_anti_mode()
 
     # ── V1: أنماط EXACT ─────────────────────────────────────────────
     ex_pred, ex_conf, ex_log = exact_pattern_predict(suit, rank, last_digit)
