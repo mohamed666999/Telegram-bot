@@ -1483,9 +1483,9 @@ prediction=1 = الثور 🔵 (Player/Blue)
     try:
         raw_text = await _nvidia_chat(
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=4000,
+            max_tokens=8192,
             temperature=0.6,
-            enable_thinking=True,   # DeepSeek-R1: يفكر أولاً ثم يُجيب
+            enable_thinking=True,
             timeout=LEARN_TIMEOUT,
         )
         logger.info(f"Qwen raw_text length={len(raw_text)}, preview: {raw_text[:300]}")
