@@ -112,6 +112,20 @@ DATA_LAWS: List[Dict] = [
     {"id": -8, "law_type": "data_after_4x_blue", "conditions": {"streak": {"length": 4, "value": 1}},
      "prediction": 0, "confidence": 58, "accuracy": 58.5, "times_used": 41,
      "description": "بعد 4 ثيران متتالية → الراعي 🔴 (bias=0.17)", "active": True},
+
+    # ── Temporal Engine Laws (مُثبتة بـ chi-square p<0.05 من 2276 جولة) ──
+    # ts%8=1 → BLUE (p=0.031, bias=18.3%, n=208)
+    {"id": -9, "law_type": "temporal_ts_mod8_r1", "conditions": {"ts_mod": {"mod": 8, "remainder": 1}},
+     "prediction": 1, "confidence": 59, "accuracy": 59.1, "times_used": 208,
+     "description": "unix_timestamp mod 8 = 1 → الثور 🔵 (p=0.031)", "active": True},
+    # ts%11=5 → BLUE (p=0.031, bias=21.0%, n=157)
+    {"id": -10, "law_type": "temporal_ts_mod11_r5", "conditions": {"ts_mod": {"mod": 11, "remainder": 5}},
+     "prediction": 1, "confidence": 60, "accuracy": 60.5, "times_used": 157,
+     "description": "unix_timestamp mod 11 = 5 → الثور 🔵 (p=0.031)", "active": True},
+    # round_idx%32=7 → RED (p=0.045, bias=29.6%, n=71)
+    {"id": -11, "law_type": "temporal_idx_mod32_r7", "conditions": {"cycle_position": {"cycle": 32, "position": 7}},
+     "prediction": 0, "confidence": 58, "accuracy": 64.8, "times_used": 71,
+     "description": "round_index mod 32 = 7 → الراعي 🔴 (p=0.045)", "active": True},
 ]
 DATA_LAW_WEIGHT = 2.2   # وزن القوانين الحقيقية
 
@@ -1899,8 +1913,8 @@ def save_signal_perf_to_db():
 # كسر ناعم:        17 < gap_sec ≤ 90 → محركات التسلسل تعمل بـ 30%
 # كسر قوي:         gap_sec > 90       → محركات التسلسل معطّلة كلياً
 # ════════════════════════════════════════════════════════════════════
-SESSION_CONNECTED_SEC  = 20   # حد الاتصال الكامل (ثانية) — gap < 20ث = متصل
-SESSION_SOFT_BREAK_SEC = 90   # حد الكسر الناعم  (ثانية)
+SESSION_CONNECTED_SEC  = 45   # حد الاتصال الكامل — avg gap=35ث + 10ث buffer
+SESSION_SOFT_BREAK_SEC = 180  # حد الكسر الناعم (3 دقائق)
 # seq_weight لكل حالة:
 SEQ_WEIGHT_CONNECTED   = 1.0
 SEQ_WEIGHT_SOFT        = 0.3
