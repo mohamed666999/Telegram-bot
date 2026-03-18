@@ -35,17 +35,18 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-import aiohttp  # Qwen via NVIDIA REST API
+import aiohttp          # fallback HTTP
+from openai import OpenAI  # DeepSeek via NVIDIA OpenAI-compatible API
 
 # ==================== الإعدادات ====================
 TOKEN        = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
 ADMIN_ID     = 6033203084
 
-AI_INVOKE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-AI_API_KEY    = "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"
-AI_MODEL       = "qwen/qwen3.5-397b-a17b"
-AI_MODEL_SMALL = "meta/llama-3.1-8b-instruct"  # fallback سريع عند 504
+AI_INVOKE_URL  = "https://integrate.api.nvidia.com/v1"   # base_url للـ OpenAI client
+AI_API_KEY     = "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"
+AI_MODEL       = "deepseek-ai/deepseek-r1-0528"          # DeepSeek R1 — thinking + reasoning
+AI_MODEL_SMALL = "meta/llama-3.1-8b-instruct"            # fallback سريع عند 504
 AI_TIMEOUT    = 8.0
 LEARN_TIMEOUT = 900  # 15 دقيقة — Qwen يحتاج وقتاً للـ thinking
 
@@ -747,57 +748,54 @@ def update_pattern_db(suit: str, rank: str, last_digit: int, winner: int):
 async def _nvidia_chat_single(messages: list, model: str, max_tokens: int,
                                temperature: float, enable_thinking: bool,
                                timeout: int) -> str:
-    """طلب واحد إلى NVIDIA API — بدون retry."""
-    headers = {
-        "Authorization": f"Bearer {AI_API_KEY}",
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream",
-    }
-    payload = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "top_p": 0.95,
-        "top_k": 20,
-        "stream": True,
-    }
-    # enable_thinking فقط للنماذج التي تدعمها
-    if "qwen" in model.lower():
-        payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
+    """طلب واحد عبر OpenAI-compatible client (DeepSeek / NVIDIA)."""
+    loop = asyncio.get_event_loop()
 
-    result = ""
-    raw_lines_seen = 0
-    async with aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(total=timeout)
-    ) as session:
-        async with session.post(AI_INVOKE_URL, headers=headers, json=payload) as resp:
-            logger.info(f"_nvidia_chat_single HTTP {resp.status} — model={model}")
-            if resp.status != 200:
-                body = await resp.text()
-                raise RuntimeError(f"HTTP {resp.status}: {body[:200]}")
-            async for raw_line in resp.content:
-                raw_lines_seen += 1
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line or not line.startswith("data:"):
-                    continue
-                data_str = line[5:].strip()
-                if data_str == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data_str)
-                    choices = chunk.get("choices", [])
-                    if not choices:
-                        continue
-                    delta = choices[0].get("delta", {})
-                    if delta.get("reasoning_content"):
-                        continue
-                    content = delta.get("content") or ""
-                    if content:
-                        result += content
-                except Exception:
-                    continue
-    if not result and raw_lines_seen == 0:
+    def _sync_call():
+        client = OpenAI(
+            base_url=AI_INVOKE_URL,
+            api_key=AI_API_KEY,
+        )
+        # DeepSeek thinking mode
+        extra = {}
+        if "deepseek" in model.lower() and enable_thinking:
+            extra["extra_body"] = {"chat_template_kwargs": {"thinking": True}}
+
+        completion = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            top_p=0.95,
+            max_tokens=max_tokens,
+            stream=True,
+            **extra,
+        )
+        result = ""
+        for chunk in completion:
+            if not getattr(chunk, "choices", None):
+                continue
+            delta = chunk.choices[0].delta
+            # تجاهل thinking tokens — نريد فقط المحتوى النهائي
+            reasoning = getattr(delta, "reasoning_content", None)
+            if reasoning:
+                continue
+            if delta.content:
+                result += delta.content
+        return result
+
+    # نشغّل الـ sync call في thread منفصل لعدم تعطيل event loop
+    try:
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, _sync_call),
+            timeout=float(timeout)
+        )
+    except asyncio.TimeoutError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f"OpenAI client error: {e}")
+
+    logger.info(f"_nvidia_chat_single done: model={model} len={len(result)}")
+    if not result:
         raise RuntimeError("استجابة فارغة")
     return result
 
@@ -807,9 +805,9 @@ async def _nvidia_chat(messages: list, max_tokens: int = 512,
                        timeout: int = 60) -> str:
     """
     يرسل طلباً إلى NVIDIA API مع retry ذكي:
-    - محاولة 1: Qwen3.5-397B  (max_tokens كامل)
-    - محاولة 2: Qwen3.5-397B  (max_tokens مخفض 50%) بعد 5 ث
-    - محاولة 3: Llama-3.1-8B  (نموذج صغير سريع) بعد 5 ث
+    - محاولة 1: DeepSeek-R1  (max_tokens كامل)
+    - محاولة 2: DeepSeek-R1  (max_tokens مخفض 50%) بعد 5 ث
+    - محاولة 3: Llama-3.1-8B (نموذج صغير سريع) بعد 5 ث
     """
     attempts = [
         (AI_MODEL,       max_tokens,           timeout),
@@ -1283,75 +1281,54 @@ def _run_law_on_rows(law_dict: Dict, rows: List) -> Tuple[int, int]:
 
 def backtest_law(law_dict: Dict, backtest_rows: List) -> Tuple[bool, float, int]:
     """
-    Split-backtest: يختبر القانون على جزأين من التاريخ.
+    Backtest ديناميكي — دخول مرن، بقاء للأقوى (Ruthless Kill يتولى التصفية الحية).
 
-    المنهج:
-    - rows مرتبة DESC (الأحدث أولاً)
-    - النصف الأول  = الأحدث  (test2 — المستقبل القريب)
-    - النصف الثاني = الأقدم  (test1 — التاريخ)
-
-    شروط القبول:
-    1. n_matched >= 15 في كل جزء
-    2. acc >= 54% في كلا الجزأين (وليس أحدهما فقط)
-       → إذا نجح في واحد فقط = temporal illusion → رفض
+    القبول:
+    - دقة إجمالية >= 53.5% مع عينة >= 18
+    - Split يُستخدم فقط لاكتشاف الانهيار:
+      يُرفض إذا كان النصف الأحدث (t_new >= 8) أقل من 50% صراحةً
     """
-    MIN_SAMPLE = 15
-    MIN_ACC    = 0.54
+    MIN_TOTAL_SAMPLE = 18
+    MIN_TOTAL_ACC    = 0.535
 
     pred = law_dict.get("prediction")
     if pred not in [0, 1]:
         return False, 0.0, 0
 
-    if len(backtest_rows) < 30:
-        # بيانات قليلة: اختبار بسيط بدون split
-        c, t = _run_law_on_rows(law_dict, backtest_rows)
-        if t < MIN_SAMPLE:
-            return False, 0.0, t
-        acc = c / t
-        return acc >= MIN_ACC, acc, t
+    # ── اختبار إجمالي ────────────────────────────────────────────────
+    c_total, t_total = _run_law_on_rows(law_dict, backtest_rows)
 
-    # ── Split: الأحدث = rows[:n//2], الأقدم = rows[n//2:] ───────────
-    mid       = len(backtest_rows) // 2
-    rows_new  = backtest_rows[:mid]   # أحدث (test2 — أهم)
-    rows_old  = backtest_rows[mid:]   # أقدم  (test1)
+    if t_total < MIN_TOTAL_SAMPLE:
+        return False, 0.0, t_total
+
+    acc_total = c_total / t_total
+    if acc_total < MIN_TOTAL_ACC:
+        return False, acc_total, t_total
+
+    # ── Split — كاشف انهيار فقط (Anti-Illusion) ──────────────────────
+    mid      = len(backtest_rows) // 2
+    rows_new = backtest_rows[:mid]
+    rows_old = backtest_rows[mid:]
 
     c_new, t_new = _run_law_on_rows(law_dict, rows_new)
     c_old, t_old = _run_law_on_rows(law_dict, rows_old)
 
-    # إذا لم تكفِ العينة في أي جزء — نستخدم الكل
-    if t_new < MIN_SAMPLE and t_old < MIN_SAMPLE:
-        c_all = c_new + c_old
-        t_all = t_new + t_old
-        if t_all < MIN_SAMPLE:
-            return False, 0.0, t_all
-        acc_all = c_all / t_all
-        return acc_all >= MIN_ACC, acc_all, t_all
+    acc_new = (c_new / t_new) if t_new > 0 else 0.0
+    acc_old = (c_old / t_old) if t_old > 0 else 0.0
 
-    acc_new = c_new / max(t_new, 1)
-    acc_old = c_old / max(t_old, 1)
-
-    # ── قرار القبول ──────────────────────────────────────────────────
-    # كلا الجزأين يجب أن ينجحا (إذا كانت عيناتهما كافية)
-    new_ok = t_new < MIN_SAMPLE or acc_new >= MIN_ACC
-    old_ok = t_old < MIN_SAMPLE or acc_old >= MIN_ACC
-
-    if new_ok and old_ok:
-        # نُعيد دقة الجزء الأحدث كمؤشر رئيسي (أهم للتنبؤ)
-        final_acc = acc_new if t_new >= MIN_SAMPLE else acc_old
-        final_n   = t_new + t_old
+    # يُرفض فقط إذا كان يفشل صراحةً في البيانات الحديثة
+    if t_new >= 8 and acc_new < 0.50:
         logger.info(
-            f"Backtest PASS: {law_dict.get('law_type')} "
-            f"new={acc_new:.0%}/{t_new} old={acc_old:.0%}/{t_old}"
+            f"Backtest REJECT (drifted): {law_dict.get('law_type')} "
+            f"total={acc_total:.0%} new={acc_new:.0%}/{t_new}"
         )
-        return True, final_acc, final_n
-    else:
-        # نجح في جزء فقط → temporal illusion → رفض
-        fail_reason = "جديد ضعيف" if not new_ok else "قديم ضعيف"
-        logger.info(
-            f"Backtest REJECT ({fail_reason}): {law_dict.get('law_type')} "
-            f"new={acc_new:.0%}/{t_new} old={acc_old:.0%}/{t_old}"
-        )
-        return False, max(acc_new, acc_old), t_new + t_old
+        return False, acc_total, t_total
+
+    logger.info(
+        f"Backtest PASS: {law_dict.get('law_type')} "
+        f"total={acc_total:.0%}/{t_total} (new={acc_new:.0%}/{t_new} old={acc_old:.0%}/{t_old})"
+    )
+    return True, acc_total, t_total
 
 
 def _fetch_backtest_rows() -> List:
@@ -1476,10 +1453,12 @@ prediction=1 = الثور 🔵 (Player/Blue)
 ━━━ القوانين الحالية (لا تكررها) ━━━
 {prev_laws_txt}
 
-━━━ المطلوب ━━━
+━━━ المطلوب بدقة شديدة ━━━
 1. لكل نمط في "confirmed_patterns" ببايا >= 12%: أنشئ قانوناً مباشراً
-2. ابحث في عينة الجولات عن أنماط مركبة (شرطان معاً) غير موجودة في القائمة
-3. أنشئ 8-12 قانون فقط — جودة لا كمية
+2. ادمج شرطين مختلفين في كل قانون (مثل: رقم + بذلة، أو فجوة + رتبة، أو streak + digit_sum_mod)
+3. أنشئ 15-20 قانوناً مركباً متنوعاً — جودة لا كمية
+4. ممنوع استخدام ts_mod بأرقام أكبر من 9 إطلاقاً
+5. اجعل القوانين منطقية ومرتبطة بالبيانات المُعطاة فعلاً
 
 شكل القانون:
 {{"law_type":"اسم","conditions":{{...}},"prediction":0أو1,"confidence":60-90,"description":"الشرط الحقيقي والانحياز المئوي"}}
@@ -1504,9 +1483,9 @@ prediction=1 = الثور 🔵 (Player/Blue)
     try:
         raw_text = await _nvidia_chat(
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=3000,
-            temperature=0.3,
-            enable_thinking=False,
+            max_tokens=4000,
+            temperature=0.6,
+            enable_thinking=True,   # DeepSeek-R1: يفكر أولاً ثم يُجيب
             timeout=LEARN_TIMEOUT,
         )
         logger.info(f"Qwen raw_text length={len(raw_text)}, preview: {raw_text[:300]}")
