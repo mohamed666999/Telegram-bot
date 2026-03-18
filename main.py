@@ -47,7 +47,7 @@ AI_INVOKE_URL  = "https://integrate.api.nvidia.com/v1"   # base_url للـ OpenA
 AI_API_KEY     = "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"
 AI_MODEL       = "deepseek-ai/deepseek-v3.2"             # DeepSeek V3.2 — متاح على NVIDIA
 AI_MODEL_SMALL = "meta/llama-3.1-8b-instruct"            # fallback سريع عند 504
-AI_TIMEOUT    = 8.0
+AI_TIMEOUT    = 12.0
 LEARN_TIMEOUT = 900  # 15 دقيقة — Qwen يحتاج وقتاً للـ thinking
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -73,8 +73,8 @@ RANK_VALUE = {k: v for k, v in zip(
     [14, 13, 12, 11, 10,  9,  8,  7,  6,  5,  4,  3,  2]
 )}
 WEIGHTS = {
-    'SD': 2.8, 'SUIT': 1.8, 'DIGIT': 1.2, 'RANK': 1.5,
-    'MOMENTUM': 1.5, 'AI': 2.5,
+    'SD': 3.0, 'SUIT': 1.5, 'DIGIT': 1.2, 'RANK': 2.8,
+    'MOMENTUM': 1.8, 'AI': 2.5,
     'LAW': 3.5,      # قوانين الذاكرة السياقية — أعلى وزن
 }
 # ════════════════════════════════════════════════════════════════════
@@ -3194,7 +3194,7 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     # ── N1: الارتباط الزمني ──────────────────────────────────────────
     ac_pred, ac_conf, ac_log = temporal_autocorr(recent_history)
     if ac_pred is not None:
-        w = get_adaptive_weight('AUTOCORR', 2.0)
+        w = get_adaptive_weight('AUTOCORR', 1.4)
         scores[ac_pred] += ac_conf * w
         logs.append(f"🕰️ {ac_log} → {WINNER_NAMES[ac_pred]} ({ac_conf:.0%})")
 
@@ -3246,7 +3246,7 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     # ── V2: DeepNGram (600 جولة) ─────────────────────────────────
     dn_pred, dn_conf, dn_log = deep_ngram_predict(recent_history)
     if dn_pred is not None:
-        w = get_adaptive_weight('DEEP_NGRAM', 2.8)
+        w = get_adaptive_weight('DEEP_NGRAM', 1.8)
         scores[dn_pred] += dn_conf * w
         logs.append(f"🧬 {dn_log} → {WINNER_NAMES[dn_pred]} ({dn_conf:.0%})")
 
@@ -3260,7 +3260,7 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     # ── V4: الجذب التاريخي ───────────────────────────────────────
     gv_pred, gv_conf, gv_log = historical_gravity()
     if gv_pred is not None:
-        w = get_adaptive_weight('GRAVITY', 1.5)
+        w = get_adaptive_weight('GRAVITY', 1.0)
         scores[gv_pred] += gv_conf * w
         logs.append(f"🧲 {gv_log} ({gv_conf:.0%})")
 
