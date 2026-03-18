@@ -1454,11 +1454,12 @@ prediction=1 = الثور 🔵 (Player/Blue)
 {prev_laws_txt}
 
 ━━━ المطلوب بدقة شديدة ━━━
-1. لكل نمط في "confirmed_patterns" ببايا >= 12%: أنشئ قانوناً مباشراً
-2. ادمج شرطين مختلفين في كل قانون (مثل: رقم + بذلة، أو فجوة + رتبة، أو streak + digit_sum_mod)
-3. أنشئ 15-20 قانوناً مركباً متنوعاً — جودة لا كمية
-4. ممنوع استخدام ts_mod بأرقام أكبر من 9 إطلاقاً
-5. اجعل القوانين منطقية ومرتبطة بالبيانات المُعطاة فعلاً
+1. ركّز على أنماط انكسار السلاسل (streak break): متى ينعكس الـ streak بناءً على طوله؟
+2. ركّز على الفجوة الزمنية (gap_sec) والفجوة الرقمية (b_gap): هل الجولة الأولى بعد فجوة طويلة تختلف؟
+3. استخدم البذلة (suit) والرتبة (rank) كمحددات رئيسية
+4. أنشئ 15-20 قانوناً — كل قانون يدمج شرطين: streak+suit أو gap+rank أو suit+rank
+5. ممنوع استخدام b_num أو digit_sum_mod أو ts_mod — هذه أرقام عشوائية بلا علاقة سببية
+6. اجعل كل قانون مبنياً على علاقة منطقية حقيقية في اللعبة
 
 شكل القانون:
 {{"law_type":"اسم","conditions":{{...}},"prediction":0أو1,"confidence":60-90,"description":"الشرط الحقيقي والانحياز المئوي"}}
@@ -2227,11 +2228,11 @@ def auto_manage_laws():
                 """)
                 d0 = cur.rowcount
 
-                # ① حذف سريع — قانون ضار يُكتشف بعد 5 استخدامات
+                # ① حذف سريع — قانون ضار يُكتشف بعد 20 استخداماً (N=20 للإحصاء الموثوق)
                 cur.execute("""
                     UPDATE ai_laws SET active = FALSE
                     WHERE active = TRUE
-                      AND times_used >= 5 AND times_used < 15
+                      AND times_used >= 20 AND times_used < 35
                       AND accuracy < 40
                 """)
                 d1 = cur.rowcount
@@ -3187,7 +3188,7 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     # ── X3: Bayesian Engine ───────────────────────────────────────────
     bay_pred, bay_conf, bay_log = bayesian_predict(suit, rank, last_digit)
     if bay_pred is not None:
-        w = get_adaptive_weight('BAYESIAN', 2.6)
+        w = get_adaptive_weight('BAYESIAN', 4.0)
         scores[bay_pred] += bay_conf * w
         logs.append(f"📊 بايز: {bay_log} → {WINNER_NAMES[bay_pred]} ({bay_conf:.0%})")
 
@@ -3340,7 +3341,9 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     if   scores[0] > scores[1] * 1.35:          final = 0   # أحمر بفارق واضح
     elif scores[1] > scores[0] * 1.35:          final = 1   # أزرق بفارق واضح
     elif delta < 0.4 * max(scores[0], scores[1], 0.01):
-        final = random.choice([0, 1])                        # منطقة رمادية → عشوائي
+        # إجماع ضعيف → تخطي الجولة (أفضل من التخمين العشوائي)
+        logs.append("⚠️ إجماع ضعيف — يُنصح بتخطي هذه الجولة")
+        return 2, 50, "\n".join(logs)   # 2 = تعادل/تخطي
     elif scores[0] > scores[1]:                  final = 0
     else:                                        final = 1
 
