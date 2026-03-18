@@ -1023,9 +1023,9 @@ def _filter_valid_rounds(rows) -> List[Dict]:
             "ts":        ts,
             "gap_sec":   gap_sec,
             "b_gap":     b_gap,
-            # الجولة متصلة إن كانت الفجوة ≤ SESSION_CONNECTED_SEC (17ث)
-            "connected": (gap_sec is not None and gap_sec <= SESSION_CONNECTED_SEC) or
-                         (b_gap is not None and b_gap <= 500),
+            # الجولة متصلة إن كانت الفجوة الزمنية ≤ SESSION_CONNECTED_SEC
+            # b_gap لا يُستخدم لتحديد الاتصال — في هذه اللعبة b_gap كبير دائماً
+            "connected": gap_sec is not None and gap_sec <= SESSION_CONNECTED_SEC,
         })
 
     return valid
@@ -3023,16 +3023,7 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
                             dt = (t_curr - t_prev).total_seconds()
                             if dt > SESSION_CONNECTED_SEC:
                                 break  # انقطاع — نوقف السلسلة
-                        # تحقق b_gap بين الجولتين
-                        b_curr = clean_digits(str(rows[i-1][1] or ""))
-                        b_prev = clean_digits(str(rows[i][1] or ""))
-                        if b_curr and b_prev:
-                            try:
-                                bg = abs(int(b_curr) - int(b_prev))
-                                if bg > 10000:
-                                    break
-                            except Exception:
-                                pass
+                        # b_gap لا يكسر الجلسة — في هذه اللعبة b_gap كبير دائماً (97%>500)
                         connected_rows.append(rows[i])
 
                     # recent_history = الجولات المتصلة بالجلسة الحالية (مرتبة تصاعدياً)
