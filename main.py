@@ -3917,8 +3917,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     with conn.cursor() as cur:
                         cur.execute("SELECT COUNT(*) FROM history")
                         total = cur.fetchone()[0]
+                        cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL GROUP BY winner")
                         cur.execute("SELECT winner, COUNT(*) FROM history WHERE winner IS NOT NULL GROUP BY winner")
                         dist = {r[0]: r[1] for r in cur.fetchall()}
+                        # الجولات الحقيقية فقط (مع rank) — تستبعد الـ 700 الأولى القديمة
+                        cur.execute("""
+                            SELECT winner, COUNT(*) FROM history
+                            WHERE winner IS NOT NULL
+                              AND rank IS NOT NULL AND rank NOT IN ('NULL','')
+                            GROUP BY winner
+                        """)
+                        dist_real = {r[0]: r[1] for r in cur.fetchall()}
                         cur.execute("""
                         SELECT
                             SUM(CASE WHEN winner = CASE prediction
@@ -3945,10 +3954,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         cur.execute("SELECT signal_name, correct_count, total_count FROM signal_performance WHERE total_count >= 5 ORDER BY (correct_count::float/total_count) DESC LIMIT 5")
                         sig_rows = cur.fetchall()
 
-                r_cnt  = dist.get("الراعي 🔴", 0)
-                b_cnt  = dist.get("الثور 🔵",  0)
-                t_cnt  = dist.get("تعادل ⚪",  0)
-                played = max(r_cnt + b_cnt + t_cnt, 1)
+                r_cnt  = dist_real.get("الراعي 🔴", 0)
+                b_cnt  = dist_real.get("الثور 🔵",  0)
+                t_cnt  = dist_real.get("تعادل ⚪",  0)
+                played = max(r_cnt + b_cnt, 1)  # بدون تعادل
                 acc    = round(correct_cnt / max(predicted_total, 1) * 100, 1)
                 last_l = last_learn_time.strftime("%Y-%m-%d %H:%M") if last_learn_time else "لم يُجرَ"
                 streak_str = ""
@@ -4193,11 +4202,16 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) FROM history")
+                cur.execute("""
+                    SELECT COUNT(*) FROM history
+                    WHERE rank IS NOT NULL AND rank NOT IN ('NULL','')
+                """)
                 total = cur.fetchone()[0]
                 cur.execute("""
                     SELECT winner, COUNT(*) FROM history
-                    WHERE winner IS NOT NULL GROUP BY winner
+                    WHERE winner IS NOT NULL
+                      AND rank IS NOT NULL AND rank NOT IN ('NULL','')
+                    GROUP BY winner
                 """)
                 dist = {r[0]: r[1] for r in cur.fetchall()}
                 # الدقة الحقيقية: فقط جولات بها توقع + لم تكن تعادل
@@ -4253,7 +4267,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         r_cnt  = dist.get("الراعي 🔴", 0)
         b_cnt  = dist.get("الثور 🔵",  0)
         t_cnt  = dist.get("تعادل ⚪",  0)
-        played = max(r_cnt + b_cnt + t_cnt, 1)
+        played = max(r_cnt + b_cnt, 1)  # بدون تعادل
         acc    = round(correct_cnt / max(predicted_total, 1) * 100, 1)
         last_l = last_learn_time.strftime("%Y-%m-%d %H:%M") if last_learn_time else "لم يُجرَ"
 
@@ -4715,6 +4729,12 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for tbl in ["history", "pattern_stats", "ai_laws", "learn_sessions"]:
                     cur.execute(f"SELECT COUNT(*) FROM {tbl}")
                     counts[tbl] = cur.fetchone()[0]
+                # عدد الجولات الحقيقية (مع rank — يستثني الـ ~2700 القديمة بدون rank)
+                cur.execute("""
+                    SELECT COUNT(*) FROM history
+                    WHERE rank IS NOT NULL AND rank NOT IN ('NULL','')
+                """)
+                counts["history_real"] = cur.fetchone()[0]
 
                 cur.execute("""
 
@@ -4740,7 +4760,7 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cur.execute("SELECT COUNT(*) FROM ai_laws WHERE active = TRUE")
                 active_laws = cur.fetchone()[0]
 
-                lines.append(f"  History rows   : {counts['history']}")
+                lines.append(f"  History rows   : {counts.get('history_real', counts['history'])} (حقيقية) / {counts['history']} (كلي)")
                 lines.append(f"  Pattern stats  : {counts['pattern_stats']}")
                 lines.append(f"  AI Laws total  : {counts['ai_laws']}  (active: {active_laws})")
                 lines.append(f"  Learn sessions : {counts['learn_sessions']}")
