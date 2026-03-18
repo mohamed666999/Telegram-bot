@@ -1543,15 +1543,18 @@ prediction=1 = الثور 🔵 (Player/Blue)
 
     saved = 0
     skipped = 0
-    rejected_bt = 0   # مرفوض بالـ backtest
+    rejected_bt = 0
     sample_laws_saved = []
 
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
-                # احصل على رقم الجلسة الجديدة من جدول learn_sessions
                 cur.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM learn_sessions")
                 session_id = cur.fetchone()[0]
+
+                # ── جلب الشروط الموجودة لمنع النسخ المطلقة ───────────────
+                cur.execute("SELECT conditions::text FROM ai_laws WHERE active = TRUE")
+                existing_conds = set(r[0] for r in cur.fetchall())
 
                 for law in laws_data:
                     if not isinstance(law, dict):
@@ -1565,9 +1568,14 @@ prediction=1 = الثور 🔵 (Player/Blue)
                         skipped += 1
                         continue
 
-                    # ── Backtest إجباري قبل الحفظ ────────────────────
-                    # نختبر القانون على آخر 400 جولة حقيقية
-                    # إذا لم يتجاوز 54% أو عينته < 15 → يُرفض
+                    # ── حماية مطلقة من النسخ المكررة ────────────────────
+                    cond_str = json.dumps(cond, ensure_ascii=False, sort_keys=True)
+                    if cond_str in existing_conds:
+                        skipped += 1
+                        logger.info(f"DUPLICATE REJECTED: {law.get('law_type')} conditions already exist")
+                        continue
+
+                    # ── Backtest إجباري قبل الحفظ ────────────────────────
                     bt_passes, bt_acc, bt_n = backtest_law(law, backtest_rows)
                     if not bt_passes:
                         rejected_bt += 1
@@ -1578,33 +1586,24 @@ prediction=1 = الثور 🔵 (Player/Blue)
                         )
                         continue
 
-                    # ── القانون اجتاز الـ backtest — احفظه ─────────────
-                    # accuracy الابتدائية = الدقة الحقيقية من الـ backtest
+                    # ── القانون اجتاز — احفظه بدون ON CONFLICT لمنع التكرار ──
                     initial_acc = round(bt_acc * 100, 1)
-
                     law_name = f"{law.get('law_type', 'COMBINED')}_{saved}_{int(time.time())}"
                     cur.execute("""
                         INSERT INTO ai_laws
                             (law_name, law_type, conditions, prediction, confidence,
                              accuracy, description, source)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, 'force_learn')
-                        ON CONFLICT (law_name) DO UPDATE
-                            SET conditions  = EXCLUDED.conditions,
-                                prediction  = EXCLUDED.prediction,
-                                confidence  = EXCLUDED.confidence,
-                                accuracy    = EXCLUDED.accuracy,
-                                description = EXCLUDED.description,
-                                active      = TRUE,
-                                times_used  = 0
                     """, (
                         law_name,
                         law.get("law_type", "COMBINED"),
-                        json.dumps(cond, ensure_ascii=False),
+                        cond_str,
                         int(pred),
                         float(law.get("confidence", 70)),
-                        initial_acc,   # دقة حقيقية من backtest وليس من Qwen
+                        initial_acc,
                         f"{law.get('description', '')} [bt:{bt_acc:.0%}/{bt_n}]",
                     ))
+                    existing_conds.add(cond_str)  # منع تكراره في نفس الجلسة
                     saved += 1
                     if len(sample_laws_saved) < 3:
                         sample_laws_saved.append({**law, "bt_acc": bt_acc, "bt_n": bt_n})
@@ -2224,6 +2223,15 @@ def auto_manage_laws():
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
 
+                # 0️⃣ القتل السريع جداً — قانون فشل في أول 2-4 محاولات (accuracy_recent < 20)
+                cur.execute("""
+                    UPDATE ai_laws SET active = FALSE
+                    WHERE active = TRUE
+                      AND times_used IN (2, 3, 4)
+                      AND accuracy_recent < 20
+                """)
+                d0 = cur.rowcount
+
                 # ① حذف سريع — قانون ضار يُكتشف بعد 5 استخدامات
                 cur.execute("""
                     UPDATE ai_laws SET active = FALSE
@@ -2274,12 +2282,12 @@ def auto_manage_laws():
                 boosted = cur.rowcount
 
                 conn.commit()
-                total_disabled = d1 + d2 + d3 + drifted
+                total_disabled = d0 + d1 + d2 + d3 + drifted
                 if total_disabled or boosted:
                     load_laws(force=True)
                     logger.info(
                         f"AutoLaw: killed={total_disabled} "
-                        f"(fast={d1}, mid={d2}, slow={d3}, drift={drifted}), "
+                        f"(ruthless={d0}, fast={d1}, mid={d2}, slow={d3}, drift={drifted}), "
                         f"boosted={boosted}"
                     )
     except Exception as e:
@@ -4351,19 +4359,19 @@ async def cmd_prune(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     WHERE accuracy < 40 AND times_used >= 50 AND active = TRUE
                 """)
                 dead_by_acc = cur.rowcount
-                # احذف قوانين مكررة (نفس law_type + prediction، احتفظ بالأفضل)
+                # احذف قوانين مكررة (نفس conditions::text بالضبط، احتفظ بالأعلى دقة فقط)
                 cur.execute("""
                     WITH ranked AS (
-                        SELECT id, law_type, prediction,
+                        SELECT id,
                                ROW_NUMBER() OVER (
-                                   PARTITION BY law_type, prediction
+                                   PARTITION BY conditions::text, prediction
                                    ORDER BY accuracy DESC, times_used DESC
                                ) as rn
                         FROM ai_laws WHERE active = TRUE
                     )
                     UPDATE ai_laws SET active = FALSE
                     WHERE id IN (
-                        SELECT id FROM ranked WHERE rn > 3
+                        SELECT id FROM ranked WHERE rn > 1
                     )
                 """)
                 dead_dupes = cur.rowcount
