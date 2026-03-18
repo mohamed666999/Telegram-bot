@@ -112,20 +112,8 @@ DATA_LAWS: List[Dict] = [
     {"id": -8, "law_type": "data_after_4x_blue", "conditions": {"streak": {"length": 4, "value": 1}},
      "prediction": 0, "confidence": 58, "accuracy": 58.5, "times_used": 41,
      "description": "بعد 4 ثيران متتالية → الراعي 🔴 (bias=0.17)", "active": True},
-
-    # ── Temporal Engine Laws (مُثبتة بـ chi-square p<0.05 من 2276 جولة) ──
-    # ts%8=1 → BLUE (p=0.031, bias=18.3%, n=208)
-    {"id": -9, "law_type": "temporal_ts_mod8_r1", "conditions": {"ts_mod": {"mod": 8, "remainder": 1}},
-     "prediction": 1, "confidence": 59, "accuracy": 59.1, "times_used": 208,
-     "description": "unix_timestamp mod 8 = 1 → الثور 🔵 (p=0.031)", "active": True},
-    # ts%11=5 → BLUE (p=0.031, bias=21.0%, n=157)
-    {"id": -10, "law_type": "temporal_ts_mod11_r5", "conditions": {"ts_mod": {"mod": 11, "remainder": 5}},
-     "prediction": 1, "confidence": 60, "accuracy": 60.5, "times_used": 157,
-     "description": "unix_timestamp mod 11 = 5 → الثور 🔵 (p=0.031)", "active": True},
-    # round_idx%32=7 → RED (p=0.045, bias=29.6%, n=71)
-    {"id": -11, "law_type": "temporal_idx_mod32_r7", "conditions": {"cycle_position": {"cycle": 32, "position": 7}},
-     "prediction": 0, "confidence": 58, "accuracy": 64.8, "times_used": 71,
-     "description": "round_index mod 32 = 7 → الراعي 🔴 (p=0.045)", "active": True},
+    # ملاحظة: القوانين الزمنية (ts%N, idx%N) تُكتشف عبر /force_learn + backtest
+    # ولا تُضاف يدوياً حتى تثبت استقرارها عبر sessions متعددة
 ]
 DATA_LAW_WEIGHT = 2.2   # وزن القوانين الحقيقية
 
@@ -537,22 +525,43 @@ def _increment_law_usage(law_id: int):
         pass
 
 def update_law_accuracy(law_id: int, correct: bool):
-    """بعد تسجيل نتيجة حقيقية: حدّث دقة القانون."""
+    """بعد تسجيل نتيجة حقيقية: حدّث دقة القانون + تتبع الانجراف."""
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
-                # دقة متحركة: 95% وزن للقديم + 5% للجديد (أبطأ = أكثر استقراراً)
                 new_val = 100.0 if correct else 0.0
+                # accuracy_total: المتوسط المتحرك الكلي (بطيء — 95/5)
+                # accuracy_recent: المتوسط المتحرك الأخير (سريع — 85/15)
+                # إذا accuracy_recent << accuracy_total → انجراف → تعطيل
                 cur.execute("""
                     UPDATE ai_laws
-                    SET accuracy = accuracy * 0.95 + %s * 0.05,
-                        active   = CASE WHEN accuracy * 0.90 + %s * 0.10 < 30
-                                        THEN FALSE ELSE active END
+                    SET accuracy        = accuracy        * 0.95 + %s * 0.05,
+                        accuracy_recent = COALESCE(accuracy_recent, accuracy) * 0.85 + %s * 0.15,
+                        active   = CASE
+                            WHEN accuracy * 0.90 + %s * 0.10 < 30 THEN FALSE
+                            ELSE active
+                        END
                     WHERE id = %s
-                """, (new_val, new_val, law_id))
+                """, (new_val, new_val, new_val, law_id))
                 conn.commit()
     except Exception as e:
-        logger.error(f"update_law_accuracy error: {e}")
+        # fallback: إذا لم يوجد عمود accuracy_recent بعد
+        try:
+            with db_pool.get_conn() as conn:
+                with conn.cursor() as cur:
+                    new_val = 100.0 if correct else 0.0
+                    cur.execute("""
+                        UPDATE ai_laws
+                        SET accuracy = accuracy * 0.95 + %s * 0.05,
+                            active   = CASE
+                                WHEN accuracy * 0.90 + %s * 0.10 < 30 THEN FALSE
+                                ELSE active
+                            END
+                        WHERE id = %s
+                    """, (new_val, new_val, law_id))
+                    conn.commit()
+        except Exception as e2:
+            logger.error(f"update_law_accuracy error: {e2}")
 
 # ==================== DB Tables ====================
 def ensure_tables():
@@ -601,6 +610,7 @@ def ensure_tables():
                     "ALTER TABLE ai_laws ADD COLUMN IF NOT EXISTS prediction  INT",
                     "ALTER TABLE ai_laws ADD COLUMN IF NOT EXISTS confidence  FLOAT DEFAULT 70",
                     "ALTER TABLE ai_laws ADD COLUMN IF NOT EXISTS accuracy    FLOAT DEFAULT 70",
+                    "ALTER TABLE ai_laws ADD COLUMN IF NOT EXISTS accuracy_recent FLOAT DEFAULT NULL",
                     "ALTER TABLE ai_laws ADD COLUMN IF NOT EXISTS times_used  INT DEFAULT 0",
                     "ALTER TABLE ai_laws ADD COLUMN IF NOT EXISTS description TEXT",
                     "ALTER TABLE ai_laws ADD COLUMN IF NOT EXISTS source      TEXT DEFAULT \'force_learn\'",
@@ -1226,71 +1236,113 @@ def _build_math_memory(rounds: List[Dict]) -> Dict:
 
 
 
-def backtest_law(law_dict: Dict, backtest_rows: List) -> Tuple[bool, float, int]:
-    """
-    يختبر القانون على جولات حقيقية من DB قبل حفظه.
-
-    المعايير:
-    - n_matched >= 15  : عينة كافية
-    - real_acc >= 54%  : دقة حقيقية تتفوق على العشوائية
-
-    يُعيد: (passes, real_accuracy, n_matched)
-    """
-    MIN_SAMPLE  = 15    # حد أدنى للعينة
-    MIN_ACC     = 0.54  # 54% حد القبول
-
+def _run_law_on_rows(law_dict: Dict, rows: List) -> Tuple[int, int]:
+    """يُطبّق القانون على قائمة جولات ويُعيد (correct, total)."""
     pred = law_dict.get("prediction")
-    if pred not in [0, 1]:
-        return False, 0.0, 0
-
     correct = 0
     total   = 0
-
-    for row in backtest_rows:
-        # row: (id, b_num, suit, rank, bonus_last_digit, winner, created_at, b_gap, gap_sec)
+    for row in rows:
         b_num_r   = str(row[1] or "")
         suit_r    = str(row[2] or "")
         rank_r    = str(row[3] or "")
         digit_r   = int(row[4]) if row[4] is not None else 0
         winner_r  = WINNER_MAP.get(row[5], 2)
-        created_r = row[6]   # created_at timestamp
+        created_r = row[6]
         b_gap_r   = row[7]
         gap_sec_r = float(row[8]) if row[8] is not None else None
-
         if winner_r not in [0, 1]:
             continue
-
-        clean_b = clean_digits(b_num_r)
-        # نمرر unix timestamp كـ round_index لدعم ts_mod conditions
+        clean_b   = clean_digits(b_num_r)
         unix_ts_r = int(created_r.timestamp()) if created_r else int(time.time())
-        match = match_law(
-            law_dict, suit_r, rank_r, digit_r,
-            recent=[],
-            b_num=clean_b,
-            b_gap=b_gap_r,
-            gap_sec=gap_sec_r,
-            round_index=unix_ts_r,   # unix timestamp للـ ts_mod
-        )
-
+        match = match_law(law_dict, suit_r, rank_r, digit_r,
+                          recent=[], b_num=clean_b,
+                          b_gap=b_gap_r, gap_sec=gap_sec_r,
+                          round_index=unix_ts_r)
         if match < 0.7:
             continue
-
         total += 1
         if winner_r == pred:
             correct += 1
+    return correct, total
 
-    if total < MIN_SAMPLE:
-        return False, 0.0, total
 
-    real_acc = correct / total
-    passes   = real_acc >= MIN_ACC
-    return passes, real_acc, total
+def backtest_law(law_dict: Dict, backtest_rows: List) -> Tuple[bool, float, int]:
+    """
+    Split-backtest: يختبر القانون على جزأين من التاريخ.
+
+    المنهج:
+    - rows مرتبة DESC (الأحدث أولاً)
+    - النصف الأول  = الأحدث  (test2 — المستقبل القريب)
+    - النصف الثاني = الأقدم  (test1 — التاريخ)
+
+    شروط القبول:
+    1. n_matched >= 15 في كل جزء
+    2. acc >= 54% في كلا الجزأين (وليس أحدهما فقط)
+       → إذا نجح في واحد فقط = temporal illusion → رفض
+    """
+    MIN_SAMPLE = 15
+    MIN_ACC    = 0.54
+
+    pred = law_dict.get("prediction")
+    if pred not in [0, 1]:
+        return False, 0.0, 0
+
+    if len(backtest_rows) < 30:
+        # بيانات قليلة: اختبار بسيط بدون split
+        c, t = _run_law_on_rows(law_dict, backtest_rows)
+        if t < MIN_SAMPLE:
+            return False, 0.0, t
+        acc = c / t
+        return acc >= MIN_ACC, acc, t
+
+    # ── Split: الأحدث = rows[:n//2], الأقدم = rows[n//2:] ───────────
+    mid       = len(backtest_rows) // 2
+    rows_new  = backtest_rows[:mid]   # أحدث (test2 — أهم)
+    rows_old  = backtest_rows[mid:]   # أقدم  (test1)
+
+    c_new, t_new = _run_law_on_rows(law_dict, rows_new)
+    c_old, t_old = _run_law_on_rows(law_dict, rows_old)
+
+    # إذا لم تكفِ العينة في أي جزء — نستخدم الكل
+    if t_new < MIN_SAMPLE and t_old < MIN_SAMPLE:
+        c_all = c_new + c_old
+        t_all = t_new + t_old
+        if t_all < MIN_SAMPLE:
+            return False, 0.0, t_all
+        acc_all = c_all / t_all
+        return acc_all >= MIN_ACC, acc_all, t_all
+
+    acc_new = c_new / max(t_new, 1)
+    acc_old = c_old / max(t_old, 1)
+
+    # ── قرار القبول ──────────────────────────────────────────────────
+    # كلا الجزأين يجب أن ينجحا (إذا كانت عيناتهما كافية)
+    new_ok = t_new < MIN_SAMPLE or acc_new >= MIN_ACC
+    old_ok = t_old < MIN_SAMPLE or acc_old >= MIN_ACC
+
+    if new_ok and old_ok:
+        # نُعيد دقة الجزء الأحدث كمؤشر رئيسي (أهم للتنبؤ)
+        final_acc = acc_new if t_new >= MIN_SAMPLE else acc_old
+        final_n   = t_new + t_old
+        logger.info(
+            f"Backtest PASS: {law_dict.get('law_type')} "
+            f"new={acc_new:.0%}/{t_new} old={acc_old:.0%}/{t_old}"
+        )
+        return True, final_acc, final_n
+    else:
+        # نجح في جزء فقط → temporal illusion → رفض
+        fail_reason = "جديد ضعيف" if not new_ok else "قديم ضعيف"
+        logger.info(
+            f"Backtest REJECT ({fail_reason}): {law_dict.get('law_type')} "
+            f"new={acc_new:.0%}/{t_new} old={acc_old:.0%}/{t_old}"
+        )
+        return False, max(acc_new, acc_old), t_new + t_old
 
 
 def _fetch_backtest_rows() -> List:
     """
-    يجلب آخر 400 جولة من DB للـ backtest.
-    يتضمن b_gap المحسوب من الفرق بين b_num المتتالية.
+    يجلب آخر 600 جولة من DB للـ backtest (زيادة من 400 لدعم split).
+    مرتبة DESC (الأحدث أولاً) لدعم split-backtest.
     """
     try:
         with db_pool.get_conn() as conn:
@@ -1313,7 +1365,7 @@ def _fetch_backtest_rows() -> List:
                     WHERE h.winner IS NOT NULL
                       AND h.rank IS NOT NULL AND h.rank NOT IN ('NULL','')
                       AND h.b_num ~ '^[0-9]+$'
-                    ORDER BY h.id DESC LIMIT 400
+                    ORDER BY h.id DESC LIMIT 600
                 """)
                 return cur.fetchall()
     except Exception as e:
@@ -2199,6 +2251,18 @@ def auto_manage_laws():
                 """)
                 d3 = cur.rowcount
 
+                # ⑤ drift detection — قانون انهار زمنياً
+                # accuracy_recent أقل بـ 15 نقطة عن accuracy الكلية → تعطيل
+                cur.execute("""
+                    UPDATE ai_laws SET active = FALSE
+                    WHERE active = TRUE
+                      AND times_used >= 20
+                      AND accuracy_recent IS NOT NULL
+                      AND accuracy_recent < accuracy - 15
+                      AND accuracy_recent < 45
+                """)
+                drifted = cur.rowcount
+
                 # ④ تعزيز — قانون ممتاز يُرفع confidence تدريجياً
                 cur.execute("""
                     UPDATE ai_laws
@@ -2210,12 +2274,12 @@ def auto_manage_laws():
                 boosted = cur.rowcount
 
                 conn.commit()
-                total_disabled = d1 + d2 + d3
+                total_disabled = d1 + d2 + d3 + drifted
                 if total_disabled or boosted:
                     load_laws(force=True)
                     logger.info(
                         f"AutoLaw: killed={total_disabled} "
-                        f"(fast={d1}, mid={d2}, slow={d3}), "
+                        f"(fast={d1}, mid={d2}, slow={d3}, drift={drifted}), "
                         f"boosted={boosted}"
                     )
     except Exception as e:
