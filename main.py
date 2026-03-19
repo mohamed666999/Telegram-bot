@@ -1288,8 +1288,8 @@ def backtest_law(law_dict: Dict, backtest_rows: List) -> Tuple[bool, float, int]
     - Split يُستخدم فقط لاكتشاف الانهيار:
       يُرفض إذا كان النصف الأحدث (t_new >= 8) أقل من 50% صراحةً
     """
-    MIN_TOTAL_SAMPLE = 15
-    MIN_TOTAL_ACC    = 0.535
+    MIN_TOTAL_SAMPLE = 12
+    MIN_TOTAL_ACC    = 0.52
 
     pred = law_dict.get("prediction")
     if pred not in [0, 1]:
@@ -1454,27 +1454,22 @@ prediction=1 = الثور 🔵 (Player/Blue)
 {prev_laws_txt}
 
 ━━━ المطلوب ━━━
-أنشئ 10-15 قانوناً بسيطاً وعاماً (General Rules) — شرط واحد فقط لكل قانون.
-الهدف: قوانين تنطبق على 30+ جولة في التاريخ وتصمد مع الوقت.
+أنت مهندس خوارزميات كمّي. مهمتك: اكتشاف أنماط كسر السلاسل وتأثير الفجوات الزمنية.
 
-مثال قانون مقبول (بسيط وعام):
-{{"law_type":"streak_3_red_break","conditions":{{"streak":{{"length":3,"value":0}}}},"prediction":1,"confidence":62,"description":"بعد 3 رواعٍ متتالية يميل للثور"}}
+القواعد الصارمة:
+1. ممنوع تماماً: digit، digit_sum_mod، rank، ts_mod، b_gap، suit
+2. الشروط المسموحة فقط:
+   - {{"streak":{{"length":2أو3أو4أو5,"value":0أو1}}}}
+   - {{"gap_sec_gt":N}} أو {{"gap_sec_lt":N}} (بين 15 و60)
+   - {{"cycle_position":{{"cycle":N,"position":K}}}} (cycle بين 4 و10)
+3. شرط واحد أو اثنان فقط لكل قانون
+4. confidence بين 55-68 فقط
+5. أنشئ 10-12 قانوناً
 
-مثال قانون مرفوض (معقد ونادر):
-{{"conditions":{{"streak":{{"length":3,"value":0}},"rank":"K","gap_sec_lt":15}}}} ← معقد جداً، نادر الحدوث
+مثال ممتاز:
+{{"law_type":"streak3_gap_break","conditions":{{"streak":{{"length":3,"value":0}},"gap_sec_gt":30}},"prediction":1,"confidence":63,"description":"بعد 3 رواعٍ + تأخير >30ث → الثور"}}
 
-القواعد:
-1. شرط واحد فقط لكل قانون (ليس مركباً)
-2. confidence بين 55-70 فقط — لا تبالغ
-3. الأنواع المسموح بها فقط:
-   - {{"streak":{{"length":2أو3أو4,"value":0أو1}}}}
-   - {{"rank":"A"أو"K"أو"Q"أو"J"أو"9"أو"4"}}
-   - {{"suit":"♦️"أو"♥️"أو"♠️"أو"♣️"}}
-   - {{"gap_sec_lt":45}} أو {{"gap_sec_gt":45}}
-4. ممنوع: digit_sum_mod، ts_mod، b_gap، cycle_position
-5. استند فقط على ما تراه في "الأنماط المُثبتة" أعلاه
-
-أعد JSON array فقط، بدون أي نص خارجه:
+أعد JSON array فقط:
 """
 
     try:
@@ -2224,12 +2219,12 @@ def auto_manage_laws():
                 """)
                 d0 = cur.rowcount
 
-                # ① حذف سريع — قانون ضار يُكتشف بعد 20 استخداماً (N=20 للإحصاء الموثوق)
+                # ① حذف سريع — إعطاء فرصة للـ Variance الطبيعي
                 cur.execute("""
                     UPDATE ai_laws SET active = FALSE
                     WHERE active = TRUE
-                      AND times_used >= 20 AND times_used < 35
-                      AND accuracy < 40
+                      AND times_used >= 30 AND times_used < 50
+                      AND accuracy < 42
                 """)
                 d1 = cur.rowcount
 
@@ -2966,6 +2961,52 @@ def dynamic_majority_vote(signals: List[Tuple[Optional[int], float, str]]) -> Tu
     return winner, conf, agree, n_valid
 
 # ==================== 🔮 محرك التنبؤ الرئيسي ====================
+def baccarat_card_counter(history_ranks: List[str]) -> Tuple[Optional[int], float, str]:
+    """
+    عد الأوراق للباكارات:
+    (4,5,6) = +2 لصالح الراعي | (8,9) = -2 لصالح الثور
+    يعمل فقط على الجلسة الحالية المتصلة.
+    """
+    if len(history_ranks) < 10:
+        return None, 0.0, ""
+    running_count = 0
+    for rank in history_ranks:
+        r = str(rank).upper().strip()
+        if r in ['4', '5', '6']:
+            running_count += 2
+        elif r in ['8', '9']:
+            running_count -= 2
+    if running_count >= 6:
+        conf = min(0.82, 0.55 + running_count * 0.02)
+        return 0, conf, f"عد الأوراق (+{running_count}) → الراعي 🔴"
+    elif running_count <= -6:
+        conf = min(0.82, 0.55 + abs(running_count) * 0.02)
+        return 1, conf, f"عد الأوراق ({running_count}) → الثور 🔵"
+    return None, 0.0, ""
+
+
+def shannon_entropy_sniper(history: List[int]) -> Tuple[bool, float, str]:
+    """
+    يحسب الإنتروبيا في آخر 15 جولة.
+    entropy > 0.95 + volatility > 0.65 → فوضى رياضية → لا رهان.
+    """
+    clean = [x for x in history if x in [0, 1]]
+    if len(clean) < 12:
+        return False, 0.0, ""
+    last15  = clean[-15:]
+    p_red   = last15.count(0) / len(last15)
+    p_blue  = last15.count(1) / len(last15)
+    if p_red == 0 or p_blue == 0:
+        entropy = 0.0
+    else:
+        entropy = -(p_red * math.log2(p_red) + p_blue * math.log2(p_blue))
+    switches   = sum(1 for i in range(1, len(last15)) if last15[i] != last15[i-1])
+    volatility = switches / len(last15)
+    if entropy > 0.95 and volatility > 0.65:
+        return True, entropy, f"⚠️ فوضى رياضية (entropy={entropy:.2f}, vol={volatility:.2f})"
+    return False, entropy, f"استقرار (entropy={entropy:.2f})"
+
+
 async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     clean_b = clean_digits(b_num)
     if not clean_b:
@@ -2982,6 +3023,7 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     sc_pred: Optional[int] = None
     sc_conf: float = 0.0
     sc_log:  str   = ""
+    connected_rows: List = []   # للـ Card Counter
 
     # ── تاريخ حديث + فجوة b_num الأخيرة ────────────────────────────
     recent_history: List[int] = []
@@ -3132,7 +3174,7 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     _markov_src = recent_history if len(recent_history) >= 4 else all_history
     mkv_pred, mkv_conf, mkv_log = markov_predict(_markov_src, session_history=recent_history)
     if mkv_pred is not None:
-        w = get_adaptive_weight('MARKOV', 2.2) * seq_weight
+        w = get_adaptive_weight('MARKOV', 2.5) * seq_weight
         scores[mkv_pred] += mkv_conf * w
         logs.append(f"🔗 {mkv_log} → {WINNER_NAMES[mkv_pred]} ({mkv_conf:.0%}) w={w:.1f} {'⚠️ جلسة جديدة' if is_new_session else ''}")
 
@@ -3168,7 +3210,7 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     # ── X1: Lookalike KNN ────────────────────────────────────────────
     lk_pred, lk_conf, lk_log = lookalike_predict(recent_history)
     if lk_pred is not None:
-        w = get_adaptive_weight('LOOKALIKE', 2.8)
+        w = get_adaptive_weight('LOOKALIKE', 2.2)
         scores[lk_pred] += lk_conf * w
         logs.append(f"🧬 {lk_log} → {WINNER_NAMES[lk_pred]} ({lk_conf:.0%}) w={w:.1f}")
 
@@ -3176,7 +3218,7 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     regime, reg_conf = detect_regime(recent_history)
     rg_pred, rg_conf, rg_log = regime_vote(regime, reg_conf, recent_history)
     if rg_pred is not None:
-        w = get_adaptive_weight('REGIME', 2.4)
+        w = get_adaptive_weight('REGIME', 2.8)
         scores[rg_pred] += rg_conf * w
         regime_emoji = {"banker_streak":"🔴","player_streak":"🔵","alternating":"🔁","chaotic":"❓"}.get(regime,"")
         logs.append(f"🧠 النظام {regime_emoji}: {rg_log} ({rg_conf:.0%})")
@@ -3184,7 +3226,7 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     # ── X3: Bayesian Engine ───────────────────────────────────────────
     bay_pred, bay_conf, bay_log = bayesian_predict(suit, rank, last_digit)
     if bay_pred is not None:
-        w = get_adaptive_weight('BAYESIAN', 4.0)
+        w = get_adaptive_weight('BAYESIAN', 3.0)
         scores[bay_pred] += bay_conf * w
         logs.append(f"📊 بايز: {bay_log} → {WINNER_NAMES[bay_pred]} ({bay_conf:.0%})")
 
@@ -3286,6 +3328,28 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         scores[sc_pred] += sc_conf * w
         logs.append(f"🔢 {sc_log} ({sc_conf:.0%})")
 
+    # ── T8: عد الأوراق (Card Counter) ─────────────────────────────
+    recent_ranks = [r[3] for r in connected_rows if r[3] and r[3] not in ('NULL', '')]
+    cc_pred, cc_conf, cc_log = baccarat_card_counter(recent_ranks)
+    if cc_pred is not None:
+        w = get_adaptive_weight('CARD_COUNT', 3.5)
+        scores[cc_pred] += cc_conf * w
+        logs.append(f"🃏 {cc_log} (w={w:.1f})")
+
+    # ── X5: مصفوفة الفوضى (Shannon Entropy) ────────────────────────
+    is_chaos, entropy_val, chaos_log = shannon_entropy_sniper(recent_history)
+    if is_chaos:
+        logs.append(f"🛑 {chaos_log}")
+        logs.append("🛡️ وضع القناص: فوضى رياضية — تخطي الجولة")
+        return 2, 0, "\n".join(logs)
+
+    # ── ✨ التقاطع الذهبي: بايز + ماركوف + عد الأوراق ────────────
+    golden = [bay_pred, mkv_pred, cc_pred]
+    if all(p is not None for p in golden) and len(set(golden)) == 1:
+        golden_pred = golden[0]
+        scores[golden_pred] *= 2.5
+        logs.append(f"✨ التقاطع الذهبي: بايز + ماركوف + عد الأوراق → {WINNER_NAMES[golden_pred]}")
+
     # ── V5: تصويت الأغلبية الديناميكي ─────────────────────────
     # تصويت الأغلبية: 5 محركات كبرى فقط — المحركات الصغيرة تُلغي بعضها
     # Lookalike, Regime, Bayesian, DeepNGram, PostBreak = أعلى دقة إحصائياً
@@ -3332,16 +3396,23 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     base_conf   = 55 + 40 * (1 - entropy)
     acc_bonus   = max(0, (recent_acc - 0.50) * 30)   # +0 to +18 بناءً على الدقة
     final_conf  = int(min(97, max(55, base_conf + acc_bonus)))
-    # ── قرار نهائي بـ 3 مناطق (بدون تحيّز للأحمر) ─────────────────
+    # ── قرار نهائي: الحسم دائماً — لا تعادل إلا في حالة نادرة جداً ───
     delta = abs(scores[0] - scores[1])
-    if   scores[0] > scores[1] * 1.35:          final = 0   # أحمر بفارق واضح
-    elif scores[1] > scores[0] * 1.35:          final = 1   # أزرق بفارق واضح
-    elif delta < 0.4 * max(scores[0], scores[1], 0.01):
-        # إجماع ضعيف → تخطي الجولة (أفضل من التخمين العشوائي)
-        logs.append("⚠️ إجماع ضعيف — يُنصح بتخطي هذه الجولة")
-        return 2, 50, "\n".join(logs)   # 2 = تعادل/تخطي
-    elif scores[0] > scores[1]:                  final = 0
-    else:                                        final = 1
+    if delta < 0.05 * max(scores[0], scores[1], 0.01):
+        # إجماع شبه معدوم → الحاكم البايزي يفصل
+        if bay_pred is not None:
+            final = bay_pred
+            logs.append(f"⚖️ حاكم بايزي → {WINNER_NAMES[final]}")
+        elif gv_pred is not None:
+            final = gv_pred
+            logs.append(f"⚖️ جذب تاريخي → {WINNER_NAMES[final]}")
+        else:
+            logs.append("⚠️ إجماع معدوم — تخطي")
+            return 2, 50, "\n".join(logs)
+    elif scores[0] > scores[1]:
+        final = 0
+    else:
+        final = 1
 
     # أضف معلومات التوازن للـ logs
     if total_score > 0:
