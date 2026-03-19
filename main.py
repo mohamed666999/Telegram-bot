@@ -3329,8 +3329,23 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         logs.append(f"🔢 {sc_log} ({sc_conf:.0%})")
 
     # ── T8: عد الأوراق (Card Counter) ─────────────────────────────
-    recent_ranks = [r[3] for r in connected_rows if r[3] and r[3] not in ('NULL', '')]
-    cc_pred, cc_conf, cc_log = baccarat_card_counter(recent_ranks)
+    # connected_rows = (winner, b_num, created_at) — نستخدم rank الجولة الحالية كبداية
+    # + نجلب ranks من DB مباشرة للجلسة المتصلة
+    cc_pred, cc_conf, cc_log = None, 0.0, ""
+    try:
+        with db_pool.get_conn() as _cc_conn:
+            with _cc_conn.cursor() as _cc_cur:
+                _cc_cur.execute("""
+                    SELECT rank FROM history
+                    WHERE rank IS NOT NULL AND rank NOT IN ('NULL','')
+                      AND created_at >= NOW() - INTERVAL '30 minutes'
+                    ORDER BY id DESC LIMIT 40
+                """)
+                recent_ranks = [r[0] for r in _cc_cur.fetchall() if r[0]]
+        recent_ranks.append(rank)  # أضف رتبة الجولة الحالية
+        cc_pred, cc_conf, cc_log = baccarat_card_counter(recent_ranks)
+    except Exception:
+        pass
     if cc_pred is not None:
         w = get_adaptive_weight('CARD_COUNT', 3.5)
         scores[cc_pred] += cc_conf * w
