@@ -845,6 +845,58 @@ async def _nvidia_chat(messages: list, max_tokens: int = 512,
     return result
 
 
+# ── مفاتيح نماذج المجلس ─────────────────────────────────────────────
+KIMI_API_KEY    = "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"
+MINIMAX_API_KEY = "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"
+
+
+async def _kimi_analyze(messages: list, timeout: int = 600) -> str:
+    """Kimi K2 Thinking — يقرأ البيانات ويطرح النظريات المعقدة."""
+    loop = asyncio.get_event_loop()
+
+    def _sync():
+        client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=KIMI_API_KEY)
+        comp = client.chat.completions.create(
+            model="moonshotai/kimi-k2-thinking",
+            messages=messages,
+            temperature=0.7,
+            top_p=0.9,
+            max_tokens=16384,
+            stream=False,
+        )
+        text = comp.choices[0].message.content or ""
+        return re.sub(r"(?s)<think>.*?</think>", "", text).strip()
+
+    try:
+        return await asyncio.wait_for(loop.run_in_executor(None, _sync), timeout=timeout)
+    except Exception as e:
+        logger.error(f"Kimi error: {e}")
+        return f"فشل Kimi: {e}"
+
+
+async def _minimax_critique(messages: list, timeout: int = 600) -> str:
+    """MiniMax M2.5 — ينتقد نظريات Kimi إحصائياً."""
+    loop = asyncio.get_event_loop()
+
+    def _sync():
+        client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=MINIMAX_API_KEY)
+        comp = client.chat.completions.create(
+            model="minimaxai/minimax-m2.5",
+            messages=messages,
+            temperature=0.3,
+            top_p=0.95,
+            max_tokens=8192,
+            stream=False,
+        )
+        return comp.choices[0].message.content or ""
+
+    try:
+        return await asyncio.wait_for(loop.run_in_executor(None, _sync), timeout=timeout)
+    except Exception as e:
+        logger.error(f"MiniMax error: {e}")
+        return f"فشل MiniMax: {e}"
+
+
 def _scan_json_objects(text: str) -> List[Dict]:
     """يستخرج كل JSON object مكتمل من النص — يتعامل مع arrays مقطوعة."""
     results = []
@@ -5151,6 +5203,161 @@ async def cmd_mine_gold(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(f"<b>نتائج التعدين:</b>\n{result}", parse_mode="HTML")
 
 
+# ════════════════════════════════════════════════════════════════════
+# 🏛️ مجلس الآلهة (Council of Gods) — Multi-Agent Debate
+# Kimi يحلل → MiniMax ينتقد → DeepSeek يحكم ويصيغ JSON
+# ════════════════════════════════════════════════════════════════════
+
+async def run_council_debate(status_callback) -> Dict:
+    """تدير جلسة الحوار بين 3 نماذج AI لاستخراج قوانين ذهبية."""
+
+    await status_callback("🏛️ <b>مجلس الآلهة يجتمع...</b>\n📥 جاري سحب وتجهيز البيانات...")
+
+    # ── جلب البيانات ─────────────────────────────────────────────────
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, b_num, suit, rank, bonus_last_digit, winner, created_at
+                    FROM history WHERE winner IS NOT NULL AND suit IS NOT NULL
+                    ORDER BY id ASC
+                """)
+                rows = cur.fetchall()
+    except Exception as e:
+        return {"error": str(e)}
+
+    rounds = _filter_valid_rounds(rows)
+    memory = _build_math_memory(rounds)
+
+    data_context = (
+        f"بيانات تحليلية لـ {len(rounds)} جولة باكرات:\n"
+        f"أنماط مؤكدة: {json.dumps(memory['confirmed_patterns'][:30], ensure_ascii=False)}\n"
+        f"انتقالات: {json.dumps(memory['transition_stats'], ensure_ascii=False)}\n"
+        f"عينة آخر جولات: {json.dumps(memory['raw_sample_last40'][-50:], ensure_ascii=False)}\n"
+        f"تعريف: winner=0 الراعي/أحمر, winner=1 الثور/أزرق"
+    )
+
+    # ── الجولة 1: Kimi يطرح نظريات ──────────────────────────────────
+    await status_callback(
+        "🌑 <b>Kimi (إله الرؤية) يتحدث...</b>\n"
+        "يقرأ البيانات ويبحث عن ارتباطات مخفية معقدة."
+    )
+    kimi_resp = await _kimi_analyze([{"role": "user", "content":
+        f"أنت عالم بيانات عبقري. حلل بيانات الباكرات وابحث عن تقاطعات معقدة (فجوة + سلسلة + بذلة). "
+        f"اطرح 7 نظريات قوية مدعومة بالأرقام.\n{data_context}"
+    }])
+    if "فشل" in kimi_resp:
+        return {"error": kimi_resp}
+
+    # ── الجولة 2: MiniMax ينتقد ──────────────────────────────────────
+    await status_callback(
+        "🌊 <b>MiniMax (إله الشك) يتدخل...</b>\n"
+        "يفحص نظريات Kimi ويمزق الضعيفة."
+    )
+    minimax_resp = await _minimax_critique([{"role": "user", "content":
+        f"أنت مدقق إحصائي صارم. انتقد هذه النظريات ضد البيانات الحقيقية:\n"
+        f"--- نظريات Kimi ---\n{kimi_resp}\n--- البيانات ---\n{data_context}\n"
+        f"ارفض النظريات الضعيفة، وصقّل القوية، واكتب تقرير القواعد الناجية."
+    }])
+    if "فشل" in minimax_resp:
+        return {"error": minimax_resp}
+
+    # ── الجولة 3: DeepSeek يحكم ويصيغ JSON ─────────────────────────
+    await status_callback(
+        "⚡ <b>DeepSeek (كبير الآلهة) يحكم...</b>\n"
+        "يصيغ القواعد الذهبية النهائية في JSON."
+    )
+    deepseek_prompt = (
+        f"أنت القاضي النهائي. حوّل القواعد المتفق عليها إلى JSON:\n"
+        f"--- تحليل Kimi:\n{kimi_resp[:2000]}\n"
+        f"--- نقد MiniMax:\n{minimax_resp[:2000]}\n"
+        f"أنشئ مصفوفة JSON فقط مع شروط: streak, gap_sec_gt/lt, suit. "
+        f"prediction:0أو1, confidence:60-78. أعد JSON فقط بلا نص."
+    )
+    deepseek_text = await _nvidia_chat(
+        [{"role": "user", "content": deepseek_prompt}],
+        max_tokens=4000, temperature=0.2
+    )
+    laws_data = extract_json_safe(deepseek_text)
+    if not laws_data or not isinstance(laws_data, list):
+        return {"error": "فشل DeepSeek في صياغة JSON النهائي."}
+
+    # ── Backtest وحفظ ────────────────────────────────────────────────
+    backtest_rows = _fetch_backtest_rows()
+    saved = 0
+    rejected = 0
+    with db_pool.get_conn() as conn:
+        with conn.cursor() as cur:
+            for law in laws_data:
+                if not isinstance(law, dict): continue
+                if law.get("prediction") not in [0, 1]: continue
+                bt_passes, bt_acc, bt_n = backtest_law(law, backtest_rows)
+                if not bt_passes:
+                    rejected += 1
+                    continue
+                cur.execute("""
+                    INSERT INTO ai_laws
+                        (law_name, law_type, conditions, prediction, confidence,
+                         accuracy, description, source, times_used)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, 'COUNCIL_DEBATE', %s)
+                """, (
+                    f"COUNCIL_{saved}_{int(time.time())}",
+                    law.get("law_type", "COUNCIL_RULE"),
+                    json.dumps(law.get("conditions", {}), ensure_ascii=False),
+                    int(law["prediction"]),
+                    float(law.get("confidence", 75)),
+                    round(bt_acc * 100, 1),
+                    f"{law.get('description','')} [Council BT:{bt_acc:.0%}]",
+                    bt_n,
+                ))
+                saved += 1
+        conn.commit()
+
+    load_laws(force=True)
+    return {
+        "saved": saved, "rejected": rejected,
+        "kimi_summary": kimi_resp[:300] + "...",
+        "minimax_summary": minimax_resp[:300] + "...",
+    }
+
+
+async def cmd_council_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تشغيل مجلس الآلهة (للمشرف فقط)."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ هذا الأمر للمشرف فقط.")
+        return
+    msg = await update.message.reply_text(
+        "🏛️ <b>تم استدعاء مجلس الآلهة...</b>\n"
+        "الحوار قد يستغرق 5-15 دقيقة.",
+        parse_mode="HTML"
+    )
+
+    async def status_update(text: str):
+        try:
+            await msg.edit_text(text, parse_mode="HTML")
+        except Exception:
+            pass
+
+    result = await run_council_debate(status_update)
+
+    if "error" in result:
+        await msg.edit_text(
+            f"❌ <b>فشلت المحاكمة</b>\n\n<code>{result['error'][:300]}</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    await msg.edit_text(
+        f"✅ <b>انتهى اجتماع مجلس الآلهة!</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚖️ القوانين المعتمدة: <b>{result['saved']}</b>\n"
+        f"🗑️ المرفوضة: <b>{result['rejected']}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🧠 تم دمج حكمة 3 نماذج AI. البوت جاهز للعمل بالقوانين الجديدة.",
+        parse_mode="HTML"
+    )
+
+
 def main():
     ensure_tables()
     load_laws()               # تحميل القوانين
@@ -5162,6 +5369,7 @@ def main():
     app.add_handler(CommandHandler("start",       cmd_start))
     app.add_handler(CommandHandler("force_learn", cmd_force_learn))
     app.add_handler(CommandHandler("mine_gold",   cmd_mine_gold))
+    app.add_handler(CommandHandler("council_learn", cmd_council_learn))
     app.add_handler(CommandHandler("laws",        cmd_laws))
     app.add_handler(CommandHandler("deactivate",  cmd_deactivate_law))
     app.add_handler(CommandHandler("stats",       cmd_stats))
