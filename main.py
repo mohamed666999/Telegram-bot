@@ -11,6 +11,7 @@ HADES V19.0 - Neural Hybrid + Deep Learning Memory
   - البوت يطبّق القوانين آلياً بجانب الأنماط الإحصائية
 """
 
+import itertools
 import re
 import json
 import logging
@@ -5029,6 +5030,127 @@ async def auto_learn_job(context) -> None:
         except Exception as e:
             logger.error(f"auto_learn_job error: {e}")
 
+# ════════════════════════════════════════════════════════════════════
+# 💎 المحرك الخرافي: تعدين القواعد الذهبية (GOLDEN MINER)
+# يحلل تقاطعات البيانات المعقدة دون الحاجة لـ AI
+# ════════════════════════════════════════════════════════════════════
+
+def _run_golden_miner_sync() -> str:
+    """تعمل في الخلفية (Thread) حتى لا توقف استجابة البوت للرسائل."""
+    MIN_OCCURRENCES = 12
+    MIN_WIN_RATE    = 0.78
+    MAX_LAWS_TO_ADD = 15
+
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        h.id, h.b_num, h.suit, h.rank, h.winner,
+                        ABS(h.b_num::bigint - LAG(h.b_num::bigint) OVER (ORDER BY h.id)) AS b_gap,
+                        EXTRACT(EPOCH FROM (h.created_at - LAG(h.created_at) OVER (ORDER BY h.id))) AS gap_sec
+                    FROM history h
+                    WHERE h.winner IS NOT NULL AND h.rank IS NOT NULL AND h.rank != 'NULL'
+                      AND h.b_num ~ '^[0-9]+$'
+                    ORDER BY h.id ASC
+                """)
+                rows = cur.fetchall()
+
+        if len(rows) < 100:
+            return "بيانات غير كافية للتعدين."
+
+        patterns: Dict = defaultdict(lambda: {0: 0, 1: 0})
+
+        for r in rows:
+            rid, b_num, suit, rank, winner_str, b_gap, gap_sec = r
+            winner = 0 if 'الراعي' in str(winner_str) else (1 if 'الثور' in str(winner_str) else 2)
+            if winner == 2:
+                continue
+
+            clean_b   = clean_digits(b_num)
+            last_digit = int(clean_b[-1]) if clean_b else 0
+
+            conditions = []
+            if suit:  conditions.append(("suit", suit))
+            if rank:  conditions.append(("rank", rank))
+            if rank in ['J', 'Q', 'K']:
+                conditions.append(("rank_family", "face"))
+            conditions.append(("digit_parity", "even" if last_digit % 2 == 0 else "odd"))
+            if gap_sec is not None:
+                if gap_sec < 15:   conditions.append(("gap_sec_lt", 15))
+                elif gap_sec > 45: conditions.append(("gap_sec_gt", 45))
+            if b_gap is not None:
+                if b_gap < 500:    conditions.append(("b_gap_lt", 500))
+                elif b_gap > 3000: conditions.append(("b_gap_gt", 3000))
+
+            for size in [2, 3]:
+                for combo in itertools.combinations(conditions, size):
+                    patterns[tuple(sorted(combo))][winner] += 1
+
+        golden_rules = []
+        for combo_key, outcomes in patterns.items():
+            red, blue = outcomes[0], outcomes[1]
+            total = red + blue
+            if total < MIN_OCCURRENCES:
+                continue
+            if red / total >= MIN_WIN_RATE:
+                golden_rules.append((combo_key, 0, red / total, total))
+            elif blue / total >= MIN_WIN_RATE:
+                golden_rules.append((combo_key, 1, blue / total, total))
+
+        golden_rules.sort(key=lambda x: (x[2], x[3]), reverse=True)
+        top_rules = golden_rules[:MAX_LAWS_TO_ADD]
+
+        injected = 0
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM ai_laws WHERE source = 'GOLDEN_MINER'")
+                for combo_key, prediction, win_rate, total_plays in top_rules:
+                    cond_dict  = {k: v for k, v in combo_key}
+                    confidence = int(win_rate * 100)
+                    winner_name = WINNER_NAMES.get(prediction, "?")
+                    desc = (f"قاعدة ذهبية: {confidence}% من {total_plays} جولة → {winner_name}")
+                    cur.execute("""
+                        INSERT INTO ai_laws
+                            (law_name, law_type, conditions, prediction, confidence,
+                             accuracy, description, source, times_used)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, 'GOLDEN_MINER', %s)
+                    """, (
+                        f"GOLDEN_{injected}_{int(time.time())}",
+                        "golden_intersection",
+                        json.dumps(cond_dict, ensure_ascii=False),
+                        prediction,
+                        confidence - 5,
+                        float(confidence),
+                        desc,
+                        total_plays,
+                    ))
+                    injected += 1
+                conn.commit()
+
+        load_laws(force=True)
+        return f"💎 تم! اكتشاف وحقن {injected} قاعدة ذهبية من أصل {len(golden_rules)} مكتشفة."
+
+    except Exception as e:
+        logger.error(f"Golden Miner Error: {e}", exc_info=True)
+        return f"❌ خطأ: {e}"
+
+
+async def cmd_mine_gold(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تعدين القواعد الذهبية من البيانات (للمشرف فقط)."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ هذا الأمر للمشرف فقط.")
+        return
+    msg = await update.message.reply_text(
+        "⛏️ <b>جاري تعدين البيانات...</b>\n"
+        "يبحث في التقاطعات المعقدة دون استخدام AI.",
+        parse_mode="HTML"
+    )
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, _run_golden_miner_sync)
+    await msg.edit_text(f"<b>نتائج التعدين:</b>\n{result}", parse_mode="HTML")
+
+
 def main():
     ensure_tables()
     load_laws()               # تحميل القوانين
@@ -5039,6 +5161,7 @@ def main():
     logger.info("⏰ Auto-learn job: every 60min, starts after 5min")
     app.add_handler(CommandHandler("start",       cmd_start))
     app.add_handler(CommandHandler("force_learn", cmd_force_learn))
+    app.add_handler(CommandHandler("mine_gold",   cmd_mine_gold))
     app.add_handler(CommandHandler("laws",        cmd_laws))
     app.add_handler(CommandHandler("deactivate",  cmd_deactivate_law))
     app.add_handler(CommandHandler("stats",       cmd_stats))
