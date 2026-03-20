@@ -76,7 +76,7 @@ RANK_VALUE = {k: v for k, v in zip(
 WEIGHTS = {
     'SD': 3.0, 'SUIT': 1.5, 'DIGIT': 1.2, 'RANK': 2.8,
     'MOMENTUM': 1.8, 'AI': 2.5,
-    'LAW': 3.5,      # قوانين الذاكرة السياقية — أعلى وزن
+    'LAW': 2.2,      # ⬅️ تم التخفيض لمنع هيمنة القوانين الضعيفة
 }
 # ════════════════════════════════════════════════════════════════════
 # 📊 قوانين مستخلصة من تحليل 1780 جولة حقيقية (v19)
@@ -467,20 +467,47 @@ def apply_laws(suit: str, rank: str, last_digit: int,
                b_gap: Optional[float] = None, gap_sec: Optional[float] = None,
                round_index: int = 0) -> Tuple[Dict[int, float], List[str]]:
     """
-    يُطبّق كل القوانين النشطة — يدعم الشروط الرياضية والفجوات.
+    Law Filtering Engine (Quant-Style) v19.1:
+    يطبق القوانين مع نظام تصفية صارم متعدد الطبقات:
+      - عقاب البساطة (Complexity Penalty): قانون شرط واحد × 0.6
+      - فلتر الدقة الصارم: أقل من 58% → يُحذف
+      - فلتر الانهيار الأخير: accuracy_recent < 50% → يُحذف
+      - Anti-Illusion: قوانين ts_mod تتطلب دقة > 65%
+      - Cap صحيح: max_law_score = WEIGHTS['LAW'] * 2.5
     """
     laws   = load_laws()
     scores = {0: 0.0, 1: 0.0}
     logs   = []
 
-    # ── قوانين مستخلصة من البيانات الحقيقية ──────────────────────────
-    # DATA_LAWS ثابتة من الماضي — تُضاف بوزن أقل لمنع طغيانها على AI
-    # القوانين الديناميكية من DB تأتي أولاً (أعلى أولوية)
+    # دمج القوانين الديناميكية مع القوانين الثابتة (DATA_LAWS)
     all_laws = laws + list(DATA_LAWS)
+
     for law in all_laws:
+        cond = law.get("conditions", {})
+        num_conditions = len(cond)
+
+        # 1. 🛡️ التصفية الإحصائية الصارمة (Strict Accuracy Filter)
+        # القوانين الثابتة (DATA_LAWS لها ID سالب) مستثناة من هذا الفلتر
+        if law.get("id", 0) > 0:
+            if law.get("accuracy", 0) < 58.0:
+                continue  # تجاهل القوانين ذات الدقة الضعيفة
+
+            # الفلترة الزمنية (Temporal Validation): هل انهار القانون مؤخراً؟
+            acc_recent = law.get("accuracy_recent")
+            if acc_recent is not None and acc_recent < 50.0:
+                continue  # تجاهل القانون إذا كان أداؤه الأخير فاشلاً
+
+        # 2. 🚫 مكافحة السراب (Anti-Illusion Filter)
+        # قوانين ts_mod (تردد السيرفر) أو الرقم المنفرد — تتطلب دقة عالية للنجاة
+        is_illusion = "ts_mod" in cond or ("digit" in cond and num_conditions == 1)
+        if is_illusion and law.get("accuracy", 0) < 65.0:
+            continue  # شروط الوقت والأرقام الفردية تتطلب دقة > 65%
+
+        # 3. التحقق من التطابق (Match)
         match = match_law(law, suit, rank, last_digit, recent,
                           b_num=b_num, b_gap=b_gap,
                           gap_sec=gap_sec, round_index=round_index)
+
         if match < 0.7:
             continue
 
@@ -488,31 +515,45 @@ def apply_laws(suit: str, rank: str, last_digit: int,
         if pred not in [0, 1]:
             continue
 
-        # ── وزن تصاعدي مبني على الاستخدام الفعلي ──────────────────────
-        # قانون جديد (used<5): trust=0.1 فقط — لا نثق حتى يُختبر
+        # 4. 🧠 عقاب البساطة / مكافأة التعقيد (Complexity Multiplier)
+        # قانون بشرط واحد  → × 0.6 (عقاب شديد — لا يهيمن)
+        # قانون بشرطين    → × 1.0 (وزن طبيعي)
+        # قانون بـ3+ شروط → × 1.3 (مكافأة للتقاطعات العميقة)
+        if num_conditions == 1:
+            complexity_multiplier = 0.6
+        elif num_conditions == 2:
+            complexity_multiplier = 1.0
+        else:
+            complexity_multiplier = 1.3
+
+        # 5. حساب الثقة (Trust) بناءً على الاستخدام الفعلي
+        # DATA_LAWS (id سالب): trust ثابت 0.5
+        # قانون جديد (used<5): trust=0.1 — تجميد حتى يُختبر
         # used 5-20: trust يرتفع 0.1→1.0 تدريجياً
         # used>=20: trust=1.0 (موثوق تماماً)
-        # DATA_LAWS (id سالب): trust ثابت 0.5
         used = law.get("times_used", 0)
         if law.get('id', 0) < 0:
             trust = 0.5
         elif used < 5:
-            trust = 0.1  # تجميد: تأثير ضعيف جداً للقوانين غير المختبرة
+            trust = 0.1
         elif used < 20:
             trust = 0.1 + 0.9 * ((used - 5) / 15.0)
         else:
             trust = 1.0
-        law_weight = WEIGHTS['LAW'] * trust
+
+        # الحساب النهائي للوزن مع الـ complexity multiplier
+        law_weight = WEIGHTS['LAW'] * trust * complexity_multiplier
         weight = (law["confidence"] / 100) * max(0.5, law["accuracy"] / 100) * match
         scores[pred] += weight * law_weight
 
         if match >= 0.8:
             tier_label = " 🔬" if law.get('tier') == 'probation' else ""
             logs.append(
-                f"⚖️ قانون #{law['id']} ({law['law_type']}){tier_label}: "
-                f"{WINNER_NAMES[pred]} — {law['description'][:60]}"
+                f"⚖️ قانون #{law['id']}{tier_label} (شروط:{num_conditions}): "
+                f"{WINNER_NAMES[pred]} — {law.get('description', '')[:45]}"
             )
 
+        # تحديث عداد الاستخدام في الخلفية
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
@@ -520,9 +561,9 @@ def apply_laws(suit: str, rank: str, last_digit: int,
         except Exception:
             pass
 
-    # تطبيع: cap لمنع هيمنة القوانين على بقية المحركات
-    # الحد الأقصى لكل جهة من القوانين = WEIGHTS['LAW'] * 3 (أفضل 3 قوانين)
-    max_law_score = WEIGHTS['LAW'] * 3
+    # تطبيع: منع القوانين من تدمير باقي المحركات
+    # Cap صحيح = WEIGHTS['LAW'] * 2.5 (وليس *3 كما كان خطأً)
+    max_law_score = WEIGHTS['LAW'] * 2.5
     scores[0] = min(scores[0], max_law_score)
     scores[1] = min(scores[1], max_law_score)
 
