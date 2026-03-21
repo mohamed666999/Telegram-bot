@@ -334,13 +334,13 @@ def load_laws(force: bool = False) -> List[Dict]:
                     FROM ai_laws
                     WHERE active = TRUE
                       AND times_used >= 5
-                      AND accuracy >= 55
+                      AND accuracy >= 52
                     ORDER BY accuracy DESC, times_used DESC
-                    LIMIT 10
+                    LIMIT 20
                 """)
                 proven = cur.fetchall()
 
-                # ── طبقة B: قوانين تحت الاختبار (حديثة لم تُجرَّب بعد) ──
+                # ── طبقة B: قوانين تحت الاختبار ──
                 cur.execute("""
                     SELECT id, law_type, conditions, prediction,
                            confidence, accuracy, times_used,
@@ -350,9 +350,8 @@ def load_laws(force: bool = False) -> List[Dict]:
                     FROM ai_laws
                     WHERE active = TRUE
                       AND times_used < 5
-                      AND created_at > NOW() - INTERVAL '48 hours'
                     ORDER BY confidence DESC
-                    LIMIT 6
+                    LIMIT 15
                 """)
                 probation = cur.fetchall()
 
@@ -574,15 +573,16 @@ def apply_laws(suit: str, rank: str, last_digit: int,
         if noisy and is_seq and law_id > 0:
             continue
 
-        # 2. الفلاتر الصارمة (للقوانين الديناميكية فقط)
+        # 2. الفلاتر المرنة والعادلة (للقوانين الديناميكية فقط)
         if law_id > 0:
-            if accuracy < 58.0:
+            # قانون جديد لم يُختبر كفاية لا يُقتل بالدقة الحرفية
+            if used >= 10 and accuracy < 50.0:
                 continue
             acc_recent = law.get("accuracy_recent")
-            if acc_recent is not None and acc_recent < 50.0:
+            if acc_recent is not None and acc_recent < 45.0 and used >= 5:
                 continue
             law_momentum = law.get("momentum", 0.5)
-            if law_momentum < 0.2:
+            if law_momentum < 0.1:
                 continue
         else:
             law_momentum = 0.5
@@ -1775,6 +1775,15 @@ async def force_learn_engine(status_callback) -> Dict:
         for l in existing_laws:
             prev_laws_txt += f"- [{l[0]}] pred={l[2]} acc={l[3]:.0f}% — {l[4]}\n"
 
+    # بناء hints_text من الانحيازات الحقيقية في الذاكرة (وليس هاردكود)
+    confirmed_patterns = memory.get("confirmed_patterns", [])
+    hints_text = ""
+    if confirmed_patterns:
+        hints_text = ""
+        for p in confirmed_patterns[:15]:
+            winner_str = "الثور 🔵" if p["prediction"] == 1 else "الراعي 🔴"
+            hints_text += f"- {p['pattern']} → {winner_str} (انحياز {p['bias_pct']}%, n={int(p['n'])})\n"
+
     await status_callback(
         f"✅ <b>المرحلة 2/5</b> — {len(rounds)} جولة صالحة ({conn_cnt} متصلة)\n\n"
         f"🤖 <b>المرحلة 3/5</b> — Qwen يحلل الأنماط الرياضية...\n"
@@ -1817,21 +1826,17 @@ prediction=1 = الثور 🔵 (Player/Blue)
    - {{"suit": "♦️"}} أو {{"suit": "♥️"}} أو {{"suit": "♠️"}} أو {{"suit": "♣️"}}
    - {{"b_gap_gt": N}} أو {{"b_gap_lt": N}} (N بين 200 و 5000)
    - {{"gap_sec_gt": N}} أو {{"gap_sec_lt": N}} (N بين 20 و 90)
-   - {{"digit": N}} (N بين 0 و 9) — فقط للأرقام ذات انحياز 7%+ (0، 6، 7)
+   - {{"digit": N}} (N بين 0 و 9) — للأرقام ذات انحياز موثوق فقط
 3. شرط واحد أو اثنان فقط لكل قانون
-4. confidence بين 55-63 فقط — لا تبالغ
-5. أنشئ 8-10 قوانين
+4. confidence بين 55-65 فقط — لا تبالغ
+5. أنشئ 12 قانوناً — نوّع النتائج: 6 للراعي 🔴 و 6 للثور 🔵 (التوازن إلزامي)
 
-الإشارات الموثوقة من البيانات الحقيقية (n=1494 جولة):
-- digit=0 → ثور +10.4% (n=297) ← انحياز قوي موثوق
-- digit=6 → ثور +8.5%  (n=294) ← انحياز قوي موثوق
-- digit=7 → ثور +5.3%  (n=301) ← انحياز معتدل
-- SUIT_♦️ → ثور يفوز أكثر
-- gap_sec الطبيعي للعبة: 33s (وسيط) — ليس ضوضاء
+الإشارات الموثوقة (مستخرجة آلياً من البيانات الحقيقية):
+{hints_text if hints_text else "- لا توجد أنماط كافية بعد — استكشف بحرية"}
 
 مثال ممتاز:
-{{"law_type":"suit_diamond_gap_fast","conditions":{{"suit":"♦️","gap_sec_lt":35}},"prediction":1,"confidence":58,"description":"بذلة ♦️ مع gap قصير → ثور"}}
-{{"law_type":"digit_0_blue_bias","conditions":{{"digit":0}},"prediction":1,"confidence":60,"description":"آخر رقم 0 → ثور (انحياز +10.4%)"}}
+{{"law_type":"suit_gap_fast","conditions":{{"suit":"♦️","gap_sec_lt":35}},"prediction":1,"confidence":58,"description":"بذلة ♦️ مع gap قصير → ثور"}}
+{{"law_type":"suit_spade_gap_slow","conditions":{{"suit":"♠️","gap_sec_gt":40}},"prediction":0,"confidence":57,"description":"بذلة ♠️ مع gap بطيء → راعي"}}
 
 أعد JSON array فقط:
 """
@@ -2616,74 +2621,74 @@ def bnum_fingerprint(b_num: str, rank: str) -> List[Tuple[int, float, str]]:
 # ════════════════════════════════════════════════════════════════════
 def auto_manage_laws():
     """
-    يُشغَّل بعد كل تسجيل نتيجة — يُدير القوانين تلقائياً:
+    يُشغَّل بعد كل تسجيل نتيجة — يُدير القوانين تلقائياً.
+    v21: أكثر صبراً — يمنح القوانين وقتاً كافياً للإثبات قبل الإعدام.
 
-    ① حذف سريع: دقة < 40% بعد 5 استخدامات فقط       ← ضار → يُحذف فوراً
-    ② حذف متوسط: دقة < 50% بعد 15 استخداماً          ← ضعيف → يُحذف
-    ③ حذف بطيء: دقة < 55% بعد 30 استخداماً           ← غير مفيد → يُحذف
-    ④ تعزيز: دقة > 75% بعد 8 استخدامات              ← ممتاز → يرتفع confidence
-    ⑤ ترقية: تحت الاختبار أثبت نفسه → يصبح مثبتاً
+    0️⃣ قتل الكوارث فقط: دقة < 40% بعد 4-6 محاولات
+    ①  حذف سريع:  دقة < 45% بعد 30-50 استخداماً
+    ②  حذف متوسط: دقة < 48% بعد 15-30 استخداماً
+    ③  حذف بطيء:  دقة < 52% بعد 50+ استخداماً
+    ④  تعزيز:     دقة > 70% بعد 10+ استخدامات
+    ⑤  Drift:     accuracy_recent < accuracy-20 و <48%
     """
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
 
-                # 0️⃣ القتل السريع جداً — قانون نزل دون 60% في أول 2-4 محاولات
-                # EMA بدأ من bt_acc، فشلان متتاليان يخفضانه لـ ~61% → نقتله
+                # 0️⃣ القتل السريع للكوارث فقط (أكثر تسامحاً)
                 cur.execute("""
                     UPDATE ai_laws SET active = FALSE
                     WHERE active = TRUE
-                      AND times_used IN (2, 3, 4)
-                      AND accuracy_recent < 60
+                      AND times_used IN (4, 5, 6)
+                      AND accuracy_recent < 40
                 """)
                 d0 = cur.rowcount
 
-                # ① حذف سريع — إعطاء فرصة للـ Variance الطبيعي
+                # ① حذف سريع — بعد 30+ استخداماً فقط
                 cur.execute("""
                     UPDATE ai_laws SET active = FALSE
                     WHERE active = TRUE
                       AND times_used >= 30 AND times_used < 50
-                      AND accuracy < 42
+                      AND accuracy < 45
                 """)
                 d1 = cur.rowcount
 
-                # ② حذف متوسط — قانون ضعيف بعد 15 استخداماً
+                # ② حذف متوسط — معيار أقل صرامة
                 cur.execute("""
                     UPDATE ai_laws SET active = FALSE
                     WHERE active = TRUE
                       AND times_used >= 15 AND times_used < 30
-                      AND accuracy < 50
+                      AND accuracy < 48
                 """)
                 d2 = cur.rowcount
 
-                # ③ حذف بطيء — قانون غير مفيد بعد 30 استخداماً
+                # ③ حذف بطيء — بعد 50+ استخداماً فقط
                 cur.execute("""
                     UPDATE ai_laws SET active = FALSE
                     WHERE active = TRUE
-                      AND times_used >= 30
-                      AND accuracy < 55
+                      AND times_used >= 50
+                      AND accuracy < 52
                 """)
                 d3 = cur.rowcount
 
-                # ⑤ drift detection — قانون انهار زمنياً
-                # accuracy_recent أقل بـ 15 نقطة عن accuracy الكلية → تعطيل
+                # ⑤ drift detection
                 cur.execute("""
                     UPDATE ai_laws SET active = FALSE
                     WHERE active = TRUE
                       AND times_used >= 20
                       AND accuracy_recent IS NOT NULL
-                      AND accuracy_recent < accuracy - 15
-                      AND accuracy_recent < 45
+                      AND accuracy_recent < accuracy - 20
+                      AND accuracy_recent < 48
                 """)
                 drifted = cur.rowcount
 
-                # ④ تعزيز — قانون ممتاز يُرفع confidence تدريجياً
+                # ④ تعزيز — عتبة أقل (70% بدل 75%) لمكافأة أكثر قوانين
                 cur.execute("""
                     UPDATE ai_laws
-                    SET confidence = LEAST(97, confidence * 1.04)
+                    SET confidence = LEAST(97, confidence * 1.05)
                     WHERE active = TRUE
-                      AND times_used >= 8
-                      AND accuracy > 75
+                      AND times_used >= 10
+                      AND accuracy > 70
                 """)
                 boosted = cur.rowcount
 
