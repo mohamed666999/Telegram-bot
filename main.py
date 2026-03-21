@@ -244,6 +244,65 @@ live_cache = TTLCache(ttl_seconds=30)
 _laws_cache: List[Dict] = []
 _laws_loaded_at: float  = 0.0
 
+# ════════════════════════════════════════════════════════════════════
+# ⏱️ طبقة الوعي الزمني والبيئي (Contextual Awareness Layer) v20
+# ════════════════════════════════════════════════════════════════════
+
+def get_temporal_weight(gap_sec: Optional[float]) -> float:
+    """
+    تضاؤل أسي ناعم (Exponential Decay) للثقة الزمنية.
+    gap_sec=0  → weight=1.00  (طازج تماماً)
+    gap_sec=10 → weight=0.60
+    gap_sec=20 → weight=0.36
+    gap_sec=40 → weight=0.13
+    المعادلة: e^(-gap/20) — نصف عمر 14 ثانية تقريباً.
+    أفضل من Linear لأن الثقة تنهار بسرعة ثم تستقر، لا تقطع.
+    """
+    if gap_sec is None or gap_sec <= 0:
+        return 1.0
+    return math.exp(-gap_sec / 20.0)
+
+
+def get_continuity_weight(b_gap: Optional[float]) -> float:
+    """
+    تضاؤل أسي لانقطاع تسلسل الجولات (b_gap).
+    b_gap=0    → weight=1.00
+    b_gap=100  → weight=0.88
+    b_gap=500  → weight=0.54
+    b_gap=1500 → weight=0.15
+    المعادلة: e^(-b_gap/800) — بدون Hard Cutoff (كان >1000 → 0.0 خطأ قاتل).
+    """
+    if b_gap is None or b_gap <= 0:
+        return 1.0
+    return math.exp(-b_gap / 800.0)
+
+
+def is_noisy_state(gap_sec: Optional[float], b_gap: Optional[float]) -> bool:
+    """
+    بوابة الضوضاء (Noise Gate).
+    إذا كانت البيئة "فوضوية" → الحالة غير قابلة للتنبؤ بالأنماط المعقدة.
+    gap_sec > 40  : تأخير كبير — سياق الجولة السابقة انتهى
+    b_gap > 2000  : انقطاع ضخم — التسلسل مكسور تماماً
+    في هذه الحالة: تجاهل القوانين التسلسلية (streak) → استخدم baseline فقط.
+    """
+    g = gap_sec if gap_sec is not None else 0.0
+    b = b_gap   if b_gap   is not None else 0.0
+    return g > 40 or b > 2000
+
+
+def _is_sequential_law(cond: dict) -> bool:
+    """يُعيد True إذا كان القانون يعتمد على تسلسل (streak/cycle) — حساس للضوضاء."""
+    return "streak" in cond or "cycle_position" in cond
+
+
+def def_absolute_weight(temporal_weight: float) -> float:
+    """
+    القوانين المطلقة (digit/suit/rank) تزداد أهمية عندما تنهار الثقة الزمنية.
+    لكن بحد أقصى ×1.5 لمنع التضخيم (كان ×2.0 — خطأ مُصحَّح).
+    """
+    return 1.0 + 0.5 * (1.0 - temporal_weight)
+
+
 def load_laws(force: bool = False) -> List[Dict]:
     """
     يُحمِّل القوانين بنظام طبقتين:
@@ -266,7 +325,9 @@ def load_laws(force: bool = False) -> List[Dict]:
                 cur.execute("""
                     SELECT id, law_type, conditions, prediction,
                            confidence, accuracy, times_used,
-                           description, created_at
+                           description, created_at,
+                           COALESCE(momentum, 0.5) AS momentum,
+                           accuracy_recent
                     FROM ai_laws
                     WHERE active = TRUE
                       AND times_used >= 5
@@ -280,7 +341,9 @@ def load_laws(force: bool = False) -> List[Dict]:
                 cur.execute("""
                     SELECT id, law_type, conditions, prediction,
                            confidence, accuracy, times_used,
-                           description, created_at
+                           description, created_at,
+                           COALESCE(momentum, 0.5) AS momentum,
+                           accuracy_recent
                     FROM ai_laws
                     WHERE active = TRUE
                       AND times_used < 5
@@ -306,16 +369,18 @@ def load_laws(force: bool = False) -> List[Dict]:
             if _is_aliasing_law(row[2]):
                 continue   # تجاهل قوانين ts_mod الـ aliasing
             laws.append({
-                "id":          row[0],
-                "law_type":    row[1],
-                "conditions":  row[2] if isinstance(row[2], dict) else json.loads(row[2] or "{}"),
-                "prediction":  row[3],
-                "confidence":  float(row[4]),
-                "accuracy":    float(row[5]),
-                "times_used":  int(row[6]),
-                "description": row[7],
-                "created_at":  row[8],
-                "tier":        "proven",
+                "id":              row[0],
+                "law_type":        row[1],
+                "conditions":      row[2] if isinstance(row[2], dict) else json.loads(row[2] or "{}"),
+                "prediction":      row[3],
+                "confidence":      float(row[4]),
+                "accuracy":        float(row[5]),
+                "times_used":      int(row[6]),
+                "description":     row[7],
+                "created_at":      row[8],
+                "momentum":        float(row[9]),
+                "accuracy_recent": float(row[10]) if row[10] is not None else None,
+                "tier":            "proven",
             })
 
         # أضف القوانين تحت الاختبار — بـ accuracy=50 مؤقتاً
@@ -323,16 +388,18 @@ def load_laws(force: bool = False) -> List[Dict]:
             if _is_aliasing_law(row[2]):
                 continue   # تجاهل قوانين ts_mod الـ aliasing
             laws.append({
-                "id":          row[0],
-                "law_type":    row[1],
-                "conditions":  row[2] if isinstance(row[2], dict) else json.loads(row[2] or "{}"),
-                "prediction":  row[3],
-                "confidence":  float(row[4]),
-                "accuracy":    50.0,   # مؤقت — ستُحدَّث بعد الاستخدام
-                "times_used":  int(row[6]),
-                "description": row[7],
-                "created_at":  row[8],
-                "tier":        "probation",
+                "id":              row[0],
+                "law_type":        row[1],
+                "conditions":      row[2] if isinstance(row[2], dict) else json.loads(row[2] or "{}"),
+                "prediction":      row[3],
+                "confidence":      float(row[4]),
+                "accuracy":        50.0,   # مؤقت — ستُحدَّث بعد الاستخدام
+                "times_used":      int(row[6]),
+                "description":     row[7],
+                "created_at":      row[8],
+                "momentum":        float(row[9]),
+                "accuracy_recent": float(row[10]) if row[10] is not None else None,
+                "tier":            "probation",
             })
 
         _laws_cache     = laws
@@ -467,66 +534,86 @@ def apply_laws(suit: str, rank: str, last_digit: int,
                b_gap: Optional[float] = None, gap_sec: Optional[float] = None,
                round_index: int = 0) -> Tuple[Dict[int, float], List[str]]:
     """
-    Law Filtering Engine (Quant-Style Analysis) v19.2:
+    Law Filtering Engine (Quant-Style + Time-Aware) v20:
+
+    🕐 الطبقة الزمنية (Time-Aware Scoring):
+      temporal_w   = exp(-gap_sec / 20)    — ثقة زمنية أسية
+      continuity_w = exp(-b_gap / 800)     — ثقة تسلسلية أسية
+      env_conf     = temporal_w × continuity_w
+
+    🚪 بوابة الضوضاء (Noise Gate):
+      gap_sec > 40 أو b_gap > 2000 → تجاهل القوانين التسلسلية (streak/cycle)
+      → الاعتماد فقط على القوانين المطلقة (digit/suit/rank)
 
     🛡️ الفلاتر الصارمة:
-      1. Accuracy Filter  : دقة < 58%          → تجاهل
-      2. Recency Filter   : أداء أخير < 50%    → تجاهل
-      3. Anti-Illusion    : سراب زمني < 65%    → تجاهل
+      1. Accuracy Filter  : دقة < 58% → تجاهل (للقوانين الديناميكية)
+      2. Recency Filter   : accuracy_recent < 50% → تجاهل
+      3. Anti-Illusion    : ts_mod < 65% → تجاهل
+      4. Momentum Filter  : momentum < 0.2 → قانون متجمد → تجاهل
 
-    ⚖️ معادلة الأوزان:
-      weight = base_weight × trust × complexity_multiplier × (conf/100) × accuracy × match
-
-    📊 معامل التعقيد:
-      1 شرط  → × 0.6  (عقاب — لا يهيمن)
-      2 شرط  → × 1.0  (طبيعي)
-      3+ شرط → × 1.3  (مكافأة للتقاطعات العميقة)
-      0 شرط  → × 0.4  (قانون فارغ — تجميد تام)
-
-    🔐 التطبيع:
-      max_law_score = WEIGHTS['LAW'] * 2.5  (كان *3 — خطأ مُصحَّح)
+    ⚖️ معادلة الوزن النهائية:
+      final_weight = WEIGHTS['LAW'] × trust × complexity × momentum × env_conf × abs_boost
     """
     laws   = load_laws()
     scores = {0: 0.0, 1: 0.0}
     logs   = []
+
+    # ── حساب السياق البيئي مرة واحدة لكل الجولة ──────────────────
+    temporal_w   = get_temporal_weight(gap_sec)
+    continuity_w = get_continuity_weight(b_gap)
+    env_conf     = temporal_w * continuity_w          # ثقة البيئة الكلية
+    noisy        = is_noisy_state(gap_sec, b_gap)
+
+    if noisy:
+        logs.append(f"🌊 Noise Gate: gap={gap_sec}s / b_gap={b_gap} — قوانين streak/cycle معطّلة")
 
     all_laws = laws + list(DATA_LAWS)
 
     for law in all_laws:
         law_id = law.get("id", 0)
         cond   = law.get("conditions", {})
-        # حماية من القوانين ذات conditions غير قاموس
         num_conditions = len(cond) if isinstance(cond, dict) else 0
         accuracy = law.get("accuracy", 0)
 
         # ════════════════════════════════════════════════════════════════
-        # 🛡️ المرحلة 1: الفلاتر الصارمة
+        # 🚪 فلتر الضوضاء: تجاهل القوانين التسلسلية في البيئة الفوضوية
         # ════════════════════════════════════════════════════════════════
+        if noisy and _is_sequential_law(cond) and law_id > 0:
+            continue  # streak/cycle لا تعمل في بيئة مكسورة
 
-        # فلتر #1: قوانين ديناميكية بدقة منخفضة (DATA_LAWS مستثناة)
+        # ════════════════════════════════════════════════════════════════
+        # 🛡️ الفلاتر الصارمة (قوانين ديناميكية فقط — DATA_LAWS مستثناة)
+        # ════════════════════════════════════════════════════════════════
         if law_id > 0:
+            # فلتر #1: دقة تاريخية ضعيفة
             if accuracy < 58.0:
-                continue  # ❌ أسوأ من رمي عملة — تجاهل فوري
+                continue
 
-            # فلتر #2: أداء أخير منهار (Temporal Drift)
+            # فلتر #2: الأداء الأخير منهار
             acc_recent = law.get("accuracy_recent")
             if acc_recent is not None and acc_recent < 50.0:
-                continue  # ⚠️ القانون انهار مؤخراً
+                continue
 
-        # فلتر #3: أوهام زمنية (Server Illusion)
-        # ts_mod = تردد اتصال السيرفر = سراب يتغير باختلاف البيئة
-        # digit منفرد = إحصائية هشة بدون دعم سياقي
+            # فلتر #3: الـ Momentum (قانون متجمد أو ميت)
+            law_momentum = law.get("momentum", 0.5)
+            if law_momentum < 0.2:
+                continue  # 🧊 القانون متجمد — لا تحرّكه
+
+        else:
+            # DATA_LAWS: momentum ثابت عند 0.5 (موثوق بشكل متوسط)
+            law_momentum = 0.5
+
+        # فلتر #4: أوهام زمنية (ts_mod / digit منفرد)
         is_illusion = "ts_mod" in cond or ("digit" in cond and num_conditions == 1)
         if is_illusion and accuracy < 65.0:
-            continue  # 🌊 سراب — يتطلب دقة استثنائية > 65% للنجاة
+            continue  # 🌊 سراب السيرفر
 
         # ════════════════════════════════════════════════════════════════
-        # 🎯 المرحلة 2: فحص المطابقة
+        # 🎯 فحص المطابقة
         # ════════════════════════════════════════════════════════════════
         match = match_law(law, suit, rank, last_digit, recent,
                           b_num=b_num, b_gap=b_gap,
                           gap_sec=gap_sec, round_index=round_index)
-
         if match < 0.7:
             continue
 
@@ -535,57 +622,65 @@ def apply_laws(suit: str, rank: str, last_digit: int,
             continue
 
         # ════════════════════════════════════════════════════════════════
-        # 🧮 المرحلة 3: حساب الأوزان
+        # 🧮 حساب الأوزان متعددة الطبقات
         # ════════════════════════════════════════════════════════════════
 
-        # أ) الثقة (Trust) — تصاعدية بناءً على الاستخدام الفعلي
+        # أ) الثقة التاريخية (Trust) — تصاعدية بالاستخدام
         used = law.get("times_used", 0)
         if law_id < 0:
-            trust = 0.5                              # DATA_LAWS: ثقة ثابتة متوسطة
+            trust = 0.5
         elif used < 5:
-            trust = 0.1                              # جديد: تجميد حتى يُختبر
+            trust = 0.1
         elif used < 20:
-            trust = 0.1 + 0.9 * ((used - 5) / 15.0) # نمو تدريجي
+            trust = 0.1 + 0.9 * ((used - 5) / 15.0)
         else:
-            trust = 1.0                              # موثوق تماماً
+            trust = 1.0
 
         # ب) معامل التعقيد (Complexity Multiplier)
-        # المنطق: قانون 3+ شروط = تقاطع عميق = أقل احتمالاً للصدفة
         if num_conditions == 1:
-            complexity_multiplier = 0.6   # ⚠️ عقاب — شرط واحد غالباً صدفة
+            complexity_multiplier = 0.6    # ⚠️ عقاب — قد يكون صدفة
         elif num_conditions == 2:
-            complexity_multiplier = 1.0   # 🎯 طبيعي
+            complexity_multiplier = 1.0    # 🎯 طبيعي
         elif num_conditions >= 3:
-            complexity_multiplier = 1.3   # 🔗 مكافأة للتقاطعات العميقة
+            complexity_multiplier = 1.3    # 🔗 مكافأة للتقاطع العميق
         else:
-            complexity_multiplier = 0.4   # قانون فارغ — تجميد تام
+            complexity_multiplier = 0.4    # قانون فارغ — تجميد
 
-        # ج) الوزن النهائي
-        law_weight = WEIGHTS['LAW'] * trust * complexity_multiplier
+        # ج) تحديد نوع القانون: مطلق أم تسلسلي؟
+        # القوانين المطلقة (digit/suit/rank) تعوّض الضعف الزمني
+        if _is_sequential_law(cond):
+            # تسلسلي: تأثره شديد بالزمن والانقطاع
+            time_factor = env_conf
+        else:
+            # مطلق: يقوى عندما يضعف الزمن (Attention Mechanism)
+            time_factor = def_absolute_weight(temporal_w) * continuity_w
+
+        # د) الوزن النهائي (الصيغة الكاملة)
+        law_weight = (
+            WEIGHTS['LAW']
+            * trust
+            * complexity_multiplier
+            * max(0.1, law_momentum)  # momentum كمضاعف حي (0.2→1.0)
+            * time_factor
+        )
         weight = (law["confidence"] / 100) * max(0.5, accuracy / 100) * match
         scores[pred] += weight * law_weight
 
         # ════════════════════════════════════════════════════════════════
-        # 📝 المرحلة 4: التسجيل المُفصَّل
+        # 📝 التسجيل المُفصَّل مع أيقونات الجودة
         # ════════════════════════════════════════════════════════════════
         if match >= 0.8:
             tier_label = " 🔬" if law.get('tier') == 'probation' else ""
-            # أيقونة توضح جودة القانون دفعة واحدة في الـ Log
-            if num_conditions == 1:
-                complexity_icon = "⚠️"   # تحذير: بسيط
-            elif num_conditions == 2:
-                complexity_icon = "🎯"   # طبيعي
-            else:
-                complexity_icon = "🔗"   # تقاطع عميق
-
+            complexity_icon = "⚠️" if num_conditions == 1 else "🎯" if num_conditions == 2 else "🔗"
+            env_str = f"t:{temporal_w:.2f}/c:{continuity_w:.2f}"
             logs.append(
                 f"{complexity_icon} قانون #{law_id}{tier_label} "
-                f"(شروط:{num_conditions}, ثقة:{trust:.0%}): "
-                f"{WINNER_NAMES[pred]} — {law.get('description', '')[:50]}"
+                f"(شروط:{num_conditions}, ثقة:{trust:.0%}, زخم:{law_momentum:.2f}, بيئة:{env_str}): "
+                f"{WINNER_NAMES[pred]} — {law.get('description', '')[:45]}"
             )
 
         # ════════════════════════════════════════════════════════════════
-        # ♻️ المرحلة 5: تحديث عداد الاستخدام في الخلفية
+        # ♻️ تحديث عداد الاستخدام في الخلفية
         # ════════════════════════════════════════════════════════════════
         try:
             loop = asyncio.get_event_loop()
@@ -595,8 +690,7 @@ def apply_laws(suit: str, rank: str, last_digit: int,
             pass
 
     # ════════════════════════════════════════════════════════════════════
-    # 🔐 المرحلة 6: التطبيع — منع هيمنة القوانين على باقي المحركات
-    # Cap صحيح = WEIGHTS['LAW'] * 2.5  (كان *3 — خطأ بنيوي مُصحَّح)
+    # 🔐 التطبيع — Cap صحيح = WEIGHTS['LAW'] * 2.5
     # ════════════════════════════════════════════════════════════════════
     max_law_score = WEIGHTS['LAW'] * 2.5
     scores[0] = min(scores[0], max_law_score)
@@ -616,15 +710,82 @@ def _increment_law_usage(law_id: int):
     except Exception:
         pass
 
-def update_law_accuracy(law_id: int, correct: bool):
-    """بعد تسجيل نتيجة حقيقية: حدّث دقة القانون + تتبع الانجراف."""
+def update_law_momentum(law_id: int, is_correct: bool,
+                        gap_sec: Optional[float] = None,
+                        b_gap: Optional[float] = None,
+                        law_type: str = "") -> None:
+    """
+    🧬 محرك التطور الذاتي (Self-Evolving Engine) v20:
+
+    المبدأ: القانون "حي" — يكبر إذا أثبت نفسه، ويموت إذا فشل.
+    لكن العقاب والمكافأة تتناسب مع صعوبة البيئة:
+
+    ✅ أصاب في بيئة صعبة (gap كبير)   → مكافأة مضاعفة (rare win)
+    ✅ أصاب في بيئة سهلة (gap صغير)   → مكافأة عادية
+    ❌ أخطأ في بيئة مثالية (gap صغير) → عقاب قاسي (كان يجب أن يصيب)
+    ❌ أخطأ في بيئة صعبة (gap كبير)   → عقاب خفيف (البيئة غير عادلة)
+
+    في حالة الضوضاء (Noisy State):
+      - القوانين التسلسلية (streak/cycle): لا عقاب ولا مكافأة (تجميد)
+      - القوانين المطلقة (digit/suit): تُقيَّم عادياً
+    """
+    t_weight = get_temporal_weight(gap_sec)
+    c_weight = get_continuity_weight(b_gap)
+    env_conf = t_weight * c_weight  # ثقة البيئة (0→1)
+
+    # معدلات التحديث الأساسية
+    REWARD_BASE  = 0.05   # مكافأة عادية
+    PENALTY_BASE = 0.08   # العقاب أكبر — لإيصال القوانين الضعيفة للـ HIBERNATED بسرعة
+
+    # في بيئة الضوضاء: القوانين التسلسلية محمية من التقييم
+    noisy = is_noisy_state(gap_sec, b_gap)
+    is_sequential = any(k in law_type for k in ("streak", "cycle", "gap_sec", "gap_b"))
+    if noisy and is_sequential:
+        return  # لا تغيّر momentum القانون — البيئة غير عادلة
+
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                if is_correct:
+                    # مكافأة مضاعفة إذا أصاب في بيئة صعبة
+                    reward = REWARD_BASE * (1.0 + (1.0 - env_conf))
+                    cur.execute("""
+                        UPDATE ai_laws
+                        SET momentum = LEAST(1.0, COALESCE(momentum, 0.5) + %s)
+                        WHERE id = %s
+                    """, (reward, law_id))
+                else:
+                    # عقاب مضاعف إذا أخطأ في بيئة مثالية
+                    penalty = PENALTY_BASE * (1.0 + env_conf)
+                    cur.execute("""
+                        UPDATE ai_laws
+                        SET momentum = GREATEST(0.0, COALESCE(momentum, 0.5) - %s),
+                            active = CASE
+                                WHEN GREATEST(0.0, COALESCE(momentum, 0.5) - %s) < 0.1 THEN FALSE
+                                ELSE active
+                            END
+                        WHERE id = %s
+                    """, (penalty, penalty, law_id))
+                conn.commit()
+    except Exception as e:
+        logger.debug(f"update_law_momentum error: {e}")
+
+
+def update_law_accuracy(law_id: int, correct: bool,
+                        gap_sec: Optional[float] = None,
+                        b_gap: Optional[float] = None,
+                        law_type: str = ""):
+    """
+    بعد تسجيل نتيجة حقيقية:
+      1. حدّث accuracy الكلية + accuracy_recent (EWMA)
+      2. شغّل محرك التطور (update_law_momentum) لتحديث الزخم
+    """
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
                 new_val = 100.0 if correct else 0.0
-                # accuracy_total: المتوسط المتحرك الكلي (بطيء — 95/5)
-                # accuracy_recent: المتوسط المتحرك الأخير (سريع — 85/15)
-                # إذا accuracy_recent << accuracy_total → انجراف → تعطيل
+                # accuracy_total: EWMA بطيء (95/5)
+                # accuracy_recent: EWMA سريع (85/15) — كاشف الانجراف
                 cur.execute("""
                     UPDATE ai_laws
                     SET accuracy        = accuracy        * 0.95 + %s * 0.05,
@@ -637,7 +798,6 @@ def update_law_accuracy(law_id: int, correct: bool):
                 """, (new_val, new_val, new_val, law_id))
                 conn.commit()
     except Exception as e:
-        # fallback: إذا لم يوجد عمود accuracy_recent بعد
         try:
             with db_pool.get_conn() as conn:
                 with conn.cursor() as cur:
@@ -654,6 +814,12 @@ def update_law_accuracy(law_id: int, correct: bool):
                     conn.commit()
         except Exception as e2:
             logger.error(f"update_law_accuracy error: {e2}")
+
+    # 🧬 تطوير الزخم في الخلفية (لا يُوقف البوت إذا فشل)
+    try:
+        update_law_momentum(law_id, correct, gap_sec=gap_sec, b_gap=b_gap, law_type=law_type)
+    except Exception as em:
+        logger.debug(f"update_law_momentum skipped: {em}")
 
 # ==================== DB Tables ====================
 def ensure_tables():
@@ -707,6 +873,8 @@ def ensure_tables():
                     "ALTER TABLE ai_laws ADD COLUMN IF NOT EXISTS description TEXT",
                     "ALTER TABLE ai_laws ADD COLUMN IF NOT EXISTS source      TEXT DEFAULT \'force_learn\'",
                     "ALTER TABLE ai_laws ADD COLUMN IF NOT EXISTS active      BOOLEAN DEFAULT TRUE",
+                    # v20: نظام التطور الذاتي
+                    "ALTER TABLE ai_laws ADD COLUMN IF NOT EXISTS momentum    FLOAT DEFAULT 0.5",
                 ]
                 for sql in migrate_cols:
                     cur.execute(sql)
@@ -1164,9 +1332,9 @@ def _filter_valid_rounds(rows) -> List[Dict]:
             "ts":        ts,
             "gap_sec":   gap_sec,
             "b_gap":     b_gap,
-            # الجولة متصلة إن كانت الفجوة الزمنية ≤ SESSION_CONNECTED_SEC
-            # b_gap لا يُستخدم لتحديد الاتصال — في هذه اللعبة b_gap كبير دائماً
             "connected": gap_sec is not None and gap_sec <= SESSION_CONNECTED_SEC,
+            # v20: ثقة البيئة لكل جولة — تُستخدم في التعلم المرجَّح
+            "env_conf":  get_temporal_weight(gap_sec) * get_continuity_weight(b_gap),
         })
 
     return valid
@@ -1174,17 +1342,19 @@ def _filter_valid_rounds(rows) -> List[Dict]:
 def _build_math_memory(rounds: List[Dict]) -> Dict:
     """
     يحسب الأنماط المثبتة إحصائياً من البيانات الحقيقية.
-    لا يُرسل إحصاءات مجمّعة — يُرسل الأنماط ذات الدلالة فقط.
+    v20: عدّ مرجَّح بـ env_conf — الجولات النظيفة تُحسب بوزن أعلى.
+    الجولات المشوشة (gap كبير / b_gap ضخم) شبه مستبعدة تلقائياً.
     """
     total = len(rounds)
     connected = [r for r in rounds if r["connected"]]
 
-    # ── حساب شامل للأنماط المثبتة ────────────────────────────────────
+    # ── حساب شامل للأنماط المثبتة (عدّ مرجَّح) ─────────────────────
     confirmed_patterns = []
-    MIN_N    = 40   # حد أدنى للعينة
+    MIN_N    = 40   # حد أدنى للعينة (وزن مرجَّح — يعادل عدداً حقيقياً)
     MIN_BIAS = 0.10  # 10% انحياز
 
     def add_if_significant(label, cond_dict, v, min_n=MIN_N, min_bias=MIN_BIAS):
+        # v = [weighted_red, weighted_blue]
         n = v[0] + v[1]
         if n < min_n:
             return
@@ -1196,19 +1366,25 @@ def _build_math_memory(rounds: List[Dict]) -> Dict:
             "pattern": label,
             "conditions": cond_dict,
             "prediction": pred,
-            "n": n,
-            "red": v[0], "blue": v[1],
+            "n": round(n, 1),
+            "red": round(v[0], 1), "blue": round(v[1], 1),
             "bias_pct": round(abs(bias) * 100, 1),
             "accuracy_est": round(50 + abs(bias) * 50, 1),
         })
 
-    # 1. digit_sum mod N (mod 2..15, كل remainder)
+    # دالة مساعدة: عدّ مرجَّح بـ env_conf بدلاً من count += 1
+    def weighted_inc(v: list, winner: int, env_conf: float):
+        """v[0]=red, v[1]=blue — كل جولة تُحسب بوزنها البيئي"""
+        if winner in [0, 1]:
+            v[winner] += env_conf  # الجولة النظيفة = 1.0، المشوشة ≈ 0.1
+
+    # 1. digit_sum mod N (mod 2..15) — عدّ مرجَّح
     for mod in range(2, 16):
-        mod_stats = defaultdict(lambda: [0, 0])
+        mod_stats = defaultdict(lambda: [0.0, 0.0])
         for r in rounds:
             if r["b_num"] and r["winner"] in [0, 1]:
                 s = sum(int(d) for d in r["b_num"]) % mod
-                mod_stats[s][r["winner"]] += 1
+                weighted_inc(mod_stats[s], r["winner"], r.get("env_conf", 1.0))
         for rem, v in mod_stats.items():
             add_if_significant(
                 f"digit_sum mod {mod} == {rem}",
@@ -1216,20 +1392,20 @@ def _build_math_memory(rounds: List[Dict]) -> Dict:
                 v
             )
 
-    # 2. آخر رقم من b_num
+    # 2. آخر رقم من b_num — عدّ مرجَّح
     for d in range(10):
-        v = [0, 0]
+        v = [0.0, 0.0]
         for r in rounds:
             if r["b_num"] and r["winner"] in [0, 1]:
                 if r["b_num"][-1] == str(d):
-                    v[r["winner"]] += 1
+                    weighted_inc(v, r["winner"], r.get("env_conf", 1.0))
         add_if_significant(f"last_digit_bnum == {d}", {"digit": d}, v, min_n=50)
 
-    # 3. فجوة رقمية (b_gap) + winner
+    # 3. فجوة رقمية (b_gap) + winner — عدّ مرجَّح
     gap_ranges = [("lt200", None, 200), ("200_500", 200, 500),
                   ("500_2000", 500, 2000), ("gt2000", 2000, None)]
     for label, lo, hi in gap_ranges:
-        v = [0, 0]
+        v = [0.0, 0.0]
         for r in rounds:
             if r["b_gap"] is None or r["winner"] not in [0, 1]:
                 continue
@@ -1237,61 +1413,65 @@ def _build_math_memory(rounds: List[Dict]) -> Dict:
                 continue
             if hi is not None and r["b_gap"] >= hi:
                 continue
-            v[r["winner"]] += 1
+            weighted_inc(v, r["winner"], r.get("env_conf", 1.0))
         cond = {}
         if lo: cond["b_gap_gte"] = lo
         if hi: cond["b_gap_lt"]  = hi
         add_if_significant(f"b_gap_{label}", cond, v)
 
-    # 4. فجوة زمنية (gap_sec) + winner
+    # 4. فجوة زمنية (gap_sec) + winner — عدّ مرجَّح
     for cutoff in [10, 15, 20, 30]:
-        v_lt = [0, 0]; v_gt = [0, 0]
+        v_lt = [0.0, 0.0]; v_gt = [0.0, 0.0]
         for r in rounds:
             if r["gap_sec"] is None or r["winner"] not in [0, 1]:
                 continue
+            ec = r.get("env_conf", 1.0)
             if r["gap_sec"] < cutoff:
-                v_lt[r["winner"]] += 1
+                weighted_inc(v_lt, r["winner"], ec)
             else:
-                v_gt[r["winner"]] += 1
+                weighted_inc(v_gt, r["winner"], ec)
         add_if_significant(f"gap_sec_lt_{cutoff}", {"gap_sec_lt": cutoff}, v_lt)
         add_if_significant(f"gap_sec_gt_{cutoff}", {"gap_sec_gt": cutoff}, v_gt)
 
-    # 5. دورات (cycle position) على الجولات المتصلة
+    # 5. دورات (cycle position) — عدّ مرجَّح على الجولات المتصلة
     for cycle in range(3, 10):
         for pos in range(cycle):
-            v = [0, 0]
+            v = [0.0, 0.0]
             for i, r in enumerate(connected):
                 if r["winner"] in [0, 1] and i % cycle == pos:
-                    v[r["winner"]] += 1
+                    weighted_inc(v, r["winner"], r.get("env_conf", 1.0))
             add_if_significant(
                 f"cycle{cycle}_pos{pos}",
                 {"cycle_position": {"cycle": cycle, "position": pos}},
                 v, min_n=25
             )
 
-    # 6. streak reversal: بعد N متتاليين
+    # 6. streak reversal — عدّ مرجَّح (الأهم: يأخذ env_conf الجولة التالية)
     for streak_len in [2, 3, 4]:
         for streak_val in [0, 1]:
-            v = [0, 0]
-            seq = [r["winner"] for r in connected if r["winner"] in [0, 1]]
-            for i in range(streak_len, len(seq)):
-                if seq[i-streak_len:i] == [streak_val]*streak_len and seq[i] in [0, 1]:
-                    v[seq[i]] += 1
+            v = [0.0, 0.0]
+            # نعمل على connected فقط — streak في بيئة منقطعة لا معنى له
+            conn_list = [r for r in connected if r["winner"] in [0, 1]]
+            for i in range(streak_len, len(conn_list)):
+                seq_prev = [conn_list[j]["winner"] for j in range(i-streak_len, i)]
+                if seq_prev == [streak_val] * streak_len:
+                    next_r = conn_list[i]
+                    weighted_inc(v, next_r["winner"], next_r.get("env_conf", 1.0))
             add_if_significant(
                 f"after_{streak_len}x_{'red' if streak_val==0 else 'blue'}",
                 {"streak": {"length": streak_len, "value": streak_val}},
                 v, min_n=20
             )
 
-    # 7. rank + digit_sum_mod (للجولات التي لها rank)
+    # 7. rank + digit_sum_mod — عدّ مرجَّح
     ranked = [r for r in rounds if r["rank"] and r["rank"] not in ("", "NULL")]
     for mod in [3, 5, 7]:
         for rank in ["A","K","Q","J","10","9","8","7","6","5","4","3","2"]:
-            mod_stats = defaultdict(lambda: [0, 0])
+            mod_stats = defaultdict(lambda: [0.0, 0.0])
             for r in ranked:
                 if r["rank"] == rank and r["winner"] in [0, 1]:
                     s = sum(int(d) for d in r["b_num"]) % mod
-                    mod_stats[s][r["winner"]] += 1
+                    weighted_inc(mod_stats[s], r["winner"], r.get("env_conf", 1.0))
             for rem, v in mod_stats.items():
                 add_if_significant(
                     f"rank_{rank}_digsum_mod{mod}_{rem}",
@@ -1378,11 +1558,21 @@ def _build_math_memory(rounds: List[Dict]) -> Dict:
 
 
 
-def _run_law_on_rows(law_dict: Dict, rows: List) -> Tuple[int, int]:
-    """يُطبّق القانون على قائمة جولات ويُعيد (correct, total)."""
+def _run_law_on_rows(law_dict: Dict, rows: List,
+                     weighted: bool = False) -> Tuple[float, float]:
+    """
+    يُطبّق القانون على قائمة جولات ويُعيد (correct_score, total_score).
+    v20: weighted=True → العدّ مرجَّح بـ env_conf (Backtest واقعي).
+    weighted=False → عدّ عادي للتوافق مع الكود القديم.
+    """
     pred = law_dict.get("prediction")
-    correct = 0
-    total   = 0
+    correct_score = 0.0
+    total_score   = 0.0
+
+    # هل القانون تسلسلي؟ (لفلتر بوابة الضوضاء في الـ backtest)
+    cond = law_dict.get("conditions", {})
+    is_seq = isinstance(cond, dict) and _is_sequential_law(cond)
+
     for row in rows:
         b_num_r   = str(row[1] or "")
         suit_r    = str(row[2] or "")
@@ -1392,8 +1582,14 @@ def _run_law_on_rows(law_dict: Dict, rows: List) -> Tuple[int, int]:
         created_r = row[6]
         b_gap_r   = row[7]
         gap_sec_r = float(row[8]) if row[8] is not None else None
+
         if winner_r not in [0, 1]:
             continue
+
+        # ── فلتر الضوضاء في الـ backtest (القوانين التسلسلية فقط) ──
+        if is_seq and is_noisy_state(gap_sec_r, b_gap_r):
+            continue  # لا تُحسب هذه الجولة للقانون التسلسلي
+
         clean_b   = clean_digits(b_num_r)
         unix_ts_r = int(created_r.timestamp()) if created_r else int(time.time())
         match = match_law(law_dict, suit_r, rank_r, digit_r,
@@ -1402,62 +1598,75 @@ def _run_law_on_rows(law_dict: Dict, rows: List) -> Tuple[int, int]:
                           round_index=unix_ts_r)
         if match < 0.7:
             continue
-        total += 1
+
+        # وزن الجولة: env_conf إذا كنا في وضع مرجَّح، 1.0 إذا عادي
+        if weighted:
+            t_w = get_temporal_weight(gap_sec_r)
+            c_w = get_continuity_weight(b_gap_r)
+            row_weight = t_w * c_w
+        else:
+            row_weight = 1.0
+
+        total_score += row_weight
         if winner_r == pred:
-            correct += 1
-    return correct, total
+            correct_score += row_weight
+
+    return correct_score, total_score
 
 
 def backtest_law(law_dict: Dict, backtest_rows: List) -> Tuple[bool, float, int]:
     """
-    Backtest ديناميكي — دخول مرن، بقاء للأقوى (Ruthless Kill يتولى التصفية الحية).
+    Backtest مرجَّح بالبيئة (Context-Aware Backtest) v20:
 
-    القبول:
-    - دقة إجمالية >= 53.5% مع عينة >= 18
-    - Split يُستخدم فقط لاكتشاف الانهيار:
-      يُرفض إذا كان النصف الأحدث (t_new >= 8) أقل من 50% صراحةً
+    - القوانين التسلسلية (streak/cycle): تُستثنى منها جولات الضوضاء تلقائياً
+    - الدقة تُحسب بعدّ مرجَّح بـ env_conf (الجولات النظيفة تُحسب أكثر)
+    - هذا يمنع ظاهرة session #46: قانون يبدو بدقة 85% لكنه مبني على ضوضاء
+
+    القبول: دقة مرجَّحة >= 52% مع عينة مرجَّحة >= 12
+    الرفض: إذا كان أداؤه على البيانات الحديثة < 50% صراحةً
     """
-    MIN_TOTAL_SAMPLE = 12
+    MIN_TOTAL_SCORE  = 12.0   # عينة مرجَّحة (وليس عدداً حرفياً)
     MIN_TOTAL_ACC    = 0.52
 
     pred = law_dict.get("prediction")
     if pred not in [0, 1]:
         return False, 0.0, 0
 
-    # ── اختبار إجمالي ────────────────────────────────────────────────
-    c_total, t_total = _run_law_on_rows(law_dict, backtest_rows)
+    # ── اختبار إجمالي مرجَّح ─────────────────────────────────────────
+    c_total, t_total = _run_law_on_rows(law_dict, backtest_rows, weighted=True)
 
-    if t_total < MIN_TOTAL_SAMPLE:
-        return False, 0.0, t_total
+    if t_total < MIN_TOTAL_SCORE:
+        return False, 0.0, int(t_total)
 
     acc_total = c_total / t_total
     if acc_total < MIN_TOTAL_ACC:
-        return False, acc_total, t_total
+        return False, acc_total, int(t_total)
 
-    # ── Split — كاشف انهيار فقط (Anti-Illusion) ──────────────────────
+    # ── Split — كاشف انهيار (Anti-Drift) ─────────────────────────────
     mid      = len(backtest_rows) // 2
-    rows_new = backtest_rows[:mid]
-    rows_old = backtest_rows[mid:]
+    rows_new = backtest_rows[:mid]   # الأحدث
+    rows_old = backtest_rows[mid:]   # الأقدم
 
-    c_new, t_new = _run_law_on_rows(law_dict, rows_new)
-    c_old, t_old = _run_law_on_rows(law_dict, rows_old)
+    c_new, t_new = _run_law_on_rows(law_dict, rows_new, weighted=True)
+    c_old, t_old = _run_law_on_rows(law_dict, rows_old, weighted=True)
 
     acc_new = (c_new / t_new) if t_new > 0 else 0.0
     acc_old = (c_old / t_old) if t_old > 0 else 0.0
 
     # يُرفض فقط إذا كان يفشل صراحةً في البيانات الحديثة
-    if t_new >= 6 and acc_new < 0.50:
+    if t_new >= 6.0 and acc_new < 0.50:
         logger.info(
             f"Backtest REJECT (drifted): {law_dict.get('law_type')} "
-            f"total={acc_total:.0%} new={acc_new:.0%}/{t_new}"
+            f"total={acc_total:.0%} new={acc_new:.0%}/w:{t_new:.1f}"
         )
-        return False, acc_total, t_total
+        return False, acc_total, int(t_total)
 
     logger.info(
         f"Backtest PASS: {law_dict.get('law_type')} "
-        f"total={acc_total:.0%}/{t_total} (new={acc_new:.0%}/{t_new} old={acc_old:.0%}/{t_old})"
+        f"total={acc_total:.0%}/w:{t_total:.1f} "
+        f"(new={acc_new:.0%}/w:{t_new:.1f} old={acc_old:.0%}/w:{t_old:.1f})"
     )
-    return True, acc_total, t_total
+    return True, acc_total, int(t_total)
 
 
 def _fetch_backtest_rows() -> List:
@@ -1683,6 +1892,27 @@ prediction=1 = الثور 🔵 (Player/Blue)
                         skipped += 1
                         continue
 
+                    # ── تصنيف نوع القانون (v20) ──────────────────────────
+                    # SEQUENTIAL: يعتمد على تسلسل/دورات — حساس للضوضاء
+                    # ABSOLUTE  : يعتمد على ثوابت — أكثر استقراراً
+                    is_sequential = isinstance(cond, dict) and _is_sequential_law(cond)
+                    law_category  = "SEQUENTIAL" if is_sequential else "ABSOLUTE"
+
+                    # ── فلتر البيئة قبل الإنشاء (Critical Filter) ────────
+                    # القانون التسلسلي المستخرج من جولات ضوضاء = وهم
+                    # نحسب متوسط env_conf للجولات التي يُطابقها هذا القانون
+                    if is_sequential:
+                        env_scores = [
+                            r.get("env_conf", 1.0) for r in rounds
+                            if r.get("env_conf", 1.0) is not None
+                        ]
+                        avg_env = sum(env_scores) / len(env_scores) if env_scores else 1.0
+                        if avg_env < 0.3:
+                            # بيانات المصدر ملوثة — لا تنشئ القانون
+                            skipped += 1
+                            logger.info(f"ENV FILTER: {law.get('law_type')} rejected — avg_env={avg_env:.2f}")
+                            continue
+
                     # ── حماية مطلقة من النسخ المكررة ────────────────────
                     cond_str = json.dumps(cond, ensure_ascii=False, sort_keys=True)
                     if cond_str in existing_conds:
@@ -1690,7 +1920,7 @@ prediction=1 = الثور 🔵 (Player/Blue)
                         logger.info(f"DUPLICATE REJECTED: {law.get('law_type')} conditions already exist")
                         continue
 
-                    # ── Backtest إجباري قبل الحفظ ────────────────────────
+                    # ── Backtest مرجَّح إجباري قبل الحفظ ─────────────────
                     bt_passes, bt_acc, bt_n = backtest_law(law, backtest_rows)
                     if not bt_passes:
                         rejected_bt += 1
@@ -1701,7 +1931,7 @@ prediction=1 = الثور 🔵 (Player/Blue)
                         )
                         continue
 
-                    # ── القانون اجتاز — احفظه بدون ON CONFLICT لمنع التكرار ──
+                    # ── القانون اجتاز — احفظه مع تصنيفه ─────────────────
                     initial_acc = round(bt_acc * 100, 1)
                     law_name = f"{law.get('law_type', 'COMBINED')}_{saved}_{int(time.time())}"
                     cur.execute("""
@@ -1716,12 +1946,13 @@ prediction=1 = الثور 🔵 (Player/Blue)
                         int(pred),
                         float(law.get("confidence", 70)),
                         initial_acc,
-                        f"{law.get('description', '')} [bt:{bt_acc:.0%}/{bt_n}]",
+                        f"[{law_category}] {law.get('description', '')} [bt:{bt_acc:.0%}/{bt_n}]",
                     ))
-                    existing_conds.add(cond_str)  # منع تكراره في نفس الجلسة
+                    existing_conds.add(cond_str)
                     saved += 1
                     if len(sample_laws_saved) < 3:
-                        sample_laws_saved.append({**law, "bt_acc": bt_acc, "bt_n": bt_n})
+                        sample_laws_saved.append({**law, "bt_acc": bt_acc, "bt_n": bt_n,
+                                                   "category": law_category})
 
                 # احفظ ملخص الجلسة
                 cur.execute("""
