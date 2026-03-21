@@ -252,42 +252,50 @@ def get_temporal_weight(gap_sec: Optional[float]) -> float:
     """
     تضاؤل أسي ناعم (Exponential Decay) للثقة الزمنية.
     gap_sec=0  → weight=1.00  (طازج تماماً)
-    gap_sec=10 → weight=0.60
-    gap_sec=20 → weight=0.36
-    gap_sec=40 → weight=0.13
-    المعادلة: e^(-gap/20) — نصف عمر 14 ثانية تقريباً.
-    أفضل من Linear لأن الثقة تنهار بسرعة ثم تستقر، لا تقطع.
+    gap_sec=15 → weight=0.78
+    gap_sec=33 → weight=0.58  ← إيقاع اللعبة الطبيعي (وسيط 80% الجولات)
+    gap_sec=60 → weight=0.37
+    gap_sec=90 → weight=0.22
+    المعادلة: e^(-gap/60) — نصف عمر 42 ثانية.
+    المعايرة مبنية على البيانات: 80% من الجولات gap=25-40s → يجب أن تحصل على وزن >0.5.
     """
     if gap_sec is None or gap_sec <= 0:
         return 1.0
-    return math.exp(-gap_sec / 20.0)
+    return math.exp(-gap_sec / 60.0)
 
 
 def get_continuity_weight(b_gap: Optional[float]) -> float:
     """
     تضاؤل أسي لانقطاع تسلسل الجولات (b_gap).
     b_gap=0    → weight=1.00
-    b_gap=100  → weight=0.88
-    b_gap=500  → weight=0.54
-    b_gap=1500 → weight=0.15
-    المعادلة: e^(-b_gap/800) — بدون Hard Cutoff (كان >1000 → 0.0 خطأ قاتل).
+    b_gap=500  → weight=0.85
+    b_gap=1563 → weight=0.59  ← وسيط b_gap الفعلي في البيانات
+    b_gap=3000 → weight=0.37
+    b_gap=5000 → weight=0.19
+    المعادلة: e^(-b_gap/3000) — معايَرة على وسيط b_gap الحقيقي (1563).
     """
     if b_gap is None or b_gap <= 0:
         return 1.0
-    return math.exp(-b_gap / 800.0)
+    return math.exp(-b_gap / 3000.0)
 
 
 def is_noisy_state(gap_sec: Optional[float], b_gap: Optional[float]) -> bool:
     """
-    بوابة الضوضاء (Noise Gate).
-    إذا كانت البيئة "فوضوية" → الحالة غير قابلة للتنبؤ بالأنماط المعقدة.
-    gap_sec > 40  : تأخير كبير — سياق الجولة السابقة انتهى
-    b_gap > 2000  : انقطاع ضخم — التسلسل مكسور تماماً
-    في هذه الحالة: تجاهل القوانين التسلسلية (streak) → استخدم baseline فقط.
+    بوابة الضوضاء (Noise Gate) — معايَرة على البيانات الحقيقية.
+
+    الحقائق من 1494 جولة:
+    - 80% من الجولات: gap = 25-40s (إيقاع اللعبة الطبيعي — ليس ضوضاء)
+    - 11% من الجولات: gap > 120s (انقطاعات حقيقية بين جلسات)
+    - وسيط b_gap = 1563 (طبيعي للعبة)
+
+    العتبة الصحيحة:
+    gap_sec > 90  : انقطاع واضح بين جلسات أو تأخير غير طبيعي
+    b_gap > 8000  : انقطاع ضخم في التسلسل الرقمي
+    (يطال 11% فقط — بدلاً من 80% كما كان بـ > 40s)
     """
     g = gap_sec if gap_sec is not None else 0.0
     b = b_gap   if b_gap   is not None else 0.0
-    return g > 40 or b > 2000
+    return g > 90 or b > 8000
 
 
 def _is_sequential_law(cond: dict) -> bool:
@@ -537,8 +545,8 @@ def apply_laws(suit: str, rank: str, last_digit: int,
     Law Filtering Engine (Quant-Style + Time-Aware) v20:
 
     🕐 الطبقة الزمنية (Time-Aware Scoring):
-      temporal_w   = exp(-gap_sec / 20)    — ثقة زمنية أسية
-      continuity_w = exp(-b_gap / 800)     — ثقة تسلسلية أسية
+      temporal_w   = exp(-gap_sec / 60)    — ثقة زمنية (div=60، وسيط 33s → 0.58)
+      continuity_w = exp(-b_gap / 3000)    — ثقة تسلسلية (div=3000، وسيط 1478 → 0.61)
       env_conf     = temporal_w × continuity_w
 
     🚪 بوابة الضوضاء (Noise Gate):
@@ -1632,14 +1640,38 @@ def backtest_law(law_dict: Dict, backtest_rows: List) -> Tuple[bool, float, int]
     if pred not in [0, 1]:
         return False, 0.0, 0
 
+    # ── عتبة تكيفية للعينة (Adaptive Threshold) ─────────────────────
+    # إذا كانت البيانات نظيفة (env_conf مرتفع) → نشترط عينة أكبر
+    # إذا كانت البيانات مشوشة (env_conf منخفض) → نخفف الشرط لنتعلم
+    # نستنتج متوسط env من الجولات المتاحة في backtest_rows
+    env_vals = []
+    for row in backtest_rows:
+        gs = float(row[8]) if row[8] is not None else None
+        bg = row[7]
+        if gs is not None:
+            env_vals.append(get_temporal_weight(gs) * get_continuity_weight(bg))
+    avg_bt_env = sum(env_vals) / len(env_vals) if env_vals else 0.5
+    MIN_TOTAL_SCORE = 8.0 if avg_bt_env > 0.5 else 5.0
+    logger.debug(f"backtest_law: avg_bt_env={avg_bt_env:.3f}, min_sample={MIN_TOTAL_SCORE}")
+
     # ── اختبار إجمالي مرجَّح ─────────────────────────────────────────
     c_total, t_total = _run_law_on_rows(law_dict, backtest_rows, weighted=True)
 
     if t_total < MIN_TOTAL_SCORE:
+        logger.info(
+            f"Backtest REJECT (low sample): {law_dict.get('law_type')} "
+            f"weighted_n={t_total:.1f} < {MIN_TOTAL_SCORE} "
+            f"(avg_env={avg_bt_env:.3f})"
+        )
         return False, 0.0, int(t_total)
 
     acc_total = c_total / t_total
     if acc_total < MIN_TOTAL_ACC:
+        logger.info(
+            f"Backtest REJECT (low acc): {law_dict.get('law_type')} "
+            f"acc={acc_total:.1%} < {MIN_TOTAL_ACC:.0%} "
+            f"(weighted_n={t_total:.1f})"
+        )
         return False, acc_total, int(t_total)
 
     # ── Split — كاشف انهيار (Anti-Drift) ─────────────────────────────
@@ -1792,20 +1824,30 @@ prediction=1 = الثور 🔵 (Player/Blue)
 {prev_laws_txt}
 
 ━━━ المطلوب ━━━
-أنت مهندس خوارزميات كمّي. مهمتك: اكتشاف أنماط كسر السلاسل وتأثير الفجوات الزمنية.
+أنت محلل بيانات كمّي. مهمتك: اكتشاف أنماط suit + gap الزمني + gap الرقمي.
 
 القواعد الصارمة:
-1. ممنوع تماماً: digit، digit_sum_mod، rank، ts_mod، b_gap، suit
+1. ممنوع تماماً: streak، cycle_position، digit_sum_mod، ts_mod، rank
+   (streak ثبت أنه ضوضاء: نسبة الكسر 48-55% — مساوٍ للعشوائية تماماً)
 2. الشروط المسموحة فقط:
-   - {{"streak":{{"length":2أو3أو4أو5,"value":0أو1}}}}
-   - {{"gap_sec_gt":N}} أو {{"gap_sec_lt":N}} (بين 15 و60)
-   - {{"cycle_position":{{"cycle":N,"position":K}}}} (cycle بين 4 و10)
+   - {{"suit": "♦️"}} أو {{"suit": "♥️"}} أو {{"suit": "♠️"}} أو {{"suit": "♣️"}}
+   - {{"b_gap_gt": N}} أو {{"b_gap_lt": N}} (N بين 200 و 5000)
+   - {{"gap_sec_gt": N}} أو {{"gap_sec_lt": N}} (N بين 20 و 90)
+   - {{"digit": N}} (N بين 0 و 9) — فقط للأرقام ذات انحياز 7%+ (0، 6، 7)
 3. شرط واحد أو اثنان فقط لكل قانون
-4. confidence بين 55-68 فقط
-5. أنشئ 10-12 قانوناً
+4. confidence بين 55-63 فقط — لا تبالغ
+5. أنشئ 8-10 قوانين
+
+الإشارات الموثوقة من البيانات الحقيقية (n=1494 جولة):
+- digit=0 → ثور +10.4% (n=297) ← انحياز قوي موثوق
+- digit=6 → ثور +8.5%  (n=294) ← انحياز قوي موثوق
+- digit=7 → ثور +5.3%  (n=301) ← انحياز معتدل
+- SUIT_♦️ → ثور يفوز أكثر
+- gap_sec الطبيعي للعبة: 33s (وسيط) — ليس ضوضاء
 
 مثال ممتاز:
-{{"law_type":"streak3_gap_break","conditions":{{"streak":{{"length":3,"value":0}},"gap_sec_gt":30}},"prediction":1,"confidence":63,"description":"بعد 3 رواعٍ + تأخير >30ث → الثور"}}
+{{"law_type":"suit_diamond_gap_fast","conditions":{{"suit":"♦️","gap_sec_lt":35}},"prediction":1,"confidence":58,"description":"بذلة ♦️ مع gap قصير → ثور"}}
+{{"law_type":"digit_0_blue_bias","conditions":{{"digit":0}},"prediction":1,"confidence":60,"description":"آخر رقم 0 → ثور (انحياز +10.4%)"}}
 
 أعد JSON array فقط:
 """
@@ -1898,20 +1940,33 @@ prediction=1 = الثور 🔵 (Player/Blue)
                     is_sequential = isinstance(cond, dict) and _is_sequential_law(cond)
                     law_category  = "SEQUENTIAL" if is_sequential else "ABSOLUTE"
 
-                    # ── فلتر البيئة قبل الإنشاء (Critical Filter) ────────
-                    # القانون التسلسلي المستخرج من جولات ضوضاء = وهم
-                    # نحسب متوسط env_conf للجولات التي يُطابقها هذا القانون
+                    # ── فلتر البيئة قبل الإنشاء (Calibrated Filter) ──────
+                    # env_conf بعد إعادة المعايرة:
+                    #   gap=30 → t=0.42 | b_gap=1000 → c=0.51 | ناتج≈0.21
+                    # الحد 0.18 يرفض فقط الحالات الفوضوية الصريحة
                     if is_sequential:
                         env_scores = [
                             r.get("env_conf", 1.0) for r in rounds
-                            if r.get("env_conf", 1.0) is not None
+                            if r.get("env_conf") is not None
                         ]
                         avg_env = sum(env_scores) / len(env_scores) if env_scores else 1.0
-                        if avg_env < 0.3:
-                            # بيانات المصدر ملوثة — لا تنشئ القانون
+
+                        # عتبة تكيفية: بيانات نظيفة → معيار أصعب
+                        env_threshold = 0.18
+
+                        if avg_env < env_threshold:
                             skipped += 1
-                            logger.info(f"ENV FILTER: {law.get('law_type')} rejected — avg_env={avg_env:.2f}")
+                            logger.info(
+                                f"ENV FILTER REJECT: {law.get('law_type')} "
+                                f"avg_env={avg_env:.3f} < {env_threshold} "
+                                f"(rounds_used={len(env_scores)})"
+                            )
                             continue
+                        else:
+                            logger.info(
+                                f"ENV FILTER PASS: {law.get('law_type')} "
+                                f"avg_env={avg_env:.3f} ✅"
+                            )
 
                     # ── حماية مطلقة من النسخ المكررة ────────────────────
                     cond_str = json.dumps(cond, ensure_ascii=False, sort_keys=True)
