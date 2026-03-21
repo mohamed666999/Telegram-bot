@@ -1,3 +1,12 @@
+python
+"""
+HADES V21.0 - The Balanced Ensemble (Quant Edition)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- نظام Probabilistic Ensemble يمنع هيمنة قانون واحد.
+- مكافأة للتكتلات الإحصائية (Cluster Boost).
+- فلترة ذكية للضوضاء وفصل الكود من التكرارات.
+"""
+
 import itertools
 import re
 import json
