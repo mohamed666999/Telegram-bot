@@ -2375,9 +2375,9 @@ SEQ_WEIGHT_HARD        = 0.0
 def gap_classify(gap_sec: Optional[float]) -> str:
     """
     يُصنّف الفجوة الزمنية:
-    - 'connected'  : gap ≤ 17ث   → سلسلة حقيقية
-    - 'soft_break' : 17-90ث      → كسر ناعم
-    - 'hard_break' : > 90ث / None → كسر قوي / لا بيانات
+    - 'connected'  : gap ≤ 45ث   → سلسلة حقيقية
+    - 'soft_break' : 45-180ث      → كسر ناعم
+    - 'hard_break' : > 180ث / None → كسر قوي / لا بيانات
     """
     if gap_sec is None:
         return 'hard_break'
@@ -2387,14 +2387,34 @@ def gap_classify(gap_sec: Optional[float]) -> str:
         return 'soft_break'
     return 'hard_break'
 
-def seq_weight_from_gap(gap_sec: Optional[float]) -> float:
-    """يُعيد وزن محركات التسلسل بناءً على الفجوة الزمنية."""
-    cls = gap_classify(gap_sec)
-    return {
-        'connected':  SEQ_WEIGHT_CONNECTED,
-        'soft_break': SEQ_WEIGHT_SOFT,
-        'hard_break': SEQ_WEIGHT_HARD,
-    }[cls]
+def seq_weight_from_gap(gap_sec: Optional[float],
+                        b_gap: Optional[float] = None) -> float:
+    """
+    وزن المحركات التسلسلية — ناعم ومرجَّح بالبيئة الكاملة (v20-fix).
+
+    بدلاً من Step Function (1.0 / 0.3 / 0.0):
+      seq_weight = temporal_w × continuity_w × b_gap_penalty
+
+    حيث:
+      temporal_w   = exp(-gap_sec / 60)   — أسي ناعم
+      continuity_w = exp(-b_gap  / 3000)  — أسي ناعم
+      b_gap_penalty: عقاب إضافي إذا b_gap > 1000 (احتمال جولات مفقودة)
+
+    gap=17s, b_gap=1326 → 0.75 × 0.64 × 0.70 ≈ 0.34  (وليس 1.0)
+    gap=17s, b_gap=200  → 0.75 × 0.94 × 1.00 ≈ 0.70  (جلسة نظيفة)
+    gap=100s, b_gap=any → ≤ 0.19                       (انقطاع واضح)
+    """
+    temporal_w   = get_temporal_weight(gap_sec)
+    continuity_w = get_continuity_weight(b_gap)
+
+    # عقاب إضافي للتسلسل عند b_gap كبير (جولات محتملة مفقودة)
+    if b_gap is not None and b_gap > 1000:
+        # b_gap=1000 → 0.77 | b_gap=2000 → 0.60 | b_gap=5000 → 0.37
+        b_gap_penalty = math.exp(-(b_gap - 1000) / 3000.0)
+    else:
+        b_gap_penalty = 1.0
+
+    return temporal_w * continuity_w * b_gap_penalty
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -3504,7 +3524,7 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     # بناءً على gap_sec بين الجولة الحالية وآخر جولة مسجّلة
     session_type  = gap_classify(gap_sec)   # 'connected' / 'soft_break' / 'hard_break'
     is_new_session = session_type != 'connected'
-    seq_weight     = seq_weight_from_gap(gap_sec)
+    seq_weight     = seq_weight_from_gap(gap_sec, b_gap=b_gap)
     chain_length   = len(recent_history)    # عدد الجولات في السلسلة الحالية
 
     SESSION_LABELS = {
@@ -3513,7 +3533,7 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
         'hard_break': f"🔴 جلسة جديدة ({gap_sec:.0f}ث)" if gap_sec else "🔴 بداية",
     }
     if b_gap is not None:
-        logs.append(f"🔗 b_gap={int(b_gap)} | ⏱️ {gap_sec:.0f}ث | {SESSION_LABELS[session_type]} | seq_w={seq_weight}")
+        logs.append(f"🔗 b_gap={int(b_gap)} | ⏱️ {gap_sec:.0f}ث | {SESSION_LABELS[session_type]} | seq_w={seq_weight:.2f}")
     elif gap_sec is not None:
         logs.append(f"⏱️ فجوة: {gap_sec:.0f}ث | {SESSION_LABELS[session_type]}")
 
