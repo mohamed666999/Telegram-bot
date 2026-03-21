@@ -281,21 +281,16 @@ def get_continuity_weight(b_gap: Optional[float]) -> float:
 
 def is_noisy_state(gap_sec: Optional[float], b_gap: Optional[float]) -> bool:
     """
-    بوابة الضوضاء (Noise Gate) — معايَرة على البيانات الحقيقية.
+    بوابة الضوضاء (Noise Gate) — صارمة وحقيقية.
+    تمنع القوانين التسلسلية من العمل في بيئة مكسورة.
 
-    الحقائق من 1494 جولة:
-    - 80% من الجولات: gap = 25-40s (إيقاع اللعبة الطبيعي — ليس ضوضاء)
-    - 11% من الجولات: gap > 120s (انقطاعات حقيقية بين جلسات)
-    - وسيط b_gap = 1563 (طبيعي للعبة)
-
-    العتبة الصحيحة:
-    gap_sec > 90  : انقطاع واضح بين جلسات أو تأخير غير طبيعي
-    b_gap > 8000  : انقطاع ضخم في التسلسل الرقمي
-    (يطال 11% فقط — بدلاً من 80% كما كان بـ > 40s)
+    العتبات:
+    gap_sec > 45  : أكثر من SESSION_CONNECTED_SEC → خارج الجلسة الحالية
+    b_gap > 3000  : قفزة رقمية ضخمة → احتمال جولات مفقودة أو تغيير سياق
     """
     g = gap_sec if gap_sec is not None else 0.0
     b = b_gap   if b_gap   is not None else 0.0
-    return g > 90 or b > 8000
+    return g > 45 or b > 3000
 
 
 def _is_sequential_law(cond: dict) -> bool:
@@ -542,83 +537,62 @@ def apply_laws(suit: str, rank: str, last_digit: int,
                b_gap: Optional[float] = None, gap_sec: Optional[float] = None,
                round_index: int = 0) -> Tuple[Dict[int, float], List[str]]:
     """
-    Law Filtering Engine (Quant-Style + Time-Aware) v20:
-
-    🕐 الطبقة الزمنية (Time-Aware Scoring):
-      temporal_w   = exp(-gap_sec / 60)    — ثقة زمنية (div=60، وسيط 33s → 0.58)
-      continuity_w = exp(-b_gap / 3000)    — ثقة تسلسلية (div=3000، وسيط 1478 → 0.61)
-      env_conf     = temporal_w × continuity_w
-
-    🚪 بوابة الضوضاء (Noise Gate):
-      gap_sec > 40 أو b_gap > 2000 → تجاهل القوانين التسلسلية (streak/cycle)
-      → الاعتماد فقط على القوانين المطلقة (digit/suit/rank)
-
-    🛡️ الفلاتر الصارمة:
-      1. Accuracy Filter  : دقة < 58% → تجاهل (للقوانين الديناميكية)
-      2. Recency Filter   : accuracy_recent < 50% → تجاهل
-      3. Anti-Illusion    : ts_mod < 65% → تجاهل
-      4. Momentum Filter  : momentum < 0.2 → قانون متجمد → تجاهل
-
-    ⚖️ معادلة الوزن النهائية:
-      final_weight = WEIGHTS['LAW'] × trust × complexity × momentum × env_conf × abs_boost
+    Law Filtering Engine (Ensemble Probabilistic Model) v21:
+    - يمنع هيمنة القانون الواحد (Single Law Dominance Cap).
+    - يربط قوة المطابقة (Match) بسلامة البيئة (Effective Match).
+    - يكافئ التكتلات (Clusters) على حساب الإشارات الفردية الشاذة.
     """
     laws   = load_laws()
     scores = {0: 0.0, 1: 0.0}
     logs   = []
 
-    # ── حساب السياق البيئي مرة واحدة لكل الجولة ──────────────────
+    # متتبعات تكتل الإشارات (Cluster Trackers)
+    law_votes = {0: 0, 1: 0}
+
+    # حساب السياق البيئي مرة واحدة
     temporal_w   = get_temporal_weight(gap_sec)
     continuity_w = get_continuity_weight(b_gap)
-    env_conf     = temporal_w * continuity_w          # ثقة البيئة الكلية
+    env_conf     = temporal_w * continuity_w
     noisy        = is_noisy_state(gap_sec, b_gap)
 
     if noisy:
-        logs.append(f"🌊 Noise Gate: gap={gap_sec}s / b_gap={b_gap} — قوانين streak/cycle معطّلة")
+        logs.append(f"🌊 Noise Gate: gap={gap_sec}s / b_gap={b_gap} — تعطيل التسلسلات")
 
     all_laws = laws + list(DATA_LAWS)
+
+    # ⚖️ سقف صارم للقانون الواحد — يمنع "الديكتاتورية الإحصائية"
+    MAX_SINGLE_LAW = WEIGHTS['LAW'] * 0.85
 
     for law in all_laws:
         law_id = law.get("id", 0)
         cond   = law.get("conditions", {})
         num_conditions = len(cond) if isinstance(cond, dict) else 0
         accuracy = law.get("accuracy", 0)
+        is_seq   = _is_sequential_law(cond)
 
-        # ════════════════════════════════════════════════════════════════
-        # 🚪 فلتر الضوضاء: تجاهل القوانين التسلسلية في البيئة الفوضوية
-        # ════════════════════════════════════════════════════════════════
-        if noisy and _is_sequential_law(cond) and law_id > 0:
-            continue  # streak/cycle لا تعمل في بيئة مكسورة
+        # 1. فلتر الضوضاء للقوانين التسلسلية
+        if noisy and is_seq and law_id > 0:
+            continue
 
-        # ════════════════════════════════════════════════════════════════
-        # 🛡️ الفلاتر الصارمة (قوانين ديناميكية فقط — DATA_LAWS مستثناة)
-        # ════════════════════════════════════════════════════════════════
+        # 2. الفلاتر الصارمة (للقوانين الديناميكية فقط)
         if law_id > 0:
-            # فلتر #1: دقة تاريخية ضعيفة
             if accuracy < 58.0:
                 continue
-
-            # فلتر #2: الأداء الأخير منهار
             acc_recent = law.get("accuracy_recent")
             if acc_recent is not None and acc_recent < 50.0:
                 continue
-
-            # فلتر #3: الـ Momentum (قانون متجمد أو ميت)
             law_momentum = law.get("momentum", 0.5)
             if law_momentum < 0.2:
-                continue  # 🧊 القانون متجمد — لا تحرّكه
-
+                continue
         else:
-            # DATA_LAWS: momentum ثابت عند 0.5 (موثوق بشكل متوسط)
             law_momentum = 0.5
 
-        # فلتر #4: أوهام زمنية (ts_mod / digit منفرد)
+        # 3. أوهام زمنية
         is_illusion = "ts_mod" in cond or ("digit" in cond and num_conditions == 1)
         if is_illusion and accuracy < 65.0:
-            continue  # 🌊 سراب السيرفر
+            continue
 
-        # ════════════════════════════════════════════════════════════════
-        # 🎯 فحص المطابقة
-        # ════════════════════════════════════════════════════════════════
+        # 4. فحص المطابقة الأساسي
         match = match_law(law, suit, rank, last_digit, recent,
                           b_num=b_num, b_gap=b_gap,
                           gap_sec=gap_sec, round_index=round_index)
@@ -629,11 +603,15 @@ def apply_laws(suit: str, rank: str, last_digit: int,
         if pred not in [0, 1]:
             continue
 
-        # ════════════════════════════════════════════════════════════════
-        # 🧮 حساب الأوزان متعددة الطبقات
-        # ════════════════════════════════════════════════════════════════
+        # 🧠 5. Effective Match — ربط المطابقة بسلامة البيئة
+        # القوانين التسلسلية تُعاقب في البيئات الضعيفة
+        # القوانين المطلقة محمية من هذا العقاب
+        if is_seq:
+            effective_match = match * (0.4 + 0.6 * env_conf)
+        else:
+            effective_match = match
 
-        # أ) الثقة التاريخية (Trust) — تصاعدية بالاستخدام
+        # 6. Trust — تصاعدي بالاستخدام
         used = law.get("times_used", 0)
         if law_id < 0:
             trust = 0.5
@@ -644,52 +622,48 @@ def apply_laws(suit: str, rank: str, last_digit: int,
         else:
             trust = 1.0
 
-        # ب) معامل التعقيد (Complexity Multiplier)
+        # 7. Complexity Multiplier
         if num_conditions == 1:
-            complexity_multiplier = 0.6    # ⚠️ عقاب — قد يكون صدفة
+            complexity_multiplier = 0.6
         elif num_conditions == 2:
-            complexity_multiplier = 1.0    # 🎯 طبيعي
+            complexity_multiplier = 1.0
         elif num_conditions >= 3:
-            complexity_multiplier = 1.3    # 🔗 مكافأة للتقاطع العميق
+            complexity_multiplier = 1.3
         else:
-            complexity_multiplier = 0.4    # قانون فارغ — تجميد
+            complexity_multiplier = 0.4
 
-        # ج) تحديد نوع القانون: مطلق أم تسلسلي؟
-        # القوانين المطلقة (digit/suit/rank) تعوّض الضعف الزمني
-        if _is_sequential_law(cond):
-            # تسلسلي: تأثره شديد بالزمن والانقطاع
+        # 8. Time Factor — تسلسلي vs مطلق
+        if is_seq:
             time_factor = env_conf
         else:
-            # مطلق: يقوى عندما يضعف الزمن (Attention Mechanism)
-            time_factor = def_absolute_weight(temporal_w) * continuity_w
+            # Cap Absolute Boost عند 1.5 لمنع التضخيم المفرط
+            time_factor = min(1.5, def_absolute_weight(temporal_w)) * continuity_w
 
-        # د) الوزن النهائي (الصيغة الكاملة)
+        # 9. الوزن الهيكلي
         law_weight = (
             WEIGHTS['LAW']
             * trust
             * complexity_multiplier
-            * max(0.1, law_momentum)  # momentum كمضاعف حي (0.2→1.0)
+            * max(0.2, law_momentum)
             * time_factor
         )
-        weight = (law["confidence"] / 100) * max(0.5, accuracy / 100) * match
-        scores[pred] += weight * law_weight
 
-        # ════════════════════════════════════════════════════════════════
-        # 📝 التسجيل المُفصَّل مع أيقونات الجودة
-        # ════════════════════════════════════════════════════════════════
-        if match >= 0.8:
+        # 🧠 10. Cap على القانون الفردي — يقتل "الديكتاتور الإحصائي"
+        raw_score    = (law["confidence"] / 100) * max(0.5, accuracy / 100) * effective_match * law_weight
+        capped_score = min(raw_score, MAX_SINGLE_LAW)
+
+        scores[pred]    += capped_score
+        law_votes[pred] += 1
+
+        if effective_match >= 0.6:
             tier_label = " 🔬" if law.get('tier') == 'probation' else ""
-            complexity_icon = "⚠️" if num_conditions == 1 else "🎯" if num_conditions == 2 else "🔗"
-            env_str = f"t:{temporal_w:.2f}/c:{continuity_w:.2f}"
+            icon = "⚠️" if num_conditions == 1 else "🎯" if num_conditions == 2 else "🔗"
             logs.append(
-                f"{complexity_icon} قانون #{law_id}{tier_label} "
-                f"(شروط:{num_conditions}, ثقة:{trust:.0%}, زخم:{law_momentum:.2f}, بيئة:{env_str}): "
+                f"{icon} قانون #{law_id}{tier_label} "
+                f"(ثقة:{trust:.0%}, وزن:{capped_score:.2f}): "
                 f"{WINNER_NAMES[pred]} — {law.get('description', '')[:45]}"
             )
 
-        # ════════════════════════════════════════════════════════════════
-        # ♻️ تحديث عداد الاستخدام في الخلفية
-        # ════════════════════════════════════════════════════════════════
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
@@ -697,9 +671,19 @@ def apply_laws(suit: str, rank: str, last_digit: int,
         except Exception:
             pass
 
-    # ════════════════════════════════════════════════════════════════════
-    # 🔐 التطبيع — Cap صحيح = WEIGHTS['LAW'] * 2.5
-    # ════════════════════════════════════════════════════════════════════
+    # 🧠 11. Ensemble Cluster Boost — "إجماع النمل يهزم الفيل"
+    # 3+ قوانين تتفق = ضعف عدد الطرف الآخر → مكافأة التكتل
+    for p in [0, 1]:
+        opp = 1 - p
+        if law_votes[p] >= 3 and law_votes[p] > law_votes[opp] * 2:
+            cluster_bonus = min(1.15 + (law_votes[p] * 0.05), 1.40)
+            scores[p] *= cluster_bonus
+            logs.append(
+                f"🐜 تكتل القوانين ({law_votes[p]} إشارات): "
+                f"{WINNER_NAMES[p]} ×{cluster_bonus:.2f}"
+            )
+
+    # 🔐 التطبيع النهائي
     max_law_score = WEIGHTS['LAW'] * 2.5
     scores[0] = min(scores[0], max_law_score)
     scores[1] = min(scores[1], max_law_score)
