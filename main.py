@@ -567,6 +567,7 @@ def apply_laws(suit: str, rank: str, last_digit: int,
         cond   = law.get("conditions", {})
         num_conditions = len(cond) if isinstance(cond, dict) else 0
         accuracy = law.get("accuracy", 0)
+        used     = law.get("times_used", 0)   # ← يجب أن يكون قبل الفلاتر
         is_seq   = _is_sequential_law(cond)
 
         # 1. فلتر الضوضاء للقوانين التسلسلية
@@ -611,7 +612,6 @@ def apply_laws(suit: str, rank: str, last_digit: int,
             effective_match = match
 
         # 6. Trust — تصاعدي بالاستخدام
-        used = law.get("times_used", 0)
         if law_id < 0:
             trust = 0.5
         elif used < 5:
