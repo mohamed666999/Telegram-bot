@@ -49,7 +49,7 @@ AI_API_KEY     = "nvapi-cCtQAD4cVEFDNvd0gclE2LiYmXJOxybCUvNFEOBQPwcbymgPgCJxtOxy
 AI_MODEL       = "deepseek-ai/deepseek-v3.2"             # DeepSeek V3.2 — متاح على NVIDIA
 AI_MODEL_SMALL = "meta/llama-3.1-8b-instruct"            # fallback سريع عند 504
 AI_TIMEOUT    = 12.0
-LEARN_TIMEOUT = 900  # 15 دقيقة — Qwen يحتاج وقتاً للـ thinking
+LEARN_TIMEOUT = 1200  # 20 دقيقة — رُفع لضمان معالجة البيانات الضخمة دون Timeout
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -753,9 +753,15 @@ async def _nvidia_chat_single(messages: list, model: str, max_tokens: int,
     loop = asyncio.get_event_loop()
 
     def _sync_call():
+        import httpx
         client = OpenAI(
             base_url=AI_INVOKE_URL,
             api_key=AI_API_KEY,
+            timeout=1200.0,
+            http_client=httpx.Client(
+                limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+                timeout=1200.0,
+            ),
         )
         # DeepSeek V3.2 thinking mode
         extra = {}
@@ -1049,8 +1055,9 @@ def _filter_valid_rounds(rows) -> List[Dict]:
     valid = []
     rows_list = list(rows)
 
-    # تجاهل أول 700 جولة
-    working = rows_list[700:] if len(rows_list) > 700 else rows_list
+    # استبعاد التعادلات فقط — لا حاجة لتجاهل عدد ثابت من الجولات
+    # التعادلات تُرفض لاحقاً بفحص winner == 2، لذا نعمل على كل الجولات
+    working = rows_list
 
     for i, row in enumerate(working):
         b_num   = clean_digits(str(row[1] or ""))
@@ -1418,6 +1425,34 @@ def _fetch_backtest_rows() -> List:
         return []
 
 
+async def safe_ai_call(prompt: str, max_tokens: int = 8192, temperature: float = 0.1) -> str:
+    """
+    نظام إعادة المحاولة الذكي — يضمن استمرار جلسة التعلم الطويلة.
+    المحاولة 1: DeepSeek-V3.2 كامل
+    المحاولة 2: DeepSeek-V3.2 بـ max_tokens مخفض
+    المحاولة 3: Llama fallback
+    """
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            logger.info(f"safe_ai_call: attempt {attempt+1}/{max_attempts}")
+            result = await _nvidia_chat(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens if attempt == 0 else max(4096, max_tokens // 2),
+                temperature=temperature,
+                enable_thinking=True,
+                timeout=LEARN_TIMEOUT,
+            )
+            return result
+        except Exception as e:
+            if attempt == max_attempts - 1:
+                raise e
+            wait = 30 * (attempt + 1)
+            logger.error(f"safe_ai_call attempt {attempt+1} failed: {e}. Retrying in {wait}s...")
+            await asyncio.sleep(wait)
+    raise RuntimeError("فشلت كل محاولات الاتصال بـ AI")
+
+
 async def force_learn_engine(status_callback) -> Dict:
     """
     تعلم رياضي عميق:
@@ -1526,12 +1561,11 @@ prediction=1 = الثور 🔵 (Player/Blue)
 """
 
     try:
-        raw_text = await _nvidia_chat(
-            messages=[{"role": "user", "content": prompt}],
+        # استخدام safe_ai_call مع Retry Logic بدلاً من _nvidia_chat المباشر
+        raw_text = await safe_ai_call(
+            prompt=prompt,
             max_tokens=8192,
-            temperature=0.6,
-            enable_thinking=True,
-            timeout=LEARN_TIMEOUT,
+            temperature=0.1,  # منخفضة لزيادة الدقة ومنع التخريف
         )
         logger.info(f"Qwen raw_text length={len(raw_text)}, preview: {raw_text[:300]}")
     except asyncio.TimeoutError:
