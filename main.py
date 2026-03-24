@@ -3869,6 +3869,460 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try: await safe_edit(query, f"⚠️ خطأ: <code>{str(e)[:200]}</code>")
         except Exception: pass
 
+
+async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
+    clean_b = clean_digits(b_num)
+    if not clean_b:
+        return 2, 0, "❌ رقم بونص غير صالح"
+
+    last_digit  = int(clean_b[-1])
+    scores: Dict[int, float] = {0: 0.0, 1: 0.0}
+    logs:   List[str]        = []
+
+    # تهيئة متغيرات الإشارات الجديدة لمنع UnboundLocalError
+    pb_pred: Optional[int] = None
+    pb_conf: float = 0.0
+    pb_log:  str   = ""
+    sc_pred: Optional[int] = None
+    sc_conf: float = 0.0
+    sc_log:  str   = ""
+    connected_rows: List = []   # للـ Card Counter
+
+    # ── تاريخ حديث + فجوة b_num الأخيرة ────────────────────────────
+    recent_history: List[int] = []
+    all_history:    List[int] = []
+    b_gap:   Optional[float] = None
+    gap_sec: Optional[float] = None
+    round_index: int = 0
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                # جلب آخر 40 جولة مع الوقت لتحديد الجلسة الحالية
+                cur.execute("""
+                    SELECT winner, b_num, created_at
+                    FROM history
+                    WHERE winner IS NOT NULL
+                      AND rank IS NOT NULL AND rank NOT IN ('NULL','')
+                    ORDER BY id DESC LIMIT 40
+                """)
+                rows = cur.fetchall()
+                if rows:
+                    # فجوة رقم البونص مع آخر جولة
+                    last_b = clean_digits(str(rows[0][1] or ""))
+                    if last_b and clean_b:
+                        try:
+                            b_gap = abs(int(clean_b) - int(last_b))
+                        except Exception:
+                            pass
+                    # فجوة زمنية
+                    if rows[0][2]:
+                        gap_sec = (datetime.now() - rows[0][2]).total_seconds()
+
+                    # ── تحديد الجولات المتسلسلة فقط ──────────────────
+                    # القاعدة: gap_sec ≤ 17 ث = متصل، أكثر = انقطاع
+                    connected_rows = [rows[0]]  # أحدث جولة دائماً تُضاف
+                    for i in range(1, len(rows)):
+                        t_curr = rows[i-1][2]
+                        t_prev = rows[i][2]
+                        if t_curr and t_prev:
+                            dt = (t_curr - t_prev).total_seconds()
+                            if dt > SESSION_CONNECTED_SEC:
+                                break  # انقطاع — نوقف السلسلة
+                        # b_gap لا يكسر الجلسة — في هذه اللعبة b_gap كبير دائماً (97%>500)
+                        connected_rows.append(rows[i])
+
+                    # recent_history = الجولات المتصلة بالجلسة الحالية (مرتبة تصاعدياً)
+                    connected_rows.reverse()
+                    recent_history = [WINNER_MAP.get(r[0], 2) for r in connected_rows]
+
+                    # للمحركات التي تحتاج تاريخاً أطول نُرفق الكل (تنازلياً)
+                    all_history = [WINNER_MAP.get(r[0], 2) for r in rows]
+                    all_history.reverse()
+
+                    # موضع الجولة + unix timestamp للـ ts_mod conditions
+                    cur.execute("SELECT COUNT(*) FROM history WHERE winner IS NOT NULL")
+                    round_index = int(time.time())  # unix timestamp للـ ts_mod
+                else:
+                    all_history = []
+                    connected_rows = []
+    except Exception as e:
+        logger.warning(f"History fetch: {e}")
+
+    # ── تحديد حالة الجلسة الدقيقة (3 مستويات) ──────────────────────
+    # بناءً على gap_sec بين الجولة الحالية وآخر جولة مسجّلة
+    session_type  = gap_classify(gap_sec)   # 'connected' / 'soft_break' / 'hard_break'
+    is_new_session = session_type != 'connected'
+    seq_weight     = seq_weight_from_gap(gap_sec)
+    chain_length   = len(recent_history)    # عدد الجولات في السلسلة الحالية
+
+    SESSION_LABELS = {
+        'connected':  f"🟢 متصلة ({chain_length} جولة)",
+        'soft_break': f"🟡 كسر ناعم ({gap_sec:.0f}ث)",
+        'hard_break': f"🔴 جلسة جديدة ({gap_sec:.0f}ث)" if gap_sec else "🔴 بداية",
+    }
+    if b_gap is not None:
+        logs.append(f"🔗 b_gap={int(b_gap)} | ⏱️ {gap_sec:.0f}ث | {SESSION_LABELS[session_type]} | seq_w={seq_weight}")
+    elif gap_sec is not None:
+        logs.append(f"⏱️ فجوة: {gap_sec:.0f}ث | {SESSION_LABELS[session_type]}")
+
+    # ── AI متوازٍ ────────────────────────────────────────────────────
+    ai_task = asyncio.create_task(ai_predict(all_history[-20:] if all_history else recent_history))
+
+    # ── 1. القوانين الذكية (الذاكرة السياقية) ──────────────────────
+    law_scores, law_logs = apply_laws(
+        suit, rank, last_digit, recent_history,
+        b_num=clean_b, b_gap=b_gap, gap_sec=gap_sec, round_index=round_index
+    )
+    for k in [0, 1]:
+        scores[k] += law_scores[k]
+    logs.extend(law_logs)
+
+    # ── 2. الزخم ──────────────────────────────────────────────────
+    mom_pred, mom_conf, mom_log = detect_momentum()
+    if mom_pred is not None:
+        scores[mom_pred] += mom_conf * WEIGHTS['MOMENTUM']
+        logs.append(f"⏱️ الزخم: {WINNER_NAMES[mom_pred]} ({mom_log})")
+
+    # ── 3. الأنماط الإحصائية ────────────────────────────────────────
+    pattern_map = [
+        (f"SD_{suit}_{last_digit}", 'SD',    '✨ بذلة+رقم'),
+        (f"SUIT_{suit}",            'SUIT',  '🎴 البذلة'),
+        (f"DIGIT_{last_digit}",     'DIGIT', '🔢 الرقم'),
+        (f"RANK_{rank}",            'RANK',  '🃏 الرتبة'),
+    ]
+    for pid, wkey, desc in pattern_map:
+        res = get_pattern(pid)
+        if res['w'] != 2 and res['c'] > 0.0:
+            scores[res['w']] += res['c'] * WEIGHTS[wkey]
+            logs.append(f"{desc}: {WINNER_NAMES[res['w']]} {res['log']}")
+
+    # ── 4. نتيجة AI الآني ───────────────────────────────────────────
+    try:
+        ai_pred, ai_conf, ai_log = await asyncio.wait_for(ai_task, timeout=0.8)
+        if ai_pred in [0, 1]:
+            scores[ai_pred] += (ai_conf / 100) * WEIGHTS['AI']
+            logs.append(f"🤖 Qwen: {WINNER_NAMES[ai_pred]} — {ai_log}")
+        else:
+            logs.append(f"⚠️ Qwen: {ai_log}")
+    except asyncio.TimeoutError:
+        logs.append("⚠️ Qwen: لم يكتمل في الوقت المحدد")
+    except Exception:
+        logs.append("⚠️ Qwen: خطأ")
+
+    # ── T1: كاشف الزخم الحقيقي ─────────────────────────────────────
+    streak_pred, streak_conf = detect_real_streak(recent_history)
+    if streak_pred is not None and not is_new_session:
+        w = get_adaptive_weight('STREAK', WEIGHTS['MOMENTUM'])
+        scores[streak_pred] += streak_conf * w
+        logs.append(f"⚡ كسر سلسلة: {WINNER_NAMES[streak_pred]} ({streak_conf:.0%}) w={w:.1f}")
+    elif streak_pred is not None:
+        logs.append(f"⚡ كسر سلسلة (معطّل — جلسة جديدة)")
+
+    # ── T2: الذاكرة القصيرة ──────────────────────────────────────────
+    mem_pred, mem_conf = short_memory_bias(recent_history)
+    if mem_pred is not None:
+        w = get_adaptive_weight('SHORT_MEM', 1.4) * seq_weight
+        scores[mem_pred] += mem_conf * w
+        logs.append(f"🧠 ذاكرة قصيرة: {WINNER_NAMES[mem_pred]} ({mem_conf:.0%}) {'⚠️ جديدة' if is_new_session else ''}")
+
+    # ── T3: انحياز البذلة الذكي ──────────────────────────────────────
+    sb_pred, sb_conf = suit_bias_from_history(suit)
+    if sb_pred is not None:
+        w = get_adaptive_weight('SUIT_BIAS', 1.6)
+        scores[sb_pred] += sb_conf * w
+        logs.append(f"📊 انحياز البذلة: {WINNER_NAMES[sb_pred]} ({sb_conf:.0%})")
+
+    # ── M1: ماركوف ───────────────────────────────────────────────────
+    # يستخدم الجلسة المتصلة أولاً، ثم الماركوف العام كاحتياط
+    _markov_src = recent_history if len(recent_history) >= 4 else all_history
+    mkv_pred, mkv_conf, mkv_log = markov_predict(_markov_src, session_history=recent_history)
+    if mkv_pred is not None:
+        w = get_adaptive_weight('MARKOV', 2.5) * seq_weight
+        scores[mkv_pred] += mkv_conf * w
+        logs.append(f"🔗 {mkv_log} → {WINNER_NAMES[mkv_pred]} ({mkv_conf:.0%}) w={w:.1f} {'⚠️ جلسة جديدة' if is_new_session else ''}")
+
+    # ── M2: كاشف الدورات ─────────────────────────────────────────────
+    cyc_pred, cyc_conf, cyc_log = detect_cycle(recent_history if len(recent_history) >= 6 else all_history)
+    if cyc_pred is not None:
+        w = get_adaptive_weight('CYCLE', 2.0)
+        scores[cyc_pred] += cyc_conf * w
+        logs.append(f"🔄 {cyc_log} → {WINNER_NAMES[cyc_pred]} ({cyc_conf:.0%})")
+
+    # ── M3: بصمة b_num متعددة الأبعاد ───────────────────────────────
+    fp_signals = bnum_fingerprint(clean_b, rank)
+    active_signals = 0
+    for fp_pred, fp_w, fp_label in fp_signals:
+        if fp_pred in [0, 1]:
+            scores[fp_pred] += fp_w
+            active_signals  += 1
+    if active_signals > 0:
+        # اجمع في سطر واحد
+        fp_summary = " | ".join(
+            f"{WINNER_NAMES[p][0]}{l}"
+            for p, w, l in fp_signals if p in [0, 1]
+        )
+        logs.append(f"🧮 بصمة رقمية ({active_signals}): {fp_summary}")
+
+    # ── T6: قانون مجموع الأرقام + prime ─────────────────────────────
+    digit_sum = sum(int(d) for d in clean_b)
+    math_rule = (digit_sum + last_digit) % 2
+    boost     = 0.4 if is_prime(int(clean_b) % 97) else 0.0
+    scores[math_rule] += 0.8 + boost
+    logs.append(f"🔢 مجموع الأرقام={digit_sum} {'(أولي✨)' if boost else ''} → {WINNER_NAMES[math_rule]}")
+
+    # ── X1: Lookalike KNN ────────────────────────────────────────────
+    lk_pred, lk_conf, lk_log = lookalike_predict(recent_history)
+    if lk_pred is not None:
+        w = get_adaptive_weight('LOOKALIKE', 2.2)
+        scores[lk_pred] += lk_conf * w
+        logs.append(f"🧬 {lk_log} → {WINNER_NAMES[lk_pred]} ({lk_conf:.0%}) w={w:.1f}")
+
+    # ── X2: Regime Detector ──────────────────────────────────────────
+    regime, reg_conf = detect_regime(recent_history)
+    rg_pred, rg_conf, rg_log = regime_vote(regime, reg_conf, recent_history)
+    if rg_pred is not None:
+        w = get_adaptive_weight('REGIME', 2.8)
+        scores[rg_pred] += rg_conf * w
+        regime_emoji = {"banker_streak":"🔴","player_streak":"🔵","alternating":"🔁","chaotic":"❓"}.get(regime,"")
+        logs.append(f"🧠 النظام {regime_emoji}: {rg_log} ({rg_conf:.0%})")
+
+    # ── X3: Bayesian Engine ───────────────────────────────────────────
+    bay_pred, bay_conf, bay_log = bayesian_predict(suit, rank, last_digit)
+    if bay_pred is not None:
+        w = get_adaptive_weight('BAYESIAN', 3.0)
+        scores[bay_pred] += bay_conf * w
+        logs.append(f"📊 بايز: {bay_log} → {WINNER_NAMES[bay_pred]} ({bay_conf:.0%})")
+
+    # ── N1: الارتباط الزمني ──────────────────────────────────────────
+    ac_pred, ac_conf, ac_log = temporal_autocorr(recent_history)
+    if ac_pred is not None:
+        w = get_adaptive_weight('AUTOCORR', 1.4)
+        scores[ac_pred] += ac_conf * w
+        logs.append(f"🕰️ {ac_log} → {WINNER_NAMES[ac_pred]} ({ac_conf:.0%})")
+
+    # ── N2: N-Gram في التاريخ ─────────────────────────────────────
+    ng_pred, ng_conf, ng_log = ngram_db_predict(recent_history)
+    if ng_pred is not None:
+        w = get_adaptive_weight('NGRAM', 2.4)
+        scores[ng_pred] += ng_conf * w
+        logs.append(f"🔍 {ng_log} → {WINNER_NAMES[ng_pred]} ({ng_conf:.0%})")
+
+    # ── N3: ذاكرة الفجوة التاريخية ──────────────────────────────
+    gh_pred, gh_conf, gh_log = gap_history_predict(b_gap)
+    if gh_pred is not None:
+        w = get_adaptive_weight('GAP_HIST', 1.8)
+        scores[gh_pred] += gh_conf * w
+        logs.append(f"📏 {gh_log} → {WINNER_NAMES[gh_pred]} ({gh_conf:.0%})")
+
+    # ── N4: كاشف النتيجة المتأخرة ────────────────────────────────
+    od_pred, od_conf, od_log = overdue_detector(recent_history)
+    if od_pred is not None:
+        w = get_adaptive_weight('OVERDUE', 1.5)
+        scores[od_pred] += od_conf * w
+        logs.append(f"⏳ {od_log} → {WINNER_NAMES[od_pred]} ({od_conf:.0%})")
+
+    # ── M4: مضخّم الإجماع ────────────────────────────────────────────
+    active_signal_count = sum(1 for x in [
+        mom_pred, streak_pred, mem_pred, sb_pred,
+        mkv_pred, cyc_pred, lk_pred, rg_pred, bay_pred,
+        ac_pred, ng_pred, gh_pred, od_pred,
+    ] if x is not None)
+    consensus = amplify_consensus(scores, active_signal_count)
+    if consensus > 1.05:
+        dominant = 0 if scores[0] >= scores[1] else 1
+        scores[dominant] *= consensus
+        logs.append(f"📡 إجماع ×{consensus:.2f} ({active_signal_count}/9 إشارات)")
+
+    # ── X4: Anti-Mode — مُعطَّل (كان يسبب حلقة عكس مفرغة) ──────────────
+    # التحليل أثبت: المحركات الأساسية دقتها 67% لكن anti-mode كان يعكسها → 33%
+    # نحتفظ بـ recent_acc فقط لضبط الثقة
+    _, recent_acc = check_anti_mode()
+
+    # ── V1: أنماط EXACT ─────────────────────────────────────────────
+    ex_pred, ex_conf, ex_log = exact_pattern_predict(suit, rank, last_digit)
+    if ex_pred is not None:
+        w = get_adaptive_weight('EXACT', 2.6)
+        scores[ex_pred] += ex_conf * w
+        logs.append(f"🎯 EXACT: {ex_log} → {WINNER_NAMES[ex_pred]} ({ex_conf:.0%})")
+
+    # ── V2: DeepNGram (600 جولة) ─────────────────────────────────
+    dn_pred, dn_conf, dn_log = deep_ngram_predict(recent_history)
+    if dn_pred is not None:
+        w = get_adaptive_weight('DEEP_NGRAM', 1.8)
+        scores[dn_pred] += dn_conf * w
+        logs.append(f"🧬 {dn_log} → {WINNER_NAMES[dn_pred]} ({dn_conf:.0%})")
+
+    # ── V3: Hot-Switch Detector ─────────────────────────────────
+    hs_pred, hs_conf, hs_log = hot_switch_detector(recent_history)
+    if hs_pred is not None:
+        w = get_adaptive_weight('HOT_SWITCH', 1.8)
+        scores[hs_pred] += hs_conf * w
+        logs.append(f"⚡ {hs_log} → {WINNER_NAMES[hs_pred]} ({hs_conf:.0%})")
+
+    # ── V4: الجذب التاريخي ───────────────────────────────────────
+    gv_pred, gv_conf, gv_log = historical_gravity()
+    if gv_pred is not None:
+        w = get_adaptive_weight('GRAVITY', 1.0)
+        scores[gv_pred] += gv_conf * w
+        logs.append(f"🧲 {gv_log} ({gv_conf:.0%})")
+
+    # ── PB1: كاشف ما بعد الانقطاع ────────────────────────────────
+    # يعمل فقط عند كسر ناعم أو قوي — يُكمّل الفراغ الذي تتركه محركات التسلسل
+    pb_pred, pb_conf, pb_log = None, 0.0, ""
+    try:
+        pb_pred, pb_conf, pb_log = post_break_predict(session_type, b_gap)
+    except Exception:
+        pass
+    if pb_pred is not None:
+        pb_weight = 2.0 if session_type == 'hard_break' else 1.2
+        w = get_adaptive_weight('POST_BREAK', pb_weight)
+        scores[pb_pred] += pb_conf * w
+        logs.append(f"🔀 {pb_log} → {WINNER_NAMES[pb_pred]} ({pb_conf:.0%}) {'[انقطاع قوي]' if session_type=='hard_break' else '[انقطاع ناعم]'}")
+
+    # ── SC1: إحصاءات السلسلة المتصلة ────────────────────────────
+    # يعمل فقط عندما الجلسة متصلة وبها 4+ جولات
+    sc_pred, sc_conf, sc_log = None, 0.0, ""
+    try:
+        sc_pred, sc_conf, sc_log = session_chain_stats(recent_history)
+    except Exception:
+        pass
+    if sc_pred is not None and session_type == 'connected':
+        w = get_adaptive_weight('SESSION_CHAIN', 1.6)
+        scores[sc_pred] += sc_conf * w
+        logs.append(f"🔢 {sc_log} ({sc_conf:.0%})")
+
+    # ── T8: عد الأوراق (Card Counter) ─────────────────────────────
+    # connected_rows = (winner, b_num, created_at) — نستخدم rank الجولة الحالية كبداية
+    # + نجلب ranks من DB مباشرة للجلسة المتصلة
+    cc_pred, cc_conf, cc_log = None, 0.0, ""
+    try:
+        with db_pool.get_conn() as _cc_conn:
+            with _cc_conn.cursor() as _cc_cur:
+                _cc_cur.execute("""
+                    SELECT rank FROM history
+                    WHERE rank IS NOT NULL AND rank NOT IN ('NULL','')
+                      AND created_at >= NOW() - INTERVAL '30 minutes'
+                    ORDER BY id DESC LIMIT 40
+                """)
+                recent_ranks = [r[0] for r in _cc_cur.fetchall() if r[0]]
+        recent_ranks.append(rank)  # أضف رتبة الجولة الحالية
+        cc_pred, cc_conf, cc_log = baccarat_card_counter(recent_ranks)
+    except Exception:
+        pass
+    if cc_pred is not None:
+        w = get_adaptive_weight('CARD_COUNT', 3.5)
+        scores[cc_pred] += cc_conf * w
+        logs.append(f"🃏 {cc_log} (w={w:.1f})")
+
+    # ── X5: مصفوفة الفوضى (Shannon Entropy) ────────────────────────
+    is_chaos, entropy_val, chaos_log = shannon_entropy_sniper(recent_history)
+    if is_chaos:
+        logs.append(f"🛑 {chaos_log}")
+        logs.append("🛡️ وضع القناص: فوضى رياضية — تخطي الجولة")
+        return 2, 0, "\n".join(logs)
+
+    # ── ✨ التقاطع الذهبي: بايز + ماركوف + عد الأوراق ────────────
+    golden = [bay_pred, mkv_pred, cc_pred]
+    if all(p is not None for p in golden) and len(set(golden)) == 1:
+        golden_pred = golden[0]
+        scores[golden_pred] *= 2.5
+        logs.append(f"✨ التقاطع الذهبي: بايز + ماركوف + عد الأوراق → {WINNER_NAMES[golden_pred]}")
+
+    # ── V5: تصويت الأغلبية الديناميكي ─────────────────────────
+    # تصويت الأغلبية: 5 محركات كبرى فقط — المحركات الصغيرة تُلغي بعضها
+    # Lookalike, Regime, Bayesian, DeepNGram, PostBreak = أعلى دقة إحصائياً
+    all_point_signals = [
+        (lk_pred,  lk_conf,                                    "lk"),   # Lookalike
+        (rg_pred,  rg_conf,                                    "rg"),   # Regime
+        (bay_pred, bay_conf if bay_pred is not None else 0.0,  "bay"),  # Bayesian
+        (dn_pred,  dn_conf,                                    "dn"),   # DeepNGram
+        (pb_pred,  pb_conf if pb_pred is not None else 0.0,    "pb"),   # Post-break
+    ]
+    mv_pred, mv_conf, mv_agree, mv_total = dynamic_majority_vote(all_point_signals)
+    if mv_pred is not None and mv_total >= 4:
+        mv_boost = mv_conf * 1.8 * (mv_agree / max(mv_total, 1))
+        scores[mv_pred] += mv_boost
+        logs.append(f"🏆 أغلبية: {WINNER_NAMES[mv_pred]} ({mv_agree}/{mv_total} محركات، ثقة {mv_conf:.0%})")
+
+    # ── حماية من overfitting: منع هيمنة اتجاه واحد ────────────────
+    total_score = scores[0] + scores[1]
+    if total_score > 0:
+        ratio = max(scores[0], scores[1]) / total_score
+        if ratio > 0.80:
+            # اسحب نحو 70/30 حداً أقصى
+            correction = (ratio - 0.70) * total_score
+            if scores[0] > scores[1]:
+                scores[0] -= correction
+                scores[1] += correction
+            else:
+                scores[1] -= correction
+                scores[0] += correction
+
+    # ── الحساب النهائي ──────────────────────────────────────────────
+    total_score = scores[0] + scores[1]
+    if total_score == 0:
+        padded   = clean_b.zfill(3)
+        math_res = ((sum(int(d) for d in padded[-3:]) * RANK_VALUE.get(rank.upper(), 1)) + last_digit) % 2
+        logs.append("🧮 تحليل رياضي احتياطي")
+        return math_res, 60, "\n".join(logs)
+
+    p0 = scores[0] / total_score
+    p1 = scores[1] / total_score
+    entropy = -(p0 * math.log2(p0 + 1e-9) + p1 * math.log2(p1 + 1e-9))
+
+    # ضبط الثقة بناءً على دقة حالية + إجماع
+    base_conf   = 55 + 40 * (1 - entropy)
+    acc_bonus   = max(0, (recent_acc - 0.50) * 30)   # +0 to +18 بناءً على الدقة
+    final_conf  = int(min(97, max(55, base_conf + acc_bonus)))
+    # ── قرار نهائي: الحسم دائماً — لا تعادل إلا في حالة نادرة جداً ───
+    delta = abs(scores[0] - scores[1])
+    if delta < 0.05 * max(scores[0], scores[1], 0.01):
+        # إجماع شبه معدوم → الحاكم البايزي يفصل
+        if bay_pred is not None:
+            final = bay_pred
+            logs.append(f"⚖️ حاكم بايزي → {WINNER_NAMES[final]}")
+        elif gv_pred is not None:
+            final = gv_pred
+            logs.append(f"⚖️ جذب تاريخي → {WINNER_NAMES[final]}")
+        else:
+            logs.append("⚠️ إجماع معدوم — تخطي")
+            return 2, 50, "\n".join(logs)
+    elif scores[0] > scores[1]:
+        final = 0
+    else:
+        final = 1
+
+    # أضف معلومات التوازن للـ logs
+    if total_score > 0:
+        r_pct = scores[0] / total_score * 100
+        b_pct = scores[1] / total_score * 100
+        logs.append(f"📊 🔴{scores[0]:.2f} vs 🔵{scores[1]:.2f} | {r_pct:.0f}%/{b_pct:.0f}% | Δ={delta:.2f}")
+
+    # معايرة الثقة الأسطورية
+    final_conf = calibrate_confidence(final_conf, scores)
+
+    # حفظ الإشارات مخفياً لتحديث الأداء لاحقاً
+    signal_json = json.dumps({
+        'AI': ai_pred if 'ai_pred' in dir() else None,
+        'MARKOV': mkv_pred, 'CYCLE': cyc_pred,
+        'STREAK': streak_pred, 'SHORT_MEM': mem_pred,
+        'SUIT_BIAS': sb_pred, 'MOM': mom_pred,
+        'LOOKALIKE': lk_pred, 'REGIME': rg_pred,
+        'BAYESIAN': bay_pred,
+        'AUTOCORR': ac_pred, 'NGRAM': ng_pred,
+        'GAP_HIST': gh_pred, 'OVERDUE': od_pred,
+        'EXACT': ex_pred, 'DEEP_NGRAM': dn_pred,
+        'HOT_SWITCH': hs_pred, 'GRAVITY': gv_pred,
+        'POST_BREAK': pb_pred,
+        'SESSION_CHAIN': sc_pred,
+        'OVERALL': final,
+    })
+    logs.append(f"__signals__{signal_json}")
+
+    return final, final_conf, "\n".join(logs)
+
+# ==================== تنسيق الرسائل الأسطوري ====================
+
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     suit = context.user_data.get('suit')
