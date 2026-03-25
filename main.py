@@ -2783,7 +2783,9 @@ async def run_council_debate(status_callback) -> Dict:
         f"ارفض النظريات الضعيفة، وصقّل القوية، واكتب تقرير القواعد الناجية."
     }])
     if "فشل" in minimax_resp:
-        return {"error": minimax_resp}
+        # MiniMax فشل → نكمل بدونه (DeepSeek يحكم على Kimi مباشرة)
+        await status_callback("⚠️ MiniMax لم يستجب — سيكمل DeepSeek بناءً على تحليل Kimi.")
+        minimax_resp = "MiniMax لم يستجب. اعتمد على تحليل Kimi مباشرة."
 
     await status_callback("⚡ <b>DeepSeek (كبير الآلهة) يحكم...</b>\nيصيغ القواعد الذهبية النهائية في JSON.")
     deepseek_prompt = (
