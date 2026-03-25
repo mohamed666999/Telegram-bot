@@ -2688,82 +2688,82 @@ def shannon_entropy_sniper(history: List[int]) -> Tuple[bool, float, str]:
     if p_red == 0 or p_blue == 0:
         entropy = 0.0
     else:
-        entropy = -(p_red * math.log2(p_red) + p_blue * math.log2(p_blue))
-    switches   = sum(1 for i in range(1, len(last15)) if last15[i] != last15[i-1])
-    volatility = switches / len(last15)
-    if entropy > 0.95 and volatility > 0.65:
-        return True, entropy, f"⚠️ فوضى رياضية (entropy={entropy:.2f}, vol={volatility:.2f})"
-    return False, entropy, f"استقرار (entropy={entropy:.2f})"
-
-# ==================== 🗝️ دوال إدارة مفاتيح API ====================
-async def _get_api_key(service: str) -> Optional[str]:
-    """جلب مفتاح API من DB إذا كان ساري المفعول."""
-    try:
-        with db_pool.get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT api_key, expiry FROM api_keys WHERE service = %s", (service,))
-                row = cur.fetchone()
-                if not row:
-                    return None
-                key, expiry = row
-                if expiry and datetime.now() > expiry:
-                    return None
-                return key
-    except Exception:
-        return None
-
-async def _kimi_analyze(messages: list, timeout: int = 600) -> str:
-    """Kimi K2 Thinking — يقرأ البيانات ويطرح النظريات المعقدة."""
+        async def _kimi_analyze(messages: list, timeout: int = 600) -> str:
+    """بُديل Kimi: يستخدم DeepSeek-R1 عبر Nvidia للتفكير العميق واستخراج النظريات."""
     loop = asyncio.get_event_loop()
     key = await _get_api_key('kimi')
     if not key:
-        key = "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"  # fallback
-        logger.info("Kimi: using hardcoded key (no DB key or expired)")
+        key = AI_API_KEY  # استخدام المفتاح الأساسي الفعال كبديل موثوق
+        logger.info("Council (Kimi Role): using main AI_API_KEY as fallback")
 
     def _sync():
-        client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=key)
+        import httpx
+        client = OpenAI(
+            base_url="https://integrate.api.nvidia.com/v1", 
+            api_key=key,
+            timeout=float(timeout),
+            http_client=httpx.Client(
+                limits=httpx.Limits(max_connections=50, max_keepalive_connections=10),
+                timeout=float(timeout),
+            )
+        )
         comp = client.chat.completions.create(
-            model="moonshotai/kimi-k2-thinking",
+            model="deepseek-ai/deepseek-r1",
             messages=messages,
-            temperature=0.7,
-            top_p=0.9,
-            max_tokens=16384,
+            temperature=0.6,
+            top_p=0.95,
+            max_tokens=4096,
             stream=False,
         )
         text = comp.choices[0].message.content or ""
         return re.sub(r"(?s)<think>.*?</think>", "", text).strip()
 
     try:
-        return await asyncio.wait_for(loop.run_in_executor(None, _sync), timeout=timeout)
+        return await asyncio.wait_for(loop.run_in_executor(None, _sync), timeout=timeout + 10)
+    except asyncio.TimeoutError:
+        logger.error("Council (Kimi Role) error: Timeout")
+        return "فشل: انتهت المهلة الزمنية لتحليل البيانات."
     except Exception as e:
-        logger.error(f"Kimi error: {e}")
-        return f"فشل Kimi: {e}"
+        logger.error(f"Council (Kimi Role) error: {e}")
+        return f"فشل: {e}"
 
 async def _minimax_critique(messages: list, timeout: int = 600) -> str:
-    """MiniMax M2.5 — ينتقد نظريات Kimi إحصائياً."""
+    """بديل MiniMax: يستخدم Llama-3.1-70B عبر Nvidia للتدقيق الصارم."""
     loop = asyncio.get_event_loop()
     key = await _get_api_key('minimax')
     if not key:
-        key = "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"  # fallback
-        logger.info("MiniMax: using hardcoded key (no DB key or expired)")
+        key = AI_API_KEY  # استخدام المفتاح الأساسي الفعال كبديل موثوق
+        logger.info("Council (MiniMax Role): using main AI_API_KEY as fallback")
 
     def _sync():
-        client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=key)
+        import httpx
+        client = OpenAI(
+            base_url="https://integrate.api.nvidia.com/v1", 
+            api_key=key,
+            timeout=float(timeout),
+            http_client=httpx.Client(
+                limits=httpx.Limits(max_connections=50, max_keepalive_connections=10),
+                timeout=float(timeout),
+            )
+        )
         comp = client.chat.completions.create(
-            model="minimaxai/minimax-m2.5",
+            model="meta/llama-3.1-70b-instruct",
             messages=messages,
             temperature=0.3,
             top_p=0.95,
-            max_tokens=8192,
+            max_tokens=4096,
             stream=False,
         )
         return comp.choices[0].message.content or ""
 
     try:
-        return await asyncio.wait_for(loop.run_in_executor(None, _sync), timeout=timeout)
+        return await asyncio.wait_for(loop.run_in_executor(None, _sync), timeout=timeout + 10)
+    except asyncio.TimeoutError:
+        logger.error("Council (MiniMax Role) error: Timeout")
+        return "فشل: انتهت المهلة الزمنية لعملية التدقيق."
     except Exception as e:
-        logger.error(f"MiniMax error: {e}")
-        return f"فشل MiniMax: {e}"
+        logger.error(f"Council (MiniMax Role) error: {e}")
+        return f"فشل: {e}"
 
 # ==================== 🏛️ مجلس الآلهة (Council of Gods) ====================
 async def run_council_debate(status_callback) -> Dict:
@@ -2805,6 +2805,87 @@ async def run_council_debate(status_callback) -> Dict:
         f"--- نظريات Kimi ---\n{kimi_resp}\n--- البيانات ---\n{data_context}\n"
         f"ارفض النظريات الضعيفة، وصقّل القوية، واكتب تقرير القواعد الناجية."
     }])
+    if "فشل" in minimax_resp:
+        return {"error": minimax_resp}
+
+    await status_callback("⚡ <b>DeepSeek (كبير الآلهة) يحكم...</b>\nيصيغ القواعد الذهبية النهائية في JSON.")
+    deepseek_prompt = (
+        f"أنت القاضي النهائي. حوّل القواعد المتفق عليها إلى JSON:\n"
+        f"--- تحليل Kimi:\n{kimi_resp[:2000]}\n"
+        f"--- نقد MiniMax:\n{minimax_resp[:2000]}\n"
+        f"أنشئ مصفوفة JSON فقط مع شروط: streak, gap_sec_gt/lt, suit. "
+        f"prediction:0أو1, confidence:60-78. أعد JSON فقط بلا نص."
+    )
+    
+    try:
+        deepseek_text = await _nvidia_chat(
+            [{"role": "user", "content": deepseek_prompt}],
+            max_tokens=4096, 
+            temperature=0.2,
+            enable_thinking=True,
+            timeout=600
+        )
+    except Exception as e:
+        return {"error": f"فشل كبير الآلهة (DeepSeek) في صياغة القوانين: {e}"}
+
+    laws_data = extract_json_safe(deepseek_text)
+    if not laws_data or not isinstance(laws_data, list):
+        return {"error": "فشل DeepSeek في صياغة JSON النهائي."}
+
+    backtest_rows = _fetch_backtest_rows()
+    saved = 0
+    rejected = 0
+    with db_pool.get_conn() as conn:
+        with conn.cursor() as cur:
+            for law in laws_data:
+                if not isinstance(law, dict): continue
+                if law.get("prediction") not in [0, 1]: continue
+                bt_passes, bt_acc, bt_n = backtest_law(law, backtest_rows)
+                if not bt_passes:
+                    rejected += 1
+                    continue
+                cur.execute("""
+                    INSERT INTO ai_laws
+                        (law_name, law_type, conditions, prediction, confidence,
+                         accuracy, description, source, times_used)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, 'COUNCIL_DEBATE', %s)
+                """, (
+                    f"COUNCIL_{saved}_{int(time.time())}",
+                    law.get("law_type", "COUNCIL_RULE"),
+                    json.dumps(law.get("conditions", {}), ensure_ascii=False),
+                    int(law["prediction"]),
+                    float(law.get("confidence", 75)),
+                    round(bt_acc * 100, 1),
+                    f"{law.get('description','')} [Council BT:{bt_acc:.0%}]",
+                    bt_n,
+                ))
+                saved += 1
+        conn.commit()
+
+    load_laws(force=True)
+    return {
+        "saved": saved, "rejected": rejected,
+        "kimi_summary": kimi_resp[:300] + "...",
+        "minimax_summary": minimax_resp[:300] + "...",
+    }
+
+# ==================== 🗝️ دوال إدارة مفاتيح API ====================
+async def _get_api_key(service: str) -> Optional[str]:
+    """جلب مفتاح API من DB إذا كان ساري المفعول."""
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT api_key, expiry FROM api_keys WHERE service = %s", (service,))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                key, expiry = row
+                if expiry and datetime.now() > expiry:
+                    return None
+                return key
+    except Exception:
+        return None
+
     if "فشل" in minimax_resp:
         return {"error": minimax_resp}
 
