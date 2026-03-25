@@ -415,6 +415,16 @@ def match_law(law: Dict, suit: str, rank: str, last_digit: int,
         return 0.5
     return score / total
 
+MAX_LAW_CONTRIBUTION = 0.35  # حد أقصى لمساهمة قانون واحد (35% من total)
+
+def classify_law(law: dict) -> str:
+    """SEQUENTIAL = يعتمد على streak/cycle/gap | ABSOLUTE = مستقل."""
+    conditions = str(law.get("conditions", {})).lower()
+    if any(k in conditions for k in ["streak", "cycle", "gap"]):
+        return "SEQUENTIAL"
+    return "ABSOLUTE"
+
+
 def apply_laws(suit: str, rank: str, last_digit: int,
                recent: List[int], b_num: str = "",
                b_gap: Optional[float] = None, gap_sec: Optional[float] = None,
@@ -443,6 +453,8 @@ def apply_laws(suit: str, rank: str, last_digit: int,
 
         pred = law.get("prediction")
         if pred not in [0, 1]:
+            continue
+        if "conditions" not in law:
             continue
 
         used = law.get("times_used", 0)
