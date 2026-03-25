@@ -2692,12 +2692,11 @@ async def _get_api_key(service: str) -> Optional[str]:
         return None
 
 async def _kimi_analyze(messages: list, timeout: int = 600) -> str:
-    """بُديل Kimi: يستخدم DeepSeek-R1 عبر Nvidia للتفكير العميق واستخراج النظريات."""
+    """بُديل Kimi: يستخدم DeepSeek-V3.2 أو Llama للتحليل العميق."""
     loop = asyncio.get_event_loop()
-    # جلب المفتاح من DB، وإلا استخدم المفتاح الرئيسي الشغال
     key = await _get_api_key('kimi')
     if not key:
-        key = AI_API_KEY  # استخدام المفتاح الأساسي الفعال كبديل موثوق
+        key = AI_API_KEY  # استخدام المفتاح الأساسي
         logger.info("Council (Kimi Role): using main AI_API_KEY as fallback")
 
     def _sync():
@@ -2711,17 +2710,16 @@ async def _kimi_analyze(messages: list, timeout: int = 600) -> str:
                 timeout=float(timeout),
             )
         )
-        # استخدام DeepSeek-R1 كونه أفضل نموذج تفكير موجود على Nvidia حالياً
+        # تم التغيير إلى النموذج المعتمد في إعداداتك والذي يعمل بنجاح
         comp = client.chat.completions.create(
-            model="deepseek-ai/deepseek-r1",
+            model="deepseek-ai/deepseek-v3.2", 
             messages=messages,
             temperature=0.6,
             top_p=0.95,
-            max_tokens=4096, # تم التخفيض ليتناسب مع حدود Nvidia
+            max_tokens=4096,
             stream=False,
         )
         text = comp.choices[0].message.content or ""
-        # تنظيف مسار التفكير الخاص بـ R1 إن وُجد للحصول على الخلاصة فقط
         return re.sub(r"(?s)<think>.*?</think>", "", text).strip()
 
     try:
@@ -2734,12 +2732,11 @@ async def _kimi_analyze(messages: list, timeout: int = 600) -> str:
         return f"فشل: {e}"
 
 async def _minimax_critique(messages: list, timeout: int = 600) -> str:
-    """بديل MiniMax: يستخدم Llama-3.1-70B عبر Nvidia للتدقيق الصارم."""
+    """بديل MiniMax: يستخدم Llama-3.1-70B للتدقيق الصارم."""
     loop = asyncio.get_event_loop()
-    # جلب المفتاح من DB، وإلا استخدم المفتاح الرئيسي الشغال
     key = await _get_api_key('minimax')
     if not key:
-        key = AI_API_KEY  # استخدام المفتاح الأساسي الفعال كبديل موثوق
+        key = AI_API_KEY
         logger.info("Council (MiniMax Role): using main AI_API_KEY as fallback")
 
     def _sync():
@@ -2753,13 +2750,13 @@ async def _minimax_critique(messages: list, timeout: int = 600) -> str:
                 timeout=float(timeout),
             )
         )
-        # استخدام Llama 3.1 70B كمدقق صارم (ممتاز في النقد الرياضي)
+        # نموذج Llama مستقر جداً ولا يتم حذفه من Nvidia
         comp = client.chat.completions.create(
             model="meta/llama-3.1-70b-instruct",
             messages=messages,
             temperature=0.3,
             top_p=0.95,
-            max_tokens=4096, # تم التخفيض لتجنب رفض الطلب
+            max_tokens=4096,
             stream=False,
         )
         return comp.choices[0].message.content or ""
