@@ -456,7 +456,9 @@ def apply_laws(suit: str, rank: str, last_digit: int,
             trust = 1.0
         law_weight = WEIGHTS['LAW'] * trust
         # القوانين التسلسلية تتأثر بانقطاع الجلسة
-        if classify_law(law) == "SEQUENTIAL":
+        cond_check = law.get("conditions", {})
+        is_sequential = "streak" in cond_check or "cycle_position" in cond_check
+        if is_sequential:
             law_weight *= seq_w
         weight = (law["confidence"] / 100) * max(0.5, law["accuracy"] / 100) * match
         # منع سيطرة قانون واحد
