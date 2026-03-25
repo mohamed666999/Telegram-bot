@@ -108,6 +108,7 @@ DATA_LAWS: List[Dict] = [
      "description": "بعد 4 ثيران متتالية → الراعي 🔴 (bias=0.17)", "active": True},
 ]
 DATA_LAW_WEIGHT = 2.2
+MAX_LAW_CONTRIBUTION = 0.6   # <--- أضف هذا السطر هنا
 
 # ==================== 📦 بيانات الأنماط المدمجة ====================
 EMBEDDED_PATTERNS: Dict[str, Dict] = {
