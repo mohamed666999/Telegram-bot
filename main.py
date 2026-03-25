@@ -108,7 +108,6 @@ DATA_LAWS: List[Dict] = [
      "description": "بعد 4 ثيران متتالية → الراعي 🔴 (bias=0.17)", "active": True},
 ]
 DATA_LAW_WEIGHT = 2.2
-MAX_LAW_CONTRIBUTION = 0.6   # <--- أضف هذا السطر هنا
 
 # ==================== 📦 بيانات الأنماط المدمجة ====================
 EMBEDDED_PATTERNS: Dict[str, Dict] = {
@@ -457,9 +456,7 @@ def apply_laws(suit: str, rank: str, last_digit: int,
             trust = 1.0
         law_weight = WEIGHTS['LAW'] * trust
         # القوانين التسلسلية تتأثر بانقطاع الجلسة
-        cond_check = law.get("conditions", {})
-        is_sequential = "streak" in cond_check or "cycle_position" in cond_check
-        if is_sequential:
+        if classify_law(law) == "SEQUENTIAL":
             law_weight *= seq_w
         weight = (law["confidence"] / 100) * max(0.5, law["accuracy"] / 100) * match
         # منع سيطرة قانون واحد
@@ -2693,83 +2690,58 @@ async def _get_api_key(service: str) -> Optional[str]:
         return None
 
 async def _kimi_analyze(messages: list, timeout: int = 600) -> str:
-    """بُديل Kimi: يستخدم DeepSeek-V3.2 أو Llama للتحليل العميق."""
+    """Kimi K2 Thinking — يقرأ البيانات ويطرح النظريات المعقدة."""
     loop = asyncio.get_event_loop()
     key = await _get_api_key('kimi')
     if not key:
-        key = AI_API_KEY  # استخدام المفتاح الأساسي
-        logger.info("Council (Kimi Role): using main AI_API_KEY as fallback")
+        key = "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"  # fallback
+        logger.info("Kimi: using hardcoded key (no DB key or expired)")
 
     def _sync():
-        import httpx
-        client = OpenAI(
-            base_url="https://integrate.api.nvidia.com/v1", 
-            api_key=key,
-            timeout=float(timeout),
-            http_client=httpx.Client(
-                limits=httpx.Limits(max_connections=50, max_keepalive_connections=10),
-                timeout=float(timeout),
-            )
-        )
-        # تم التغيير إلى النموذج المعتمد في إعداداتك والذي يعمل بنجاح
+        client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=key)
         comp = client.chat.completions.create(
-            model="deepseek-ai/deepseek-v3.2", 
+            model="moonshotai/kimi-k2-thinking",
             messages=messages,
-            temperature=0.6,
-            top_p=0.95,
-            max_tokens=4096,
+            temperature=0.7,
+            top_p=0.9,
+            max_tokens=16384,
             stream=False,
         )
         text = comp.choices[0].message.content or ""
         return re.sub(r"(?s)<think>.*?</think>", "", text).strip()
 
     try:
-        return await asyncio.wait_for(loop.run_in_executor(None, _sync), timeout=timeout + 10)
-    except asyncio.TimeoutError:
-        logger.error("Council (Kimi Role) error: Timeout")
-        return "فشل: انتهت المهلة الزمنية لتحليل البيانات."
+        return await asyncio.wait_for(loop.run_in_executor(None, _sync), timeout=timeout)
     except Exception as e:
-        logger.error(f"Council (Kimi Role) error: {e}")
-        return f"فشل: {e}"
+        logger.error(f"Kimi error: {e}")
+        return f"فشل Kimi: {e}"
 
 async def _minimax_critique(messages: list, timeout: int = 600) -> str:
-    """بديل MiniMax: يستخدم Llama-3.1-70B للتدقيق الصارم."""
+    """MiniMax M2.5 — ينتقد نظريات Kimi إحصائياً."""
     loop = asyncio.get_event_loop()
     key = await _get_api_key('minimax')
     if not key:
-        key = AI_API_KEY
-        logger.info("Council (MiniMax Role): using main AI_API_KEY as fallback")
+        key = "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"  # fallback
+        logger.info("MiniMax: using hardcoded key (no DB key or expired)")
 
     def _sync():
-        import httpx
-        client = OpenAI(
-            base_url="https://integrate.api.nvidia.com/v1", 
-            api_key=key,
-            timeout=float(timeout),
-            http_client=httpx.Client(
-                limits=httpx.Limits(max_connections=50, max_keepalive_connections=10),
-                timeout=float(timeout),
-            )
-        )
-        # نموذج Llama مستقر جداً ولا يتم حذفه من Nvidia
+        client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=key)
         comp = client.chat.completions.create(
-            model="meta/llama-3.1-70b-instruct",
+            model="minimaxai/minimax-m2.5",
             messages=messages,
             temperature=0.3,
             top_p=0.95,
-            max_tokens=4096,
+            max_tokens=8192,
             stream=False,
         )
         return comp.choices[0].message.content or ""
 
     try:
-        return await asyncio.wait_for(loop.run_in_executor(None, _sync), timeout=timeout + 10)
-    except asyncio.TimeoutError:
-        logger.error("Council (MiniMax Role) error: Timeout")
-        return "فشل: انتهت المهلة الزمنية لعملية التدقيق."
+        return await asyncio.wait_for(loop.run_in_executor(None, _sync), timeout=timeout)
     except Exception as e:
-        logger.error(f"Council (MiniMax Role) error: {e}")
-        return f"فشل: {e}"
+        logger.error(f"MiniMax error: {e}")
+        return f"فشل MiniMax: {e}"
+
 # ==================== 🏛️ مجلس الآلهة (Council of Gods) ====================
 async def run_council_debate(status_callback) -> Dict:
     await status_callback("🏛️ <b>مجلس الآلهة يجتمع...</b>\n📥 جاري سحب وتجهيز البيانات...")
