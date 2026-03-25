@@ -647,7 +647,24 @@ def get_last_digit(b: str) -> int:
 def generate_bar(pct: int, width: int = 10) -> str:
     filled = round(pct / 100 * width)
     return "█" * filled + "░" * (width - filled)
+def remove_tie_streaks(rounds):
+    cleaned = []
+    i = 0
+    n = len(rounds)
 
+    while i < n:
+        if rounds[i]['winner'] == 2:
+            # بداية سلسلة تعادل
+            j = i
+            while j < n and rounds[j]['winner'] == 2:
+                j += 1
+            # تخطى السلسلة بالكامل
+            i = j
+        else:
+            cleaned.append(rounds[i])
+            i += 1
+
+    return cleaned
 # ==================== محرك الأنماط ====================
 def _score_pattern(raw: Dict, pattern_id: str = "") -> Dict:
     r, b, t = raw.get("r", 0), raw.get("b", 0), raw.get("t", 0)
