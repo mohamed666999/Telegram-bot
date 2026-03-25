@@ -423,8 +423,18 @@ def apply_laws(suit: str, rank: str, last_digit: int,
     scores = {0: 0.0, 1: 0.0}
     logs   = []
 
-    all_laws = laws + list(DATA_LAWS)
-    for law in all_laws:
+    # ── تصفية القوانين المتكررة بنفس الشروط (Correlation Prevention) ──
+    seen_conditions = set()
+    filtered_laws = []
+    for law in (laws + list(DATA_LAWS)):
+        key = str(law.get("conditions", {}))
+        if key not in seen_conditions:
+            seen_conditions.add(key)
+            filtered_laws.append(law)
+
+    # ── تطبيق القوانين مع seq_weight ──────────────────────────────────
+    seq_w = seq_weight_from_gap(gap_sec)
+    for law in filtered_laws:
         match = match_law(law, suit, rank, last_digit, recent,
                           b_num=b_num, b_gap=b_gap,
                           gap_sec=gap_sec, round_index=round_index)
@@ -445,8 +455,15 @@ def apply_laws(suit: str, rank: str, last_digit: int,
         else:
             trust = 1.0
         law_weight = WEIGHTS['LAW'] * trust
+        # القوانين التسلسلية تتأثر بانقطاع الجلسة
+        if classify_law(law) == "SEQUENTIAL":
+            law_weight *= seq_w
         weight = (law["confidence"] / 100) * max(0.5, law["accuracy"] / 100) * match
-        scores[pred] += weight * law_weight
+        # منع سيطرة قانون واحد
+        contribution = weight * law_weight
+        max_contrib  = (scores[0] + scores[1] + 0.01) * MAX_LAW_CONTRIBUTION
+        contribution = min(contribution, max_contrib)
+        scores[pred] += contribution
 
         if match >= 0.8:
             tier_label = " 🔬" if law.get('tier') == 'probation' else ""
@@ -594,6 +611,18 @@ def ensure_tables():
                         expiry      TIMESTAMP,
                         set_by      BIGINT,
                         created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                # جدول اشتراكات المستخدمين
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS subscriptions (
+                        user_id     BIGINT PRIMARY KEY,
+                        username    TEXT,
+                        plan        VARCHAR(20),
+                        expiry      TIMESTAMP,
+                        granted_by  BIGINT,
+                        created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
                 conn.commit()
@@ -913,9 +942,15 @@ def gap_classify(gap_sec: Optional[float]) -> str:
         return 'soft_break'
     return 'hard_break'
 
-def seq_weight_from_gap(gap_sec: Optional[float]) -> float:
+def seq_weight_from_gap(gap_sec: Optional[float], b_gap: Optional[float] = None) -> float:
+    """يحسب وزن محركات التسلسل — يدمج الفجوة الزمنية والرقمية."""
     cls = gap_classify(gap_sec)
-    return {'connected': SEQ_WEIGHT_CONNECTED, 'soft_break': SEQ_WEIGHT_SOFT, 'hard_break': SEQ_WEIGHT_HARD}[cls]
+    base = {'connected': SEQ_WEIGHT_CONNECTED, 'soft_break': SEQ_WEIGHT_SOFT, 'hard_break': SEQ_WEIGHT_HARD}[cls]
+    if b_gap is not None and base > 0:
+        import math
+        c = math.exp(-b_gap / 3000.0)
+        base = base * c
+    return max(0.0, base)
 
 def _filter_valid_rounds(rows) -> List[Dict]:
     valid = []
@@ -3015,8 +3050,285 @@ async def cmd_revoke_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ: {e}")
 
+
+# ==================== 🔐 نظام الاشتراكات ====================
+
+PLANS = {
+    "30m":  ("30 دقيقة",   30),
+    "1d":   ("يوم واحد",   1440),
+    "1w":   ("أسبوع",      10080),
+    "1mo":  ("شهر",        43200),
+    "life": ("مدى الحياة", None),
+}
+
+async def check_subscription(user_id: int):
+    """التحقق من اشتراك المستخدم. يعيد (مسموح, رسالة)."""
+    if user_id == ADMIN_ID:
+        return True, ""
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT plan, expiry FROM subscriptions WHERE user_id = %s",
+                    (user_id,)
+                )
+                row = cur.fetchone()
+                if not row:
+                    return False, (
+                        "🔒 <b>ليس لديك اشتراك نشط</b>\n"
+                        "تواصل مع المشرف للحصول على اشتراك.\n\n"
+                        "📋 الخطط المتاحة:\n"
+                        "  • 30 دقيقة تجريبية\n"
+                        "  • يوم  |  أسبوع  |  شهر"
+                    )
+                plan, expiry = row
+                if plan == "life":
+                    return True, ""
+                if expiry and datetime.now() > expiry:
+                    return False, (
+                        f"⏰ <b>انتهى اشتراكك</b> (خطة: {plan})\n"
+                        "تواصل مع المشرف للتجديد."
+                    )
+                if expiry:
+                    delta = expiry - datetime.now()
+                    total_sec = int(delta.total_seconds())
+                    if total_sec < 3600:
+                        remaining = f"{total_sec // 60} دقيقة"
+                    elif total_sec < 86400:
+                        remaining = f"{total_sec // 3600} ساعة"
+                    else:
+                        remaining = f"{total_sec // 86400} يوم"
+                    return True, f"⏳ متبقي: {remaining}"
+                return True, ""
+    except Exception as e:
+        logger.error(f"check_subscription: {e}")
+        return False, "❌ خطأ في التحقق من الاشتراك."
+
+async def cmd_add_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """إضافة / تجديد اشتراك مستخدم. للأدمن فقط."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ هذا الأمر للمشرف فقط.")
+        return
+    args = context.args or []
+    if len(args) < 2:
+        plans_list = "\n".join(f"  • {k} — {v[0]}" for k, v in PLANS.items())
+        await update.message.reply_text(
+            "⚠️ الاستخدام: <code>/add_sub &lt;user_id&gt; &lt;plan&gt;</code>\n\n"
+            f"الخطط المتاحة:\n{plans_list}\n\n"
+            "مثال: <code>/add_sub 123456789 1w</code>",
+            parse_mode="HTML"
+        )
+        return
+    try:
+        target_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ user_id يجب أن يكون رقماً.")
+        return
+    plan_key = args[1].lower()
+    if plan_key not in PLANS:
+        await update.message.reply_text(
+            f"❌ خطة غير معروفة. الخطط: {', '.join(PLANS.keys())}"
+        )
+        return
+    plan_label, minutes = PLANS[plan_key]
+    expiry = None if minutes is None else datetime.now() + timedelta(minutes=minutes)
+    username = None
+    try:
+        chat = await context.bot.get_chat(target_id)
+        username = chat.username or chat.full_name
+    except Exception:
+        pass
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO subscriptions (user_id, username, plan, expiry, granted_by, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (user_id) DO UPDATE
+                        SET plan       = EXCLUDED.plan,
+                            expiry     = EXCLUDED.expiry,
+                            granted_by = EXCLUDED.granted_by,
+                            username   = COALESCE(EXCLUDED.username, subscriptions.username),
+                            updated_at = NOW()
+                """, (target_id, username, plan_key, expiry, update.effective_user.id))
+                conn.commit()
+        expiry_str = expiry.strftime("%Y-%m-%d %H:%M:%S") if expiry else "مدى الحياة ♾️"
+        await update.message.reply_text(
+            f"✅ <b>تم منح الاشتراك</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 المستخدم: <code>{target_id}</code>"
+            + (f" (@{username})" if username else "") + "\n"
+            f"📋 الخطة: <b>{plan_label}</b>\n"
+            f"⏳ ينتهي: <b>{expiry_str}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━",
+            parse_mode="HTML"
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text=(
+                    f"🎉 <b>تم تفعيل اشتراكك!</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📋 الخطة: <b>{plan_label}</b>\n"
+                    f"⏳ ينتهي: <b>{expiry_str}</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"اضغط /start للبدء 🚀"
+                ),
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ: {e}")
+
+async def cmd_revoke_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """إلغاء اشتراك مستخدم. للأدمن فقط."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ هذا الأمر للمشرف فقط.")
+        return
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "⚠️ استخدم: <code>/revoke_sub &lt;user_id&gt;</code>",
+            parse_mode="HTML"
+        )
+        return
+    try:
+        target_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ user_id يجب أن يكون رقماً.")
+        return
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM subscriptions WHERE user_id = %s", (target_id,))
+                deleted = cur.rowcount
+                conn.commit()
+        if deleted:
+            await update.message.reply_text(
+                f"✅ تم إلغاء اشتراك المستخدم <code>{target_id}</code>.", parse_mode="HTML"
+            )
+            try:
+                await context.bot.send_message(
+                    chat_id=target_id,
+                    text="⚠️ <b>تم إلغاء اشتراكك.</b>\nتواصل مع المشرف للتجديد.",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+        else:
+            await update.message.reply_text(
+                f"⚠️ لا يوجد اشتراك للمستخدم <code>{target_id}</code>.", parse_mode="HTML"
+            )
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ: {e}")
+
+async def cmd_list_subs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض قائمة المشتركين. للأدمن فقط."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ هذا الأمر للمشرف فقط.")
+        return
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT user_id, username, plan, expiry, created_at
+                    FROM subscriptions
+                    ORDER BY created_at DESC LIMIT 30
+                """)
+                rows = cur.fetchall()
+        if not rows:
+            await update.message.reply_text("📋 لا يوجد مشتركون بعد.")
+            return
+        now = datetime.now()
+        lines = ["📋 <b>قائمة المشتركين</b>\n━━━━━━━━━━━━━━━━━━━━"]
+        active_count = 0
+        expired_count = 0
+        for uid, uname, plan, expiry, created_at in rows:
+            plan_label = PLANS.get(plan, (plan,))[0]
+            if plan == "life":
+                status = "♾️ مدى الحياة"
+                active_count += 1
+            elif expiry and now > expiry:
+                status = "❌ منتهي"
+                expired_count += 1
+            else:
+                if expiry:
+                    delta = expiry - now
+                    h = int(delta.total_seconds() // 3600)
+                    status = f"✅ {h}س" if h < 48 else f"✅ {h//24}ي"
+                else:
+                    status = "✅ نشط"
+                active_count += 1
+            name_str = f"@{uname}" if uname else f"id:{uid}"
+            lines.append(f"👤 <code>{uid}</code> {name_str}\n   {plan_label} | {status}")
+        lines.append(f"━━━━━━━━━━━━━━━━━━━━\n✅ نشط: {active_count}  |  ❌ منتهي: {expired_count}")
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ: {e}")
+
+async def cmd_my_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعرض للمستخدم حالة اشتراكه."""
+    user_id = update.effective_user.id
+    if user_id == ADMIN_ID:
+        await update.message.reply_text(
+            "👑 <b>أنت المشرف — وصول مفتوح مدى الحياة.</b>", parse_mode="HTML"
+        )
+        return
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT plan, expiry, created_at FROM subscriptions WHERE user_id = %s",
+                    (user_id,)
+                )
+                row = cur.fetchone()
+        if not row:
+            await update.message.reply_text(
+                "🔒 <b>ليس لديك اشتراك نشط.</b>\nتواصل مع المشرف للاشتراك.",
+                parse_mode="HTML"
+            )
+            return
+        plan, expiry, created_at = row
+        plan_label = PLANS.get(plan, (plan,))[0]
+        if plan == "life":
+            status = "♾️ مدى الحياة"
+        elif expiry and datetime.now() > expiry:
+            status = "❌ منتهي"
+        else:
+            if expiry:
+                delta = expiry - datetime.now()
+                total_sec = int(delta.total_seconds())
+                if total_sec < 3600:
+                    status = f"✅ متبقي {total_sec // 60} دقيقة"
+                elif total_sec < 86400:
+                    status = f"✅ متبقي {total_sec // 3600} ساعة"
+                else:
+                    status = f"✅ متبقي {total_sec // 86400} يوم"
+            else:
+                status = "✅ نشط"
+        expiry_str = expiry.strftime("%Y-%m-%d %H:%M") if expiry else "بلا انتهاء"
+        await update.message.reply_text(
+            f"📋 <b>اشتراكك</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📦 الخطة: <b>{plan_label}</b>\n"
+            f"⏳ الحالة: <b>{status}</b>\n"
+            f"📅 ينتهي: <b>{expiry_str}</b>\n"
+            f"🗓️ تاريخ الاشتراك: {created_at.strftime('%Y-%m-%d') if created_at else '?'}\n"
+            f"━━━━━━━━━━━━━━━━━━━━",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ: {e}")
+
 # ==================== أوامر البوت ====================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ── التحقق من الاشتراك ────────────────────────────────────────
+    allowed, sub_msg = await check_subscription(update.effective_user.id)
+    if not allowed:
+        await update.message.reply_text(sub_msg, parse_mode="HTML")
+        return
+    # ─────────────────────────────────────────────────────────────
     laws_count = len(load_laws())
     active_data_laws = len([l for l in DATA_LAWS if l.get("active")])
     await update.message.reply_text(
@@ -3043,6 +3355,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  🔑 /set_key — تعيين مفتاح API (مشرف)\n"
         f"  🔑 /get_key — عرض مفتاح API (مشرف)\n"
         f"  🔑 /revoke_key — إلغاء مفتاح API (مشرف)\n"
+        f"{'━'*24}\n"
+        f"👥 <b>إدارة المشتركين (مشرف):</b>\n"
+        f"  ➕ /add_sub — منح اشتراك\n"
+        f"  ➖ /revoke_sub — إلغاء اشتراك\n"
+        f"  📋 /list_subs — قائمة المشتركين\n"
+        f"  ℹ️ /my_sub — حالة اشتراكي\n"
         f"{'━'*24}\n"
         f"🎴 اختر البذلة للبدء:",
         parse_mode="HTML",
@@ -3659,10 +3977,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         else: pred_int = None
                         winner_text = WINNER_NAMES.get(winner_int, WINNER_NAMES.get(winner, "تعادل ⚪"))
                         try:
-                            cur.execute("""
-                                INSERT INTO history (b_num, suit, rank, bonus_last_digit, winner, prediction, user_id, "timestamp", created_at)
-                                VALUES (%s, %s, %s, %s, %s, %s::integer, %s, NOW(), NOW()) RETURNING id
-                            """, (b_num, suit, rank, last_digit, winner_text, pred_int, query.from_user.id))
+                            # منع تكرار نفس الجولة
+                            cur.execute("SELECT id FROM history WHERE b_num=%s AND suit=%s AND created_at>=NOW()-INTERVAL '2 minutes' LIMIT 1", (b_num, suit))
+                            _dup = cur.fetchone()
+                            if _dup:
+                                saved_id = _dup[0]
+                                logger.info(f"Duplicate skipped: {b_num}/{suit}")
+                            else:
+                                cur.execute("""
+                                    INSERT INTO history (b_num, suit, rank, bonus_last_digit, winner, prediction, user_id, "timestamp", created_at)
+                                    VALUES (%s, %s, %s, %s, %s, %s::integer, %s, NOW(), NOW()) RETURNING id
+                                """, (b_num, suit, rank, last_digit, winner_text, pred_int, query.from_user.id))
+                                _r = cur.fetchone()
+                                if not _dup: saved_id = _r[0] if _r else None
                         except Exception:
                             conn.rollback()
                             cur.execute("""
@@ -3716,9 +4043,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 acc_txt = f"\n📈 دقة آخر 20: <b>{recent_acc:.0%}</b>  <code>{streak_disp}</code>"
             except Exception:
                 acc_txt = ""
-            buttons = [[InlineKeyboardButton("🎴 جولة جديدة", callback_data="choose_suit"), InlineKeyboardButton("📊 إحصاءات", callback_data="stats")]]
-            if saved_id:
-                buttons.append([InlineKeyboardButton(f"🗑️ حذف هذه الجولة (#{saved_id})", callback_data=f"del_confirm_{saved_id}")])
+            _uid2 = query.from_user.id if query.from_user else 0
+            if _uid2 == ADMIN_ID:
+                buttons = [[InlineKeyboardButton("🎴 جولة جديدة", callback_data="choose_suit"),
+                            InlineKeyboardButton("📊 إحصاءات",    callback_data="stats")]]
+                if saved_id:
+                    buttons.append([InlineKeyboardButton(f"🗑️ حذف هذه الجولة (#{saved_id})", callback_data=f"del_confirm_{saved_id}")])
+            else:
+                buttons = [[InlineKeyboardButton("🔄 جولة جديدة", callback_data="choose_suit")]]
+                if saved_id:
+                    buttons.append([InlineKeyboardButton(f"🗑️ حذف هذه الجولة (#{saved_id})", callback_data=f"del_confirm_{saved_id}")])
             save_note = ""
             if save_error: save_note = f"\n⚠️ <b>خطأ في الحفظ:</b> <code>{save_error[:120]}</code>"
             elif saved_id: save_note = f"\n💾 محفوظة  ID: <code>{saved_id}</code>"
@@ -3993,7 +4327,8 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     for pid, wkey, desc in pattern_map:
         res = get_pattern(pid)
         if res['w'] != 2 and res['c'] > 0.0:
-            scores[res['w']] += res['c'] * WEIGHTS[wkey]
+            w_factor = 0.5 if wkey == 'DIGIT' else 1.0  # DIGIT ضعيف إحصائياً
+            scores[res['w']] += res['c'] * WEIGHTS[wkey] * w_factor
             logs.append(f"{desc}: {WINNER_NAMES[res['w']]} {res['log']}")
 
     # ── 4. نتيجة AI الآني ───────────────────────────────────────────
@@ -4292,7 +4627,22 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
     else:
         final = 1
 
+    # ── Cap النقاط + conflict ratio + overconfidence guard ──────────
+    scores[0] = min(scores[0], 1.5)
+    scores[1] = min(scores[1], 1.5)
+    # conflict ratio: إذا الأصوات متقاربة → خفّض النتيجة النهائية
+    if scores[0] > 0 and scores[1] > 0:
+        conflict_ratio = min(scores[0], scores[1]) / max(scores[0], scores[1])
+        if conflict_ratio > 0.6:
+            scores[0] *= 0.75
+            scores[1] *= 0.75
+            logs.append(f"⚠️ تعارض إشارات ({conflict_ratio:.0%}) → خفض الثقة")
+    # overconfidence guard: إذا الفارق ضعيف → خفض الثقة
+    total_score = scores[0] + scores[1]
+    if total_score > 0 and abs(scores[0] - scores[1]) / total_score < 0.15:
+        final_conf = int(final_conf * 0.7)
     # أضف معلومات التوازن للـ logs
+    total_score = scores[0] + scores[1]
     if total_score > 0:
         r_pct = scores[0] / total_score * 100
         b_pct = scores[1] / total_score * 100
@@ -4325,6 +4675,12 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
+    # ── التحقق من الاشتراك ────────────────────────────────────────
+    allowed, sub_msg = await check_subscription(update.effective_user.id)
+    if not allowed:
+        await update.message.reply_text(sub_msg, parse_mode="HTML")
+        return
+    # ─────────────────────────────────────────────────────────────
     suit = context.user_data.get('suit')
     rank = context.user_data.get('rank')
     if not suit or not rank:
@@ -4349,8 +4705,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['last_signals'] = signals_data
         clean_reason = "\n".join(clean_reason_lines)
         await wait_msg.delete()
+        _uid = update.effective_user.id if update.effective_user else 0
         await update.message.reply_text(format_prediction(pred, conf, clean_reason, suit, rank, b_num),
-                                        parse_mode="HTML", reply_markup=result_keyboard(pred, b_num))
+                                        parse_mode="HTML", reply_markup=result_keyboard(pred, b_num, _uid))
     except Exception as e:
         logger.error(f"predict error: {e}", exc_info=True)
         await wait_msg.edit_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
@@ -4406,13 +4763,23 @@ def format_prediction(pred: int, conf: int, reason: str,
         f"{'━'*22}"
     )
 
-def result_keyboard(pred: int, b_num: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ الراعي 🔴", callback_data=f"save_0_{b_num}"),
-         InlineKeyboardButton("✅ الثور 🔵",  callback_data=f"save_1_{b_num}"),
-         InlineKeyboardButton("✅ تعادل ⚪",  callback_data=f"save_2_{b_num}")],
-        [InlineKeyboardButton("🔄 جولة جديدة", callback_data="choose_suit")]
-    ])
+def result_keyboard(pred: int, b_num: str, user_id: int = 0) -> InlineKeyboardMarkup:
+    """للأدمن: لوحة كاملة. للمشترك العادي: جولة جديدة فقط."""
+    if user_id == ADMIN_ID:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ الراعي 🔴", callback_data=f"save_0_{b_num}"),
+             InlineKeyboardButton("✅ الثور 🔵",  callback_data=f"save_1_{b_num}"),
+             InlineKeyboardButton("✅ تعادل ⚪",  callback_data=f"save_2_{b_num}")],
+            [InlineKeyboardButton("🔄 جولة جديدة", callback_data="choose_suit"),
+             InlineKeyboardButton("📊 إحصاءات",    callback_data="stats")],
+        ])
+    else:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ الراعي 🔴", callback_data=f"save_0_{b_num}"),
+             InlineKeyboardButton("✅ الثور 🔵",  callback_data=f"save_1_{b_num}"),
+             InlineKeyboardButton("✅ تعادل ⚪",  callback_data=f"save_2_{b_num}")],
+            [InlineKeyboardButton("🔄 جولة جديدة", callback_data="choose_suit")],
+        ])
 
 def _safe(v, fmt=None) -> str:
     if v is None: return "NULL"
@@ -4477,6 +4844,10 @@ def main():
     app.add_handler(CommandHandler("delete", cmd_delete))
     app.add_handler(CommandHandler("download", cmd_download))
     app.add_handler(CommandHandler("engine", cmd_engine_status))
+    app.add_handler(CommandHandler("add_sub",    cmd_add_sub))
+    app.add_handler(CommandHandler("revoke_sub", cmd_revoke_sub))
+    app.add_handler(CommandHandler("list_subs",  cmd_list_subs))
+    app.add_handler(CommandHandler("my_sub",     cmd_my_sub))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     logger.info("🚀 HADES V19.0 is running...")
