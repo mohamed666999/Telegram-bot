@@ -73,15 +73,11 @@ RANK_VALUE = {k: v for k, v in zip(
     ["A","K","Q","J","10","9","8","7","6","5","4","3","2"],
     [14, 13, 12, 11, 10,  9,  8,  7,  6,  5,  4,  3,  2]
 )}
-
 WEIGHTS = {
     'SD': 3.5, 'SUIT': 1.5, 'DIGIT': 2.0, 'RANK': 1.2,
     'MOMENTUM': 2.5, 'AI': 2.5,
     'LAW': 3.5,
 }
-
-MAX_LAW_WEIGHT = 0.35
-MAX_LAW_CONTRIBUTION = MAX_LAW_WEIGHT
 # ════════════════════════════════════════════════════════════════════
 # 📊 قوانين مستخلصة من تحليل 1780 جولة حقيقية (v19)
 # ════════════════════════════════════════════════════════════════════
@@ -647,24 +643,7 @@ def get_last_digit(b: str) -> int:
 def generate_bar(pct: int, width: int = 10) -> str:
     filled = round(pct / 100 * width)
     return "█" * filled + "░" * (width - filled)
-def remove_tie_streaks(rounds):
-    cleaned = []
-    i = 0
-    n = len(rounds)
 
-    while i < n:
-        if rounds[i]['winner'] == 2:
-            # بداية سلسلة تعادل
-            j = i
-            while j < n and rounds[j]['winner'] == 2:
-                j += 1
-            # تخطى السلسلة بالكامل
-            i = j
-        else:
-            cleaned.append(rounds[i])
-            i += 1
-
-    return cleaned
 # ==================== محرك الأنماط ====================
 def _score_pattern(raw: Dict, pattern_id: str = "") -> Dict:
     r, b, t = raw.get("r", 0), raw.get("b", 0), raw.get("t", 0)
@@ -2688,9 +2667,34 @@ def shannon_entropy_sniper(history: List[int]) -> Tuple[bool, float, str]:
     if p_red == 0 or p_blue == 0:
         entropy = 0.0
     else:
-        async def _kimi_analyze(messages: list, timeout: int = 600) -> str:
+        entropy = -(p_red * math.log2(p_red) + p_blue * math.log2(p_blue))
+    switches   = sum(1 for i in range(1, len(last15)) if last15[i] != last15[i-1])
+    volatility = switches / len(last15)
+    if entropy > 0.95 and volatility > 0.65:
+        return True, entropy, f"⚠️ فوضى رياضية (entropy={entropy:.2f}, vol={volatility:.2f})"
+    return False, entropy, f"استقرار (entropy={entropy:.2f})"
+
+# ==================== 🗝️ دوال إدارة مفاتيح API ====================
+async def _get_api_key(service: str) -> Optional[str]:
+    """جلب مفتاح API من DB إذا كان ساري المفعول."""
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT api_key, expiry FROM api_keys WHERE service = %s", (service,))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                key, expiry = row
+                if expiry and datetime.now() > expiry:
+                    return None
+                return key
+    except Exception:
+        return None
+
+async def _kimi_analyze(messages: list, timeout: int = 600) -> str:
     """بُديل Kimi: يستخدم DeepSeek-R1 عبر Nvidia للتفكير العميق واستخراج النظريات."""
     loop = asyncio.get_event_loop()
+    # جلب المفتاح من DB، وإلا استخدم المفتاح الرئيسي الشغال
     key = await _get_api_key('kimi')
     if not key:
         key = AI_API_KEY  # استخدام المفتاح الأساسي الفعال كبديل موثوق
@@ -2707,15 +2711,17 @@ def shannon_entropy_sniper(history: List[int]) -> Tuple[bool, float, str]:
                 timeout=float(timeout),
             )
         )
+        # استخدام DeepSeek-R1 كونه أفضل نموذج تفكير موجود على Nvidia حالياً
         comp = client.chat.completions.create(
             model="deepseek-ai/deepseek-r1",
             messages=messages,
             temperature=0.6,
             top_p=0.95,
-            max_tokens=4096,
+            max_tokens=4096, # تم التخفيض ليتناسب مع حدود Nvidia
             stream=False,
         )
         text = comp.choices[0].message.content or ""
+        # تنظيف مسار التفكير الخاص بـ R1 إن وُجد للحصول على الخلاصة فقط
         return re.sub(r"(?s)<think>.*?</think>", "", text).strip()
 
     try:
@@ -2730,6 +2736,7 @@ def shannon_entropy_sniper(history: List[int]) -> Tuple[bool, float, str]:
 async def _minimax_critique(messages: list, timeout: int = 600) -> str:
     """بديل MiniMax: يستخدم Llama-3.1-70B عبر Nvidia للتدقيق الصارم."""
     loop = asyncio.get_event_loop()
+    # جلب المفتاح من DB، وإلا استخدم المفتاح الرئيسي الشغال
     key = await _get_api_key('minimax')
     if not key:
         key = AI_API_KEY  # استخدام المفتاح الأساسي الفعال كبديل موثوق
@@ -2746,12 +2753,13 @@ async def _minimax_critique(messages: list, timeout: int = 600) -> str:
                 timeout=float(timeout),
             )
         )
+        # استخدام Llama 3.1 70B كمدقق صارم (ممتاز في النقد الرياضي)
         comp = client.chat.completions.create(
             model="meta/llama-3.1-70b-instruct",
             messages=messages,
             temperature=0.3,
             top_p=0.95,
-            max_tokens=4096,
+            max_tokens=4096, # تم التخفيض لتجنب رفض الطلب
             stream=False,
         )
         return comp.choices[0].message.content or ""
@@ -2764,7 +2772,6 @@ async def _minimax_critique(messages: list, timeout: int = 600) -> str:
     except Exception as e:
         logger.error(f"Council (MiniMax Role) error: {e}")
         return f"فشل: {e}"
-
 # ==================== 🏛️ مجلس الآلهة (Council of Gods) ====================
 async def run_council_debate(status_callback) -> Dict:
     await status_callback("🏛️ <b>مجلس الآلهة يجتمع...</b>\n📥 جاري سحب وتجهيز البيانات...")
@@ -2805,87 +2812,6 @@ async def run_council_debate(status_callback) -> Dict:
         f"--- نظريات Kimi ---\n{kimi_resp}\n--- البيانات ---\n{data_context}\n"
         f"ارفض النظريات الضعيفة، وصقّل القوية، واكتب تقرير القواعد الناجية."
     }])
-    if "فشل" in minimax_resp:
-        return {"error": minimax_resp}
-
-    await status_callback("⚡ <b>DeepSeek (كبير الآلهة) يحكم...</b>\nيصيغ القواعد الذهبية النهائية في JSON.")
-    deepseek_prompt = (
-        f"أنت القاضي النهائي. حوّل القواعد المتفق عليها إلى JSON:\n"
-        f"--- تحليل Kimi:\n{kimi_resp[:2000]}\n"
-        f"--- نقد MiniMax:\n{minimax_resp[:2000]}\n"
-        f"أنشئ مصفوفة JSON فقط مع شروط: streak, gap_sec_gt/lt, suit. "
-        f"prediction:0أو1, confidence:60-78. أعد JSON فقط بلا نص."
-    )
-    
-    try:
-        deepseek_text = await _nvidia_chat(
-            [{"role": "user", "content": deepseek_prompt}],
-            max_tokens=4096, 
-            temperature=0.2,
-            enable_thinking=True,
-            timeout=600
-        )
-    except Exception as e:
-        return {"error": f"فشل كبير الآلهة (DeepSeek) في صياغة القوانين: {e}"}
-
-    laws_data = extract_json_safe(deepseek_text)
-    if not laws_data or not isinstance(laws_data, list):
-        return {"error": "فشل DeepSeek في صياغة JSON النهائي."}
-
-    backtest_rows = _fetch_backtest_rows()
-    saved = 0
-    rejected = 0
-    with db_pool.get_conn() as conn:
-        with conn.cursor() as cur:
-            for law in laws_data:
-                if not isinstance(law, dict): continue
-                if law.get("prediction") not in [0, 1]: continue
-                bt_passes, bt_acc, bt_n = backtest_law(law, backtest_rows)
-                if not bt_passes:
-                    rejected += 1
-                    continue
-                cur.execute("""
-                    INSERT INTO ai_laws
-                        (law_name, law_type, conditions, prediction, confidence,
-                         accuracy, description, source, times_used)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, 'COUNCIL_DEBATE', %s)
-                """, (
-                    f"COUNCIL_{saved}_{int(time.time())}",
-                    law.get("law_type", "COUNCIL_RULE"),
-                    json.dumps(law.get("conditions", {}), ensure_ascii=False),
-                    int(law["prediction"]),
-                    float(law.get("confidence", 75)),
-                    round(bt_acc * 100, 1),
-                    f"{law.get('description','')} [Council BT:{bt_acc:.0%}]",
-                    bt_n,
-                ))
-                saved += 1
-        conn.commit()
-
-    load_laws(force=True)
-    return {
-        "saved": saved, "rejected": rejected,
-        "kimi_summary": kimi_resp[:300] + "...",
-        "minimax_summary": minimax_resp[:300] + "...",
-    }
-
-# ==================== 🗝️ دوال إدارة مفاتيح API ====================
-async def _get_api_key(service: str) -> Optional[str]:
-    """جلب مفتاح API من DB إذا كان ساري المفعول."""
-    try:
-        with db_pool.get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT api_key, expiry FROM api_keys WHERE service = %s", (service,))
-                row = cur.fetchone()
-                if not row:
-                    return None
-                key, expiry = row
-                if expiry and datetime.now() > expiry:
-                    return None
-                return key
-    except Exception:
-        return None
-
     if "فشل" in minimax_resp:
         return {"error": minimax_resp}
 
