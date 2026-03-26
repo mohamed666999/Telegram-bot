@@ -2786,7 +2786,9 @@ async def run_council_debate(status_callback) -> Dict:
         f"اطرح 7 نظريات قوية مدعومة بالأرقام.\n{data_context}"
     }])
     if "فشل" in kimi_resp:
-        return {"error": kimi_resp}
+        # Kimi فشل → DeepSeek يعمل مباشرة على البيانات
+        await status_callback("⚠️ Kimi لم يستجب — DeepSeek سيعمل مباشرة على البيانات.")
+        kimi_resp = f"Kimi لم يستجب. اعتمد على البيانات التالية مباشرة:\n{data_context}"
 
     await status_callback("🌊 <b>MiniMax (إله الشك) يتدخل...</b>\nيفحص نظريات Kimi ويمزق الضعيفة.")
     minimax_resp = await _minimax_critique([{"role": "user", "content":
