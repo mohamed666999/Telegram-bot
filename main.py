@@ -2754,9 +2754,9 @@ async def _minimax_critique(messages: list, timeout: int = 600) -> str:
         logger.error(f"MiniMax error: {e}")
         return f"فشل MiniMax: {e}"
 
-# ==================== 🏛️ مجلس الآلهة (Council of Gods) ====================
+# ==================== 🏛️ مجلس القادة (Council of Leaders) ====================
 async def run_council_debate(status_callback) -> Dict:
-    await status_callback("🏛️ <b>مجلس الآلهة يجتمع...</b>\n📥 جاري سحب وتجهيز البيانات...")
+    await status_callback("🏛️ <b>مجلس القادة يجتمع...</b>\n📥 جاري سحب وتجهيز البيانات...")
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
@@ -2780,7 +2780,7 @@ async def run_council_debate(status_callback) -> Dict:
         f"تعريف: winner=0 الراعي/أحمر, winner=1 الثور/أزرق"
     )
 
-    await status_callback("🌑 <b>Kimi (إله الرؤية) يتحدث...</b>\nيقرأ البيانات ويبحث عن ارتباطات مخفية معقدة.")
+    await status_callback("🌑 <b>Kimi (قائد الرؤية) يتحدث...</b>\nيقرأ البيانات ويبحث عن ارتباطات مخفية معقدة.")
     kimi_resp = await _kimi_analyze([{"role": "user", "content":
         f"أنت عالم بيانات عبقري. حلل بيانات الباكرات وابحث عن تقاطعات معقدة (فجوة + سلسلة + بذلة). "
         f"اطرح 7 نظريات قوية مدعومة بالأرقام.\n{data_context}"
@@ -2790,7 +2790,7 @@ async def run_council_debate(status_callback) -> Dict:
         await status_callback("⚠️ Kimi لم يستجب — DeepSeek سيعمل مباشرة على البيانات.")
         kimi_resp = f"Kimi لم يستجب. اعتمد على البيانات التالية مباشرة:\n{data_context}"
 
-    await status_callback("🌊 <b>MiniMax (إله الشك) يتدخل...</b>\nيفحص نظريات Kimi ويمزق الضعيفة.")
+    await status_callback("🌊 <b>MiniMax (قائد التحليل) يتدخل...</b>\nيفحص نظريات Kimi ويمزق الضعيفة.")
     minimax_resp = await _minimax_critique([{"role": "user", "content":
         f"أنت مدقق إحصائي صارم. انتقد هذه النظريات ضد البيانات الحقيقية:\n"
         f"--- نظريات Kimi ---\n{kimi_resp}\n--- البيانات ---\n{data_context}\n"
@@ -2801,7 +2801,7 @@ async def run_council_debate(status_callback) -> Dict:
         await status_callback("⚠️ MiniMax لم يستجب — سيكمل DeepSeek بناءً على تحليل Kimi.")
         minimax_resp = "MiniMax لم يستجب. اعتمد على تحليل Kimi مباشرة."
 
-    await status_callback("⚡ <b>DeepSeek (كبير الآلهة) يحكم...</b>\nيصيغ القواعد الذهبية النهائية في JSON.")
+    await status_callback("⚡ <b>DeepSeek (القائد الأعلى) يحكم...</b>\nيصيغ القواعد الذهبية النهائية في JSON.")
     deepseek_prompt = (
         f"أنت القاضي النهائي. حوّل القواعد المتفق عليها إلى JSON:\n"
         f"--- تحليل Kimi:\n{kimi_resp[:2000]}\n"
@@ -3367,7 +3367,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  ✂️ /prune — تنظيف القوانين الميتة (مشرف)\n"
         f"  🔄 /reset_laws — إعادة تعيين (مشرف)\n"
         f"  ⛏️ /mine_gold — تعدين القواعد الذهبية (مشرف)\n"
-        f"  🏛️ /council_learn — مجلس الآلهة (مشرف)\n"
+        f"  🏛️ /council_learn — مجلس القادة (مشرف)\n"
         f"  🔑 /set_key — تعيين مفتاح API (مشرف)\n"
         f"  🔑 /get_key — عرض مفتاح API (مشرف)\n"
         f"  🔑 /revoke_key — إلغاء مفتاح API (مشرف)\n"
@@ -3672,7 +3672,7 @@ async def cmd_council_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ هذا الأمر للمشرف فقط.")
         return
-    msg = await update.message.reply_text("🏛️ <b>تم استدعاء مجلس الآلهة...</b>\nالحوار قد يستغرق 5-15 دقيقة.", parse_mode="HTML")
+    msg = await update.message.reply_text("🏛️ <b>تم استدعاء مجلس القادة...</b>\nالحوار قد يستغرق 5-15 دقيقة.", parse_mode="HTML")
     async def status_update(text: str):
         try: await msg.edit_text(text, parse_mode="HTML")
         except Exception: pass
@@ -3681,7 +3681,7 @@ async def cmd_council_learn(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ <b>فشلت المحاكمة</b>\n\n<code>{result['error'][:300]}</code>", parse_mode="HTML")
         return
     await msg.edit_text(
-        f"✅ <b>انتهى اجتماع مجلس الآلهة!</b>\n\n"
+        f"✅ <b>انتهى اجتماع مجلس القادة!</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"⚖️ القوانين المعتمدة: <b>{result['saved']}</b>\n"
         f"🗑️ المرفوضة: <b>{result['rejected']}</b>\n"
@@ -3956,10 +3956,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     logger.info(f"CB [{query.from_user.id}]: {data!r}")
     try:
-        if data == "choose_suit":
+        if data in ("choose_suit", "new_connected", "new_disconnected"):
             context.user_data.pop('suit',None); context.user_data.pop('rank',None)
+            # حفظ نوع الجلسة للـ predict
+            if data == "new_connected":
+                context.user_data['session_mode'] = 'connected'   # جولات متسلسلة — تسلسل بدون انقطاع
+            elif data == "new_disconnected":
+                context.user_data['session_mode'] = 'disconnected' # جولة بعد انقطاع — نعيد بناء السياق
+            else:
+                context.user_data.pop('session_mode', None)        # عادي
             kb = InlineKeyboardMarkup([[InlineKeyboardButton(SUITS[i], callback_data=f"suit_{i}") for i in range(len(SUITS))]])
-            await safe_edit(query, "🎴 اختر البذلة:", reply_markup=kb)
+            if data == "new_connected":
+                await safe_edit(query, "🟢 جولة متصلة\n\n🎴 اختر البذلة:", reply_markup=kb)
+            elif data == "new_disconnected":
+                await safe_edit(query, "🔴 جولة منقطة\n\n🎴 اختر البذلة:", reply_markup=kb)
+            else:
+                await safe_edit(query, "🎴 اختر البذلة:", reply_markup=kb)
         elif data.startswith("suit_"):
             idx = int(data.split("_")[1])
             suit = SUITS[idx]
@@ -4061,12 +4073,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 acc_txt = ""
             _uid2 = query.from_user.id if query.from_user else 0
             if _uid2 == ADMIN_ID:
-                buttons = [[InlineKeyboardButton("🎴 جولة جديدة", callback_data="choose_suit"),
-                            InlineKeyboardButton("📊 إحصاءات",    callback_data="stats")]]
+                buttons = [[InlineKeyboardButton("🟢 جولة متصلة",  callback_data="new_round_connected"),
+                             InlineKeyboardButton("🔴 جولة منقطعة", callback_data="new_round_disconnected")],
+                            [InlineKeyboardButton("📊 إحصاءات",    callback_data="stats")]]
                 if saved_id:
                     buttons.append([InlineKeyboardButton(f"🗑️ حذف هذه الجولة (#{saved_id})", callback_data=f"del_confirm_{saved_id}")])
             else:
-                buttons = [[InlineKeyboardButton("🔄 جولة جديدة", callback_data="choose_suit")]]
+                buttons = [[InlineKeyboardButton("🟢 جولة متصلة",  callback_data="new_round_connected"),
+                             InlineKeyboardButton("🔴 جولة منقطعة", callback_data="new_round_disconnected")]]
                 if saved_id:
                     buttons.append([InlineKeyboardButton(f"🗑️ حذف هذه الجولة (#{saved_id})", callback_data=f"del_confirm_{saved_id}")])
             save_note = ""
@@ -4115,7 +4129,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     + (f"{'━'*20}\n📡 أفضل محركات:\n{sig_txt}" if sig_txt else "")
                     + f"{'━'*20}"
                 )
-                kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎴 جولة جديدة", callback_data="choose_suit"), InlineKeyboardButton("🔄 تحديث", callback_data="stats")]])
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("🟢 متصلة", callback_data="new_connected"), InlineKeyboardButton("🔴 منقطة", callback_data="new_disconnected"), InlineKeyboardButton("🔄 تحديث", callback_data="stats")]])
                 await safe_edit(query, msg_text, reply_markup=kb)
             except Exception as e:
                 await safe_edit(query, f"❌ خطأ: <code>{e}</code>")
@@ -4139,7 +4153,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await safe_edit(
                         query,
                         f"✅ <b>تم الحذف — كأن الجولة لم تحدث</b>\n{'━'*22}\n🔑 B_NUM: <code>{bnum}</code>  |  🕐 {t}\n🃏 {suit or '?'} {rank or '?'}  |  🏆 {winner_str}\n{'━'*22}\n♻️ rollback: <b>{res['rolled_back']}</b> نمط  |  ⚖️ <b>{res['laws_adjusted']}</b> قانون",
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗑️ حذف أخرى", callback_data="del_list"), InlineKeyboardButton("🎴 جولة جديدة", callback_data="choose_suit")]])
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗑️ حذف أخرى", callback_data="del_list"), InlineKeyboardButton("🟢 متصلة", callback_data="new_connected"), InlineKeyboardButton("🔴 منقطة", callback_data="new_disconnected")]])
                     )
             except Exception as e:
                 await safe_edit(query, f"❌ خطأ: <code>{e}</code>")
@@ -4220,7 +4234,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception: pass
 
 
-async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
+async def predict(b_num: str, suit: str, rank: str, session_mode: str = 'auto') -> Tuple[int, int, str]:
     clean_b = clean_digits(b_num)
     if not clean_b:
         return 2, 0, "❌ رقم بونص غير صالح"
@@ -4300,6 +4314,12 @@ async def predict(b_num: str, suit: str, rank: str) -> Tuple[int, int, str]:
 
     # ── تحديد حالة الجلسة الدقيقة (3 مستويات) ──────────────────────
     # بناءً على gap_sec بين الجولة الحالية وآخر جولة مسجّلة
+    # ── تطبيق session_mode (اختيار المستخدم: متصلة/منقطعة) ────────────
+    if session_mode == 'connected':
+        gap_sec = 0.0       # نعامل الجولة كمتصلة تماماً
+    elif session_mode == 'disconnected':
+        gap_sec = 9999.0    # نعامل الجولة كانقطاع كامل
+
     session_type  = gap_classify(gap_sec)   # 'connected' / 'soft_break' / 'hard_break'
     is_new_session = session_type != 'connected'
     seq_weight     = seq_weight_from_gap(gap_sec)
@@ -4708,8 +4728,17 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.user_data['last_b_num'] = b_num
     wait_msg = await update.message.reply_text("🔄 جارٍ التحليل...")
+    # إعلام البوت بنوع الجلسة من اختيار المستخدم
+    session_mode = context.user_data.get('session_mode')
+    if session_mode == 'disconnected':
+        context.user_data['force_gap_sec'] = 9999.0  # hard break → تجاهل السياق السابق
+    elif session_mode == 'connected':
+        context.user_data['force_gap_sec'] = 0.0     # متصل → احسب ضمن السلسلة
+    else:
+        context.user_data.pop('force_gap_sec', None)
     try:
-        pred, conf, reason = await predict(b_num, suit, rank)
+        _session_mode = context.user_data.get('session_mode', 'auto')
+        pred, conf, reason = await predict(b_num, suit, rank, session_mode=_session_mode)
         context.user_data['last_pred'] = pred
         signals_data = {}
         clean_reason_lines = []
@@ -4786,15 +4815,17 @@ def result_keyboard(pred: int, b_num: str, user_id: int = 0) -> InlineKeyboardMa
             [InlineKeyboardButton("✅ الراعي 🔴", callback_data=f"save_0_{b_num}"),
              InlineKeyboardButton("✅ الثور 🔵",  callback_data=f"save_1_{b_num}"),
              InlineKeyboardButton("✅ تعادل ⚪",  callback_data=f"save_2_{b_num}")],
-            [InlineKeyboardButton("🔄 جولة جديدة", callback_data="choose_suit"),
-             InlineKeyboardButton("📊 إحصاءات",    callback_data="stats")],
+            [InlineKeyboardButton("🟢 متصلة",  callback_data="new_connected"),
+             InlineKeyboardButton("🔴 منقطة", callback_data="new_disconnected"),
+             InlineKeyboardButton("📊 إحصاءات", callback_data="stats")],
         ])
     else:
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ الراعي 🔴", callback_data=f"save_0_{b_num}"),
              InlineKeyboardButton("✅ الثور 🔵",  callback_data=f"save_1_{b_num}"),
              InlineKeyboardButton("✅ تعادل ⚪",  callback_data=f"save_2_{b_num}")],
-            [InlineKeyboardButton("🔄 جولة جديدة", callback_data="choose_suit")],
+            [InlineKeyboardButton("🟢 جولة جديدة متصلة",   callback_data="new_connected"),
+             InlineKeyboardButton("🔴 جولة جديدة منقطة", callback_data="new_disconnected")],
         ])
 
 def _safe(v, fmt=None) -> str:
