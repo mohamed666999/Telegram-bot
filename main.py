@@ -4316,9 +4316,11 @@ async def predict(b_num: str, suit: str, rank: str, session_mode: str = 'auto') 
     # بناءً على gap_sec بين الجولة الحالية وآخر جولة مسجّلة
     # ── تطبيق session_mode (اختيار المستخدم: متصلة/منقطعة) ────────────
     if session_mode == 'connected':
-        gap_sec = 0.0       # نعامل الجولة كمتصلة تماماً
+        gap_sec = 12.0           # متصلة: ضمن السلسلة
     elif session_mode == 'disconnected':
-        gap_sec = 9999.0    # نعامل الجولة كانقطاع كامل
+        gap_sec = 9999.0         # منقطعة: hard break
+        recent_history = []      # مسح الذاكرة القصيرة — لا نبني على ما قبل الانقطاع
+        connected_rows = []      # مسح الجولات المتصلة
 
     session_type  = gap_classify(gap_sec)   # 'connected' / 'soft_break' / 'hard_break'
     is_new_session = session_type != 'connected'
@@ -4728,16 +4730,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.user_data['last_b_num'] = b_num
     wait_msg = await update.message.reply_text("🔄 جارٍ التحليل...")
-    # إعلام البوت بنوع الجلسة من اختيار المستخدم
-    session_mode = context.user_data.get('session_mode')
-    if session_mode == 'disconnected':
-        context.user_data['force_gap_sec'] = 9999.0  # hard break → تجاهل السياق السابق
-    elif session_mode == 'connected':
-        context.user_data['force_gap_sec'] = 0.0     # متصل → احسب ضمن السلسلة
-    else:
-        context.user_data.pop('force_gap_sec', None)
+    _session_mode = context.user_data.get('session_mode', 'auto')
     try:
-        _session_mode = context.user_data.get('session_mode', 'auto')
         pred, conf, reason = await predict(b_num, suit, rank, session_mode=_session_mode)
         context.user_data['last_pred'] = pred
         signals_data = {}
@@ -4815,17 +4809,17 @@ def result_keyboard(pred: int, b_num: str, user_id: int = 0) -> InlineKeyboardMa
             [InlineKeyboardButton("✅ الراعي 🔴", callback_data=f"save_0_{b_num}"),
              InlineKeyboardButton("✅ الثور 🔵",  callback_data=f"save_1_{b_num}"),
              InlineKeyboardButton("✅ تعادل ⚪",  callback_data=f"save_2_{b_num}")],
-            [InlineKeyboardButton("🟢 متصلة",  callback_data="new_connected"),
-             InlineKeyboardButton("🔴 منقطة", callback_data="new_disconnected"),
-             InlineKeyboardButton("📊 إحصاءات", callback_data="stats")],
+            [InlineKeyboardButton("🟢 جولة متصلة",   callback_data="new_connected"),
+             InlineKeyboardButton("🔴 جولة منقطعة", callback_data="new_disconnected")],
+            [InlineKeyboardButton("📊 إحصاءات", callback_data="stats")],
         ])
     else:
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ الراعي 🔴", callback_data=f"save_0_{b_num}"),
              InlineKeyboardButton("✅ الثور 🔵",  callback_data=f"save_1_{b_num}"),
              InlineKeyboardButton("✅ تعادل ⚪",  callback_data=f"save_2_{b_num}")],
-            [InlineKeyboardButton("🟢 جولة جديدة متصلة",   callback_data="new_connected"),
-             InlineKeyboardButton("🔴 جولة جديدة منقطة", callback_data="new_disconnected")],
+            [InlineKeyboardButton("🟢 جولة متصلة",   callback_data="new_connected"),
+             InlineKeyboardButton("🔴 جولة منقطعة", callback_data="new_disconnected")],
         ])
 
 def _safe(v, fmt=None) -> str:
