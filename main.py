@@ -458,23 +458,25 @@ def apply_laws(suit: str, rank: str, last_digit: int,
             continue
 
         used = law.get("times_used", 0)
-        if law.get('id', 0) < 0:
-            trust = 0.5
-        elif used < 5:
-            trust = 0.1
-        elif used < 20:
-            trust = 0.1 + 0.9 * ((used - 5) / 15.0)
-        else:
-            trust = 1.0
-        law_weight = WEIGHTS['LAW'] * trust
+
+        # تجاهل القوانين ذات العينة الصغيرة جداً (ضوضاء مؤكدة)
+        if used < 15 and law.get('id', 0) > 0:
+            continue
+
+        acc_raw = law.get("accuracy", 50.0) / 100.0
+
+        # معادلة Bayesian Logarithmic Score: Accuracy × log10(Used + 10)
+        # تكافئ القوانين ذات الاستخدام العالي وتخسف بالوهم الإحصائي
+        bayesian_score = acc_raw * math.log10(used + 10)
+
+        law_weight = WEIGHTS['LAW'] * bayesian_score
         # القوانين التسلسلية تتأثر بانقطاع الجلسة
         if classify_law(law) == "SEQUENTIAL":
             law_weight *= seq_w
-        weight = (law["confidence"] / 100) * max(0.5, law["accuracy"] / 100) * match
+        conf_factor = law.get("confidence", 50.0) / 100.0
+        weight = conf_factor * law_weight * match
         # منع سيطرة قانون واحد
-        contribution = weight * law_weight
-        max_contrib  = (scores[0] + scores[1] + 0.01) * MAX_LAW_CONTRIBUTION
-        contribution = min(contribution, max_contrib)
+        contribution = min(weight, (scores[0] + scores[1] + 0.01) * MAX_LAW_CONTRIBUTION)
         scores[pred] += contribution
 
         if match >= 0.8:
@@ -1989,37 +1991,41 @@ def prune_weak_patterns():
         logger.warning(f"prune_weak_patterns: {e}")
 
 def auto_manage_laws():
+    """
+    Quant Filter: يحمي القوانين ذات العينة الكبيرة حتى لو دقتها 52%.
+    Edge حقيقي على 400+ جولة أفضل من وهم 90% على 5 جولات.
+    """
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
+                # 1. قتل الضوضاء الصريحة: عينة صغيرة + دقة ضعيفة
                 cur.execute("""
                     UPDATE ai_laws SET active = FALSE
                     WHERE active = TRUE
-                      AND times_used IN (2, 3, 4)
-                      AND accuracy_recent < 60
+                      AND times_used >= 5 AND times_used < 30
+                      AND accuracy < 60
                 """)
-                d0 = cur.rowcount
+                d_noise = cur.rowcount
+
+                # 2. العينة المتوسطة: تسقط عند < 53%
                 cur.execute("""
                     UPDATE ai_laws SET active = FALSE
                     WHERE active = TRUE
-                      AND times_used >= 30 AND times_used < 50
-                      AND accuracy < 42
+                      AND times_used >= 30 AND times_used < 100
+                      AND accuracy < 53
                 """)
-                d1 = cur.rowcount
+                d_mid = cur.rowcount
+
+                # 3. حماية العمالقة (n≥100): يموت فقط إذا فقد الـ Edge كلياً (< 50.5%)
                 cur.execute("""
                     UPDATE ai_laws SET active = FALSE
                     WHERE active = TRUE
-                      AND times_used >= 15 AND times_used < 30
-                      AND accuracy < 50
+                      AND times_used >= 100
+                      AND accuracy < 50.5
                 """)
-                d2 = cur.rowcount
-                cur.execute("""
-                    UPDATE ai_laws SET active = FALSE
-                    WHERE active = TRUE
-                      AND times_used >= 30
-                      AND accuracy < 55
-                """)
-                d3 = cur.rowcount
+                d_core = cur.rowcount
+
+                # 4. drift detection: انهار حديثاً
                 cur.execute("""
                     UPDATE ai_laws SET active = FALSE
                     WHERE active = TRUE
@@ -2029,23 +2035,25 @@ def auto_manage_laws():
                       AND accuracy_recent < 45
                 """)
                 drifted = cur.rowcount
+
+                # 5. تعزيز القوانين الممتازة
                 cur.execute("""
                     UPDATE ai_laws
                     SET confidence = LEAST(97, confidence * 1.04)
                     WHERE active = TRUE
-                      AND times_used >= 8
-                      AND accuracy > 75
+                      AND times_used >= 30
+                      AND accuracy > 70
                 """)
                 boosted = cur.rowcount
+
                 conn.commit()
                 prune_weak_patterns()
-                total_disabled = d0 + d1 + d2 + d3 + drifted
-                if total_disabled or boosted:
+                total = d_noise + d_mid + d_core + drifted
+                if total or boosted:
                     load_laws(force=True)
                     logger.info(
-                        f"AutoLaw: killed={total_disabled} "
-                        f"(ruthless={d0}, fast={d1}, mid={d2}, slow={d3}, drift={drifted}), "
-                        f"boosted={boosted}"
+                        f"QuantFilter: noise={d_noise} mid={d_mid} core={d_core} "
+                        f"drift={drifted} boosted={boosted}"
                     )
     except Exception as e:
         logger.warning(f"auto_manage_laws: {e}")
@@ -4073,14 +4081,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 acc_txt = ""
             _uid2 = query.from_user.id if query.from_user else 0
             if _uid2 == ADMIN_ID:
-                buttons = [[InlineKeyboardButton("🟢 جولة متصلة",  callback_data="new_connected"),
-                             InlineKeyboardButton("🔴 جولة منقطعة", callback_data="new_disconnected")],
+                buttons = [[InlineKeyboardButton("🟢 جولة متصلة",  callback_data="new_round_connected"),
+                             InlineKeyboardButton("🔴 جولة منقطعة", callback_data="new_round_disconnected")],
                             [InlineKeyboardButton("📊 إحصاءات",    callback_data="stats")]]
                 if saved_id:
                     buttons.append([InlineKeyboardButton(f"🗑️ حذف هذه الجولة (#{saved_id})", callback_data=f"del_confirm_{saved_id}")])
             else:
-                buttons = [[InlineKeyboardButton("🟢 جولة متصلة",  callback_data="new_connected"),
-                             InlineKeyboardButton("🔴 جولة منقطعة", callback_data="new_disconnected")]]
+                buttons = [[InlineKeyboardButton("🟢 جولة متصلة",  callback_data="new_round_connected"),
+                             InlineKeyboardButton("🔴 جولة منقطعة", callback_data="new_round_disconnected")]]
                 if saved_id:
                     buttons.append([InlineKeyboardButton(f"🗑️ حذف هذه الجولة (#{saved_id})", callback_data=f"del_confirm_{saved_id}")])
             save_note = ""
@@ -4129,7 +4137,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     + (f"{'━'*20}\n📡 أفضل محركات:\n{sig_txt}" if sig_txt else "")
                     + f"{'━'*20}"
                 )
-                kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎴 جولة جديدة", callback_data="choose_suit"), InlineKeyboardButton("🔄 تحديث", callback_data="stats")]])
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("🟢 متصلة", callback_data="new_connected"), InlineKeyboardButton("🔴 منقطة", callback_data="new_disconnected"), InlineKeyboardButton("🔄 تحديث", callback_data="stats")]])
                 await safe_edit(query, msg_text, reply_markup=kb)
             except Exception as e:
                 await safe_edit(query, f"❌ خطأ: <code>{e}</code>")
@@ -4803,12 +4811,14 @@ def format_prediction(pred: int, conf: int, reason: str,
     )
 
 def result_keyboard(pred: int, b_num: str, user_id: int = 0) -> InlineKeyboardMarkup:
-    """للأدمن: أزرار الحفظ فقط. للمشترك العادي: أزرار الحفظ فقط."""
+    """للأدمن: لوحة كاملة. للمشترك العادي: جولة جديدة فقط."""
     if user_id == ADMIN_ID:
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ الراعي 🔴", callback_data=f"save_0_{b_num}"),
              InlineKeyboardButton("✅ الثور 🔵",  callback_data=f"save_1_{b_num}"),
              InlineKeyboardButton("✅ تعادل ⚪",  callback_data=f"save_2_{b_num}")],
+            [InlineKeyboardButton("🟢 جولة متصلة",   callback_data="new_connected"),
+             InlineKeyboardButton("🔴 جولة منقطعة", callback_data="new_disconnected")],
             [InlineKeyboardButton("📊 إحصاءات", callback_data="stats")],
         ])
     else:
@@ -4816,6 +4826,8 @@ def result_keyboard(pred: int, b_num: str, user_id: int = 0) -> InlineKeyboardMa
             [InlineKeyboardButton("✅ الراعي 🔴", callback_data=f"save_0_{b_num}"),
              InlineKeyboardButton("✅ الثور 🔵",  callback_data=f"save_1_{b_num}"),
              InlineKeyboardButton("✅ تعادل ⚪",  callback_data=f"save_2_{b_num}")],
+            [InlineKeyboardButton("🟢 جولة متصلة",   callback_data="new_connected"),
+             InlineKeyboardButton("🔴 جولة منقطعة", callback_data="new_disconnected")],
         ])
 
 def _safe(v, fmt=None) -> str:
