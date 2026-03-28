@@ -1,23 +1,30 @@
 name: 🚨 Emergency Database Rescue
 
 on:
-  workflow_dispatch: # لتشغيل الكود يدوياً بضغطة زر
+  workflow_dispatch:
 
 jobs:
   rescue_data:
     runs-on: ubuntu-latest
+
     steps:
       - name: Install PostgreSQL client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
 
       - name: Transfer Data Safely
         env:
-          OLD_URL: ${{ postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway }}
-          NEW_URL: ${{ postgresql://postgres:qQbijXowxWsQgXQtyjcXdLkUtJSWWyBD@gondola.proxy.rlwy.net:21389/railway }}
+          OLD_URL: ${{ secrets.OLD_DB_URL }}
+          NEW_URL: ${{ secrets.NEW_DB_URL }}
         run: |
-          echo "🔄 جاري الاتصال بالحساب القديم وسحب الجداول..."
-          
-          # هذا الأمر السحري ينسخ كل شيء (الجداول، البيانات، الهيكلة) ويصبها في الحساب الجديد
-          
-          pg_dump --clean --if-exists --no-owner --no-privileges "$OLD_URL" | psql "$NEW_URL"
-          echo "🎉 مبروك! تمت عملية الإنقاذ بنجاح. بياناتك الآن آمنة في الحساب الجديد."
+          echo "🔄 Starting database migration..."
+
+          if [ -z "$OLD_URL" ] || [ -z "$NEW_URL" ]; then
+            echo "❌ Missing database URLs!"
+            exit 1
+          fi
+
+          pg_dump --verbose --clean --if-exists --no-owner --no-privileges "$OLD_URL" | psql "$NEW_URL"
+
+          echo "✅ Migration completed!"
