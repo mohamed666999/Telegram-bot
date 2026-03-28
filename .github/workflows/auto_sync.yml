@@ -1,78 +1,124 @@
-name: Smart DB Rotation (3 Projects)
+name: Auto Create Projects & Migrate
 
 on:
-  schedule:
-    - cron: '0 */6 * * *'   # كل 6 ساعات
-  workflow_dispatch:
+  workflow_dispatch:   # تشغيل يدوي (يمكنك إضافة جدولة لاحقًا)
 
 jobs:
-  sync:
+  full_migration:
     runs-on: ubuntu-latest
     steps:
-      - name: Install PostgreSQL client
+      - name: Install tools
         run: sudo apt-get update && sudo apt-get install -y postgresql-client curl jq
 
-      - name: Rotate and sync
+      - name: Run full migration
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          START_DATE: "2025-03-01"   # غيّر هذا إلى تاريخ بدء المشروع الأول
+          OLD_TOKEN: ${{ secrets.OLD_RAILWAY_TOKEN }}
+          NEW_TOKEN: ${{ secrets.NEW_RAILWAY_TOKEN }}
         run: |
-          # حساب اليوم في الدورة (كل 45 يوم = 3 حسابات × 15 يوم)
-          NOW=$(date +%s)
-          START=$(date -d "$START_DATE" +%s)
-          DAYS=$(( (NOW - START) / 86400 ))
-          CYCLE_DAY=$(( DAYS % 45 ))
+          # دالة لتنفيذ استعلام GraphQL
+          graphql() {
+            local token=$1
+            local query=$2
+            curl -s -X POST https://backboard.railway.com/graphql/v2 \
+              -H "Authorization: Bearer $token" \
+              -H "Content-Type: application/json" \
+              -d "{\"query\":\"$query\"}"
+          }
 
-          echo "📅 اليوم $CYCLE_DAY من الدورة"
+          # دالة لإنشاء مشروع جديد
+          create_project() {
+            local token=$1
+            local name=$2
+            local query="mutation { projectCreate(input: { name: \"$name\" }) { project { id name } } }"
+            graphql "$token" "$query" | jq -r '.data.projectCreate.project.id'
+          }
 
-          # تحديد المصدر والهدف حسب اليوم
-          if [ "$CYCLE_DAY" -eq 14 ]; then
-            SOURCE_ID="${{ secrets.PROJECT1_ID }}"
-            TARGET_ID="${{ secrets.PROJECT2_ID }}"
-            echo "🔁 اليوم 14: نقل من المشروع 1 إلى 2"
-          elif [ "$CYCLE_DAY" -eq 29 ]; then
-            SOURCE_ID="${{ secrets.PROJECT2_ID }}"
-            TARGET_ID="${{ secrets.PROJECT3_ID }}"
-            echo "🔁 اليوم 29: نقل من المشروع 2 إلى 3"
-          elif [ "$CYCLE_DAY" -eq 44 ]; then
-            SOURCE_ID="${{ secrets.PROJECT3_ID }}"
-            TARGET_ID="${{ secrets.PROJECT1_ID }}"
-            echo "🔁 اليوم 44: نقل من المشروع 3 إلى 1"
-          else
-            echo "✅ لا حاجة للمزامنة اليوم"
-            exit 0
-          fi
+          # دالة لإنشاء خدمة PostgreSQL داخل مشروع
+          create_postgres_service() {
+            local token=$1
+            local project_id=$2
+            local query="mutation { serviceCreate(input: { projectId: \"$project_id\", name: \"postgres\", plugin: \"postgresql\" }) { service { id } } }"
+            graphql "$token" "$query" | jq -r '.data.serviceCreate.service.id'
+          }
 
-          # الحصول على رابط قاعدة البيانات من المشروع المصدر
-          echo "🔍 جلب رابط المصدر..."
-          SOURCE_URL=$(get_db_url "$SOURCE_ID")
-          echo "🔍 جلب رابط الهدف..."
-          TARGET_URL=$(get_db_url "$TARGET_ID")
+          # دالة لجلب رابط قاعدة البيانات بعد إنشائها (تنتظر حتى تصبح جاهزة)
+          get_db_url() {
+            local token=$1
+            local project_id=$2
+            local max_attempts=20
+            local attempt=1
+            while [ $attempt -le $max_attempts ]; do
+              service_id=$(graphql "$token" "query { project(id: \"$project_id\") { services { edges { node { id plugin } } } } }" | jq -r '.data.project.services.edges[] | select(.node.plugin=="postgresql") | .node.id' | head -1)
+              if [ -n "$service_id" ]; then
+                url=$(graphql "$token" "query { service(id: \"$service_id\") { variables { edges { node { name value } } } } }" | jq -r '.data.service.variables.edges[] | select(.node.name=="DATABASE_PUBLIC_URL") | .node.value')
+                if [ -n "$url" ] && [ "$url" != "null" ]; then
+                  echo "$url"
+                  return 0
+                fi
+              fi
+              echo "⏳ انتظار جاهزية قاعدة البيانات... ($attempt/$max_attempts)"
+              sleep 5
+              attempt=$((attempt+1))
+            done
+            echo "❌ فشل الحصول على رابط قاعدة البيانات بعد $max_attempts محاولة"
+            exit 1
+          }
 
-          echo "📤 بدء نقل البيانات..."
-          pg_dump --clean --if-exists --no-owner --no-privileges "$SOURCE_URL" > dump.sql
-          psql "$TARGET_URL" < dump.sql
-          echo "✅ تم نقل البيانات بنجاح"
+          # الحصول على معرفات المشاريع القديمة (إذا كنت تريد نقلها كلها)
+          # لكننا سنستخدم المعرّفات الثابتة التي أعطيتها سابقًا.
+          # بما أنك تريد أتمتة كاملة، سنقوم بسحب المشاريع القديمة تلقائيًا.
+          echo "🔍 جلب جميع المشاريع القديمة..."
+          OLD_PROJECTS=$(graphql "$OLD_TOKEN" "query { me { workspaces { edges { node { projects { edges { node { id name } } } } } } }" | jq -r '.data.me.workspaces.edges[0].node.projects.edges[].node.id')
+          OLD_IDS=()
+          while IFS= read -r id; do
+            OLD_IDS+=("$id")
+          done <<< "$OLD_PROJECTS"
+          echo "✅ تم العثور على ${#OLD_IDS[@]} مشروع قديم."
 
-# دالة مساعدة لجلب رابط PostgreSQL من مشروع معين
-get_db_url() {
-  local project_id=$1
-  # استعلم عن أول خدمة PostgreSQL في المشروع
-  service_id=$(curl -s -H "Authorization: Bearer $RAILWAY_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "{\"query\":\"query { project(id: \\\"$project_id\\\") { services { edges { node { id plugin } } } } }\"}" \
-    https://backboard.railway.com/graphql/v2 | jq -r '.data.project.services.edges[] | select(.node.plugin=="postgresql") | .node.id' | head -1)
+          # إنشاء مشاريع جديدة بنفس العدد
+          echo "🚀 إنشاء مشاريع جديدة..."
+          NEW_IDS=()
+          for i in "${!OLD_IDS[@]}"; do
+            # اسم المشروع الجديد: project_new_$i_$(date +%s)
+            PROJ_NAME="migrated_${i}_$(date +%s)"
+            NEW_ID=$(create_project "$NEW_TOKEN" "$PROJ_NAME")
+            NEW_IDS+=("$NEW_ID")
+            echo "✅ تم إنشاء مشروع جديد: $PROJ_NAME (ID: $NEW_ID)"
+            
+            # إنشاء PostgreSQL داخل المشروع الجديد
+            echo "📦 إنشاء قاعدة بيانات PostgreSQL في المشروع الجديد..."
+            create_postgres_service "$NEW_TOKEN" "$NEW_ID"
+            sleep 2
+          done
 
-  if [ -z "$service_id" ]; then
-    echo "❌ لم يتم العثور على PostgreSQL في المشروع $project_id"
-    exit 1
-  fi
+          # انتظار جاهزية جميع قواعد البيانات الجديدة
+          echo "⏳ انتظار جاهزية قواعد البيانات الجديدة..."
+          NEW_URLS=()
+          for id in "${NEW_IDS[@]}"; do
+            url=$(get_db_url "$NEW_TOKEN" "$id")
+            NEW_URLS+=("$url")
+            echo "✅ رابط قاعدة البيانات الجديدة: $url"
+          done
 
-  # احصل على متغير DATABASE_PUBLIC_URL لهذه الخدمة
-  url=$(curl -s -H "Authorization: Bearer $RAILWAY_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "{\"query\":\"query { service(id: \\\"$service_id\\\") { variables { edges { node { name value } } } } }\"}" \
-    https://backboard.railway.com/graphql/v2 | jq -r '.data.service.variables.edges[] | select(.node.name=="DATABASE_PUBLIC_URL") | .node.value')
+          # جلب روابط قواعد البيانات القديمة
+          echo "🔍 جلب روابط قواعد البيانات القديمة..."
+          OLD_URLS=()
+          for id in "${OLD_IDS[@]}"; do
+            url=$(get_db_url "$OLD_TOKEN" "$id")
+            OLD_URLS+=("$url")
+            echo "✅ رابط قاعدة البيانات القديمة: $url"
+          done
 
-  echo "$url"
-}
+          # نقل البيانات
+          echo "🔄 بدء نقل البيانات..."
+          for i in "${!OLD_URLS[@]}"; do
+            echo "📤 نقل المشروع ${i} ..."
+            pg_dump --clean --if-exists --no-owner --no-privileges "${OLD_URLS[$i]}" > dump_$i.sql
+            psql "${NEW_URLS[$i]}" < dump_$i.sql
+            echo "✅ تم نقل المشروع ${i}"
+          done
+
+          echo "🎉 اكتمل النقل! المشاريع الجديدة:"
+          for i in "${!NEW_IDS[@]}"; do
+            echo "- مشروع ID: ${NEW_IDS[$i]} -> رابط: ${NEW_URLS[$i]}"
+          done
