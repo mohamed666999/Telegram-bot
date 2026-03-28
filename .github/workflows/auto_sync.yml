@@ -1,4 +1,4 @@
-name: Auto Migrate All Databases to New Account
+name: نقل البيانات إلى حساب Railway الجديد
 
 on:
   workflow_dispatch:
@@ -7,97 +7,86 @@ jobs:
   migrate:
     runs-on: ubuntu-latest
     steps:
-      - name: Install PostgreSQL client
+      - name: تثبيت الأدوات
         run: sudo apt-get update && sudo apt-get install -y postgresql-client curl jq
 
-      - name: Run migration
+      - name: تنفيذ النقل
         env:
-          # التوكنات ومعرفات المشاريع (مضمنة مباشرة – المستودع خاص)
-          OLD_TOKEN: "3cbaa6a7-b05c-4bc6-9201-963d7a5d69de"
-          NEW_TOKEN: "7a636198-3023-4804-92e7-a111acf5f22e"
-          OLD_PROJ1: "8d780eb4-dde8-41cf-bfc1-4a4030d209ca"
-          OLD_PROJ2: "a10557f9-6021-46c5-834b-d555dccc9410"
-          OLD_PROJ3: "3b788d03-2c44-4bcf-8923-8235fd3f30e0"
+          TOKEN_OLD: "3cbaa6a7-b05c-4bc6-9201-963d7a5d69de"
+          TOKEN_NEW: "7a636198-3023-4804-92e7-a111acf5f22e"
+          PROJ1_OLD: "8d780eb4-dde8-41cf-bfc1-4a4030d209ca"
+          PROJ2_OLD: "a10557f9-6021-46c5-834b-d555dccc9410"
+          PROJ3_OLD: "3b788d03-2c44-4bcf-8923-8235fd3f30e0"
         run: |
           set -e
 
+          # دالة لاستدعاء GraphQL
           graphql() {
-            local token=$1
-            local query=$2
             curl -s -X POST https://backboard.railway.com/graphql/v2 \
-              -H "Authorization: Bearer $token" \
+              -H "Authorization: Bearer $1" \
               -H "Content-Type: application/json" \
-              --data-binary "$(jq -n --arg q "$query" '{query: $q}')"
+              -d "{\"query\": \"$2\"}"
           }
 
-          create_project() {
-            local token=$1
-            local name=$2
-            local query="mutation { projectCreate(input: { name: \"$name\" }) { project { id name } } }"
-            graphql "$token" "$query" | jq -r '.data.projectCreate.project.id'
-          }
-
-          create_postgres_service() {
-            local token=$1
-            local project_id=$2
-            local query="mutation { serviceCreate(input: { projectId: \"$project_id\", name: \"postgres\", plugin: \"postgresql\" }) { service { id } } }"
-            graphql "$token" "$query" | jq -r '.data.serviceCreate.service.id'
-          }
-
+          # الحصول على رابط قاعدة البيانات من معرف المشروع
           get_db_url() {
-            local token=$1
-            local project_id=$2
-            local max_attempts=20
-            local attempt=1
-            while [ $attempt -le $max_attempts ]; do
-              local query="query { project(id: \"$project_id\") { services { edges { node { id plugin } } } } }"
-              local service_id
-              service_id=$(graphql "$token" "$query" | jq -r '.data.project.services.edges[] | select(.node.plugin=="postgresql") | .node.id' | head -1)
-              if [ -n "$service_id" ]; then
-                local url_query="query { service(id: \"$service_id\") { variables { edges { node { name value } } } } }"
-                local url
-                url=$(graphql "$token" "$url_query" | jq -r '.data.service.variables.edges[] | select(.node.name=="DATABASE_PUBLIC_URL") | .node.value')
-                if [ -n "$url" ] && [ "$url" != "null" ]; then
-                  echo "$url"
-                  return 0
-                fi
-              fi
-              echo "⏳ انتظار جاهزية قاعدة البيانات... ($attempt/$max_attempts)"
-              sleep 5
-              attempt=$((attempt+1))
-            done
-            echo "❌ فشل الحصول على رابط قاعدة البيانات بعد $max_attempts محاولة"
-            exit 1
+            local token=$1 proj=$2
+            local svc_id=$(graphql "$token" "query { project(id: \"$proj\") { services { edges { node { id plugin } } } } }" | jq -r '.data.project.services.edges[] | select(.node.plugin=="postgresql") | .node.id' | head -1)
+            if [ -z "$svc_id" ]; then
+              echo "❌ لم أجد PostgreSQL في المشروع $proj" >&2
+              exit 1
+            fi
+            graphql "$token" "query { service(id: \"$svc_id\") { variables { edges { node { name value } } } } }" | jq -r '.data.service.variables.edges[] | select(.node.name=="DATABASE_PUBLIC_URL") | .node.value'
+          }
+
+          # إنشاء مشروع جديد في الحساب الجديد
+          create_project() {
+            local token=$1 name=$2
+            graphql "$token" "mutation { projectCreate(input: { name: \"$name\" }) { project { id } } }" | jq -r '.data.projectCreate.project.id'
+          }
+
+          # إضافة PostgreSQL إلى مشروع
+          add_postgres() {
+            local token=$1 proj=$2
+            graphql "$token" "mutation { serviceCreate(input: { projectId: \"$proj\", name: \"postgres\", plugin: \"postgresql\" }) { service { id } } }" | jq -r '.data.serviceCreate.service.id'
           }
 
           echo "🔍 جلب روابط قواعد البيانات القديمة..."
-          OLD_URL1=$(get_db_url "$OLD_TOKEN" "$OLD_PROJ1")
-          OLD_URL2=$(get_db_url "$OLD_TOKEN" "$OLD_PROJ2")
-          OLD_URL3=$(get_db_url "$OLD_TOKEN" "$OLD_PROJ3")
-
-          echo "✅ رابط 1: $OLD_URL1"
-          echo "✅ رابط 2: $OLD_URL2"
-          echo "✅ رابط 3: $OLD_URL3"
+          OLD_URL1=$(get_db_url "$TOKEN_OLD" "$PROJ1_OLD")
+          OLD_URL2=$(get_db_url "$TOKEN_OLD" "$PROJ2_OLD")
+          OLD_URL3=$(get_db_url "$TOKEN_OLD" "$PROJ3_OLD")
+          echo "✅ تم الحصول على الروابط القديمة"
 
           echo "🚀 إنشاء مشاريع جديدة في الحساب الثاني..."
           NEW_IDS=()
           for i in 1 2 3; do
-            PROJ_NAME="migrated_${i}_$(date +%s)"
-            NEW_ID=$(create_project "$NEW_TOKEN" "$PROJ_NAME")
-            NEW_IDS+=("$NEW_ID")
-            echo "✅ مشروع $i: $PROJ_NAME (ID: $NEW_ID)"
-
+            NAME="new_proj_${i}_$(date +%s)"
+            ID=$(create_project "$TOKEN_NEW" "$NAME")
+            NEW_IDS+=("$ID")
+            echo "✅ مشروع $i: $NAME (ID: $ID)"
             echo "📦 إضافة PostgreSQL إلى المشروع $i..."
-            create_postgres_service "$NEW_TOKEN" "$NEW_ID"
+            add_postgres "$TOKEN_NEW" "$ID"
             sleep 2
           done
 
           echo "⏳ انتظار جاهزية قواعد البيانات الجديدة..."
           NEW_URLS=()
           for id in "${NEW_IDS[@]}"; do
-            url=$(get_db_url "$NEW_TOKEN" "$id")
-            NEW_URLS+=("$url")
-            echo "✅ رابط قاعدة البيانات الجديدة: $url"
+            # انتظر حتى تظهر المتغيرات
+            for attempt in {1..30}; do
+              URL=$(get_db_url "$TOKEN_NEW" "$id" 2>/dev/null || true)
+              if [ -n "$URL" ] && [ "$URL" != "null" ]; then
+                NEW_URLS+=("$URL")
+                echo "✅ رابط قاعدة البيانات الجديدة: $URL"
+                break
+              fi
+              echo "⏳ المحاولة $attempt ..."
+              sleep 3
+            done
+            if [ ${#NEW_URLS[@]} -lt ${#NEW_IDS[@]} ]; then
+              echo "❌ فشل الحصول على رابط قاعدة البيانات للمشروع $id"
+              exit 1
+            fi
           done
 
           echo "🔄 بدء نقل البيانات..."
@@ -113,7 +102,8 @@ jobs:
           psql "${NEW_URLS[2]}" < dump3.sql
           echo "✅ تم نقل المشروع 3"
 
-          echo "🎉 اكتمل النقل! المشاريع الجديدة:"
-          for i in "${!NEW_IDS[@]}"; do
-            echo "- مشروع ${i}: ID=${NEW_IDS[$i]} -> رابط: ${NEW_URLS[$i]}"
+          echo "🎉 اكتمل النقل بنجاح!"
+          echo "روابط قواعد البيانات الجديدة:"
+          for i in "${!NEW_URLS[@]}"; do
+            echo "  قاعدة $((i+1)): ${NEW_URLS[$i]}"
           done
