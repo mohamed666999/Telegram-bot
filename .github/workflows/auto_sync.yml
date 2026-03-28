@@ -12,8 +12,8 @@ jobs:
 
       - name: Transfer Data Safely
         env:
-          OLD_URL: ${{ secrets.OLD_DB_URL }}
-          NEW_URL: ${{ secrets.NEW_DB_URL }}
+          OLD_URL: ${{ postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway }}
+          NEW_URL: ${{ postgresql://postgres:qQbijXowxWsQgXQtyjcXdLkUtJSWWyBD@gondola.proxy.rlwy.net:21389/railway }}
         run: |
           echo "🔄 جاري الاتصال بالحساب القديم وسحب الجداول..."
           
