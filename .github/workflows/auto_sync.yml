@@ -1,104 +1,78 @@
-name: Auto Sync All Railway PostgreSQL
+name: Smart DB Rotation (3 Projects)
 
 on:
   schedule:
-    - cron: '0 */12 * * *'      # كل 12 ساعة
+    - cron: '0 */6 * * *'   # كل 6 ساعات
   workflow_dispatch:
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Install tools
+      - name: Install PostgreSQL client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client curl jq
 
-      - name: Get workspace ID and all PostgreSQL databases
+      - name: Rotate and sync
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          START_DATE: "2025-03-01"   # غيّر هذا إلى تاريخ بدء المشروع الأول
         run: |
-          # جلب workspaceId من أول مساحة عمل
-          WORKSPACE_ID=$(curl -s -H "Authorization: Bearer $RAILWAY_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"query":"{ me { workspaces { edges { node { id } } } } }"}' \
-            https://backboard.railway.com/graphql/v2 | jq -r '.data.me.workspaces.edges[0].node.id')
-          
-          echo "Workspace ID: $WORKSPACE_ID"
-          
-          # جلب جميع المشاريع والخدمات
-          QUERY='{
-            "query": "query($workspaceId: String!) { workspace(id: $workspaceId) { projects { edges { node { id name services { edges { node { id name image plugin } } } } } } }",
-            "variables": { "workspaceId": "'$WORKSPACE_ID'" }
-          }'
-          
-          curl -s -H "Authorization: Bearer $RAILWAY_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "$QUERY" \
-            https://backboard.railway.com/graphql/v2 > projects.json
-          
-          # تصفية PostgreSQL وجلب روابطها
-          python3 << EOF
-          import json, subprocess, os
-          
-          with open('projects.json') as f:
-              data = json.load(f)
-          
-          dbs = []
-          projects = data.get('data', {}).get('workspace', {}).get('projects', {}).get('edges', [])
-          
-          for proj in projects:
-              project = proj.get('node', {})
-              project_name = project.get('name')
-              services = project.get('services', {}).get('edges', [])
-              
-              for svc in services:
-                  service = svc.get('node', {})
-                  if service.get('plugin') == 'postgresql' or 'postgres' in service.get('image', '').lower():
-                      svc_id = service.get('id')
-                      query2 = f'{{"query":"query {{ service(id: \\\"{svc_id}\\\") {{ variables {{ edges {{ node {{ name value }} }} }} }} }}"}}'
-                      result = subprocess.run(
-                          ['curl', '-s', '-H', f'Authorization: Bearer {os.environ["RAILWAY_TOKEN"]}',
-                           '-H', 'Content-Type: application/json',
-                           '-d', query2, 'https://backboard.railway.com/graphql/v2'],
-                          capture_output=True, text=True
-                      )
-                      svc_data = json.loads(result.stdout)
-                      vars_edges = svc_data.get('data', {}).get('service', {}).get('variables', {}).get('edges', [])
-                      url = None
-                      for var_edge in vars_edges:
-                          var = var_edge.get('node', {})
-                          if var.get('name') == 'DATABASE_PUBLIC_URL':
-                              url = var.get('value')
-                              break
-                      if url:
-                          dbs.append({
-                              'project_name': project_name,
-                              'service_name': service.get('name'),
-                              'url': url
-                          })
-          
-          with open('postgres_dbs.json', 'w') as f:
-              json.dump(dbs, f, indent=2)
-          
-          print(f"Found {len(dbs)} PostgreSQL databases")
-          EOF
+          # حساب اليوم في الدورة (كل 45 يوم = 3 حسابات × 15 يوم)
+          NOW=$(date +%s)
+          START=$(date -d "$START_DATE" +%s)
+          DAYS=$(( (NOW - START) / 86400 ))
+          CYCLE_DAY=$(( DAYS % 45 ))
 
-      - name: Sync databases (first to second)
-        run: |
-          python3 << EOF
-          import json, subprocess
-          
-          with open('postgres_dbs.json') as f:
-              dbs = json.load(f)
-          
-          if len(dbs) < 2:
-              print("Not enough databases to sync.")
-              exit(0)
-          
-          src = dbs[0]
-          tgt = dbs[1]
-          
-          print(f"Syncing from {src['project_name']}/{src['service_name']} to {tgt['project_name']}/{tgt['service_name']}")
-          subprocess.run(f"pg_dump --clean --if-exists --no-owner --no-privileges '{src['url']}' > dump.sql", shell=True, check=True)
-          subprocess.run(f"psql '{tgt['url']}' < dump.sql", shell=True, check=True)
-          print("Sync completed.")
-          EOF
+          echo "📅 اليوم $CYCLE_DAY من الدورة"
+
+          # تحديد المصدر والهدف حسب اليوم
+          if [ "$CYCLE_DAY" -eq 14 ]; then
+            SOURCE_ID="${{ secrets.PROJECT1_ID }}"
+            TARGET_ID="${{ secrets.PROJECT2_ID }}"
+            echo "🔁 اليوم 14: نقل من المشروع 1 إلى 2"
+          elif [ "$CYCLE_DAY" -eq 29 ]; then
+            SOURCE_ID="${{ secrets.PROJECT2_ID }}"
+            TARGET_ID="${{ secrets.PROJECT3_ID }}"
+            echo "🔁 اليوم 29: نقل من المشروع 2 إلى 3"
+          elif [ "$CYCLE_DAY" -eq 44 ]; then
+            SOURCE_ID="${{ secrets.PROJECT3_ID }}"
+            TARGET_ID="${{ secrets.PROJECT1_ID }}"
+            echo "🔁 اليوم 44: نقل من المشروع 3 إلى 1"
+          else
+            echo "✅ لا حاجة للمزامنة اليوم"
+            exit 0
+          fi
+
+          # الحصول على رابط قاعدة البيانات من المشروع المصدر
+          echo "🔍 جلب رابط المصدر..."
+          SOURCE_URL=$(get_db_url "$SOURCE_ID")
+          echo "🔍 جلب رابط الهدف..."
+          TARGET_URL=$(get_db_url "$TARGET_ID")
+
+          echo "📤 بدء نقل البيانات..."
+          pg_dump --clean --if-exists --no-owner --no-privileges "$SOURCE_URL" > dump.sql
+          psql "$TARGET_URL" < dump.sql
+          echo "✅ تم نقل البيانات بنجاح"
+
+# دالة مساعدة لجلب رابط PostgreSQL من مشروع معين
+get_db_url() {
+  local project_id=$1
+  # استعلم عن أول خدمة PostgreSQL في المشروع
+  service_id=$(curl -s -H "Authorization: Bearer $RAILWAY_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\"query\":\"query { project(id: \\\"$project_id\\\") { services { edges { node { id plugin } } } } }\"}" \
+    https://backboard.railway.com/graphql/v2 | jq -r '.data.project.services.edges[] | select(.node.plugin=="postgresql") | .node.id' | head -1)
+
+  if [ -z "$service_id" ]; then
+    echo "❌ لم يتم العثور على PostgreSQL في المشروع $project_id"
+    exit 1
+  fi
+
+  # احصل على متغير DATABASE_PUBLIC_URL لهذه الخدمة
+  url=$(curl -s -H "Authorization: Bearer $RAILWAY_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\"query\":\"query { service(id: \\\"$service_id\\\") { variables { edges { node { name value } } } } }\"}" \
+    https://backboard.railway.com/graphql/v2 | jq -r '.data.service.variables.edges[] | select(.node.name=="DATABASE_PUBLIC_URL") | .node.value')
+
+  echo "$url"
+}
