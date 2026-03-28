@@ -18,6 +18,6 @@ jobs:
           echo "🔄 جاري الاتصال بالحساب القديم وسحب الجداول..."
           
           # هذا الأمر السحري ينسخ كل شيء (الجداول، البيانات، الهيكلة) ويصبها في الحساب الجديد
-          pg_dump --clean --if-exists --no-owner --no-privileges "$OLD_URL" | psql "$NEW_URL"
           
+          pg_dump --clean --if-exists --no-owner --no-privileges "$OLD_URL" | psql "$NEW_URL"
           echo "🎉 مبروك! تمت عملية الإنقاذ بنجاح. بياناتك الآن آمنة في الحساب الجديد."
