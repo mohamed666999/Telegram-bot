@@ -1,4 +1,4 @@
-name: نقل البيانات إلى حساب Railway الجديد
+name: Migrate to New Account (Fixed)
 
 on:
   workflow_dispatch:
@@ -7,10 +7,10 @@ jobs:
   migrate:
     runs-on: ubuntu-latest
     steps:
-      - name: تثبيت الأدوات
+      - name: Install tools
         run: sudo apt-get update && sudo apt-get install -y postgresql-client curl jq
 
-      - name: تنفيذ النقل
+      - name: Run migration
         env:
           TOKEN_OLD: "3cbaa6a7-b05c-4bc6-9201-963d7a5d69de"
           TOKEN_NEW: "7a636198-3023-4804-92e7-a111acf5f22e"
@@ -20,71 +20,102 @@ jobs:
         run: |
           set -e
 
-          # دالة لاستدعاء GraphQL
+          # دالة لتنفيذ استعلام GraphQL وعرض النتيجة
           graphql() {
+            local token=$1
+            local query=$2
             curl -s -X POST https://backboard.railway.com/graphql/v2 \
-              -H "Authorization: Bearer $1" \
+              -H "Authorization: Bearer $token" \
               -H "Content-Type: application/json" \
-              -d "{\"query\": \"$2\"}"
+              -d "{\"query\": \"$query\"}"
           }
 
-          # الحصول على رابط قاعدة البيانات من معرف المشروع
+          # دالة للحصول على رابط قاعدة البيانات من معرف المشروع
           get_db_url() {
-            local token=$1 proj=$2
-            local svc_id=$(graphql "$token" "query { project(id: \"$proj\") { services { edges { node { id plugin } } } } }" | jq -r '.data.project.services.edges[] | select(.node.plugin=="postgresql") | .node.id' | head -1)
-            if [ -z "$svc_id" ]; then
-              echo "❌ لم أجد PostgreSQL في المشروع $proj" >&2
-              exit 1
+            local token=$1
+            local proj_id=$2
+            echo "🔍 جلب خدمات المشروع $proj_id ..."
+            local resp=$(graphql "$token" "query { project(id: \"$proj_id\") { services { edges { node { id plugin } } } } }")
+            echo "$resp" | jq .
+            local svc_id=$(echo "$resp" | jq -r '.data.project.services.edges[] | select(.node.plugin=="postgresql") | .node.id' | head -1)
+            if [ -z "$svc_id" ] || [ "$svc_id" = "null" ]; then
+              echo "❌ لم أجد خدمة PostgreSQL في المشروع $proj_id" >&2
+              return 1
             fi
-            graphql "$token" "query { service(id: \"$svc_id\") { variables { edges { node { name value } } } } }" | jq -r '.data.service.variables.edges[] | select(.node.name=="DATABASE_PUBLIC_URL") | .node.value'
+            echo "✅ تم العثور على خدمة PostgreSQL: $svc_id"
+            local url_resp=$(graphql "$token" "query { service(id: \"$svc_id\") { variables { edges { node { name value } } } } }")
+            local url=$(echo "$url_resp" | jq -r '.data.service.variables.edges[] | select(.node.name=="DATABASE_PUBLIC_URL") | .node.value')
+            if [ -z "$url" ] || [ "$url" = "null" ]; then
+              echo "❌ لم أجد DATABASE_PUBLIC_URL للخدمة $svc_id" >&2
+              return 1
+            fi
+            echo "$url"
           }
 
-          # إنشاء مشروع جديد في الحساب الجديد
+          # دالة لإنشاء مشروع جديد
           create_project() {
-            local token=$1 name=$2
-            graphql "$token" "mutation { projectCreate(input: { name: \"$name\" }) { project { id } } }" | jq -r '.data.projectCreate.project.id'
+            local token=$1
+            local name=$2
+            local resp=$(graphql "$token" "mutation { projectCreate(input: { name: \"$name\" }) { project { id } } }")
+            local id=$(echo "$resp" | jq -r '.data.projectCreate.project.id')
+            if [ -z "$id" ] || [ "$id" = "null" ]; then
+              echo "❌ فشل إنشاء المشروع $name" >&2
+              return 1
+            fi
+            echo "$id"
           }
 
-          # إضافة PostgreSQL إلى مشروع
+          # دالة لإضافة PostgreSQL إلى مشروع
           add_postgres() {
-            local token=$1 proj=$2
-            graphql "$token" "mutation { serviceCreate(input: { projectId: \"$proj\", name: \"postgres\", plugin: \"postgresql\" }) { service { id } } }" | jq -r '.data.serviceCreate.service.id'
+            local token=$1
+            local proj_id=$2
+            local resp=$(graphql "$token" "mutation { serviceCreate(input: { projectId: \"$proj_id\", name: \"postgres\", plugin: \"postgresql\" }) { service { id } } }")
+            local svc_id=$(echo "$resp" | jq -r '.data.serviceCreate.service.id')
+            if [ -z "$svc_id" ] || [ "$svc_id" = "null" ]; then
+              echo "❌ فشل إضافة PostgreSQL إلى المشروع $proj_id" >&2
+              return 1
+            fi
+            echo "$svc_id"
           }
 
-          echo "🔍 جلب روابط قواعد البيانات القديمة..."
-          OLD_URL1=$(get_db_url "$TOKEN_OLD" "$PROJ1_OLD")
-          OLD_URL2=$(get_db_url "$TOKEN_OLD" "$PROJ2_OLD")
-          OLD_URL3=$(get_db_url "$TOKEN_OLD" "$PROJ3_OLD")
-          echo "✅ تم الحصول على الروابط القديمة"
+          echo "🔍 الحصول على روابط قواعد البيانات القديمة..."
+          OLD_URL1=$(get_db_url "$TOKEN_OLD" "$PROJ1_OLD") || exit 1
+          OLD_URL2=$(get_db_url "$TOKEN_OLD" "$PROJ2_OLD") || exit 1
+          OLD_URL3=$(get_db_url "$TOKEN_OLD" "$PROJ3_OLD") || exit 1
+          echo "✅ الروابط القديمة:"
+          echo "1: $OLD_URL1"
+          echo "2: $OLD_URL2"
+          echo "3: $OLD_URL3"
 
           echo "🚀 إنشاء مشاريع جديدة في الحساب الثاني..."
           NEW_IDS=()
           for i in 1 2 3; do
             NAME="new_proj_${i}_$(date +%s)"
-            ID=$(create_project "$TOKEN_NEW" "$NAME")
+            echo "إنشاء مشروع $NAME ..."
+            ID=$(create_project "$TOKEN_NEW" "$NAME") || exit 1
             NEW_IDS+=("$ID")
             echo "✅ مشروع $i: $NAME (ID: $ID)"
-            echo "📦 إضافة PostgreSQL إلى المشروع $i..."
-            add_postgres "$TOKEN_NEW" "$ID"
-            sleep 2
+            echo "إضافة PostgreSQL إلى المشروع $i ..."
+            add_postgres "$TOKEN_NEW" "$ID" || exit 1
+            sleep 3
           done
 
           echo "⏳ انتظار جاهزية قواعد البيانات الجديدة..."
           NEW_URLS=()
           for id in "${NEW_IDS[@]}"; do
-            # انتظر حتى تظهر المتغيرات
+            echo "جلب رابط قاعدة البيانات للمشروع $id ..."
             for attempt in {1..30}; do
               URL=$(get_db_url "$TOKEN_NEW" "$id" 2>/dev/null || true)
               if [ -n "$URL" ] && [ "$URL" != "null" ]; then
                 NEW_URLS+=("$URL")
-                echo "✅ رابط قاعدة البيانات الجديدة: $URL"
+                echo "✅ رابط قاعدة البيانات: $URL"
                 break
               fi
               echo "⏳ المحاولة $attempt ..."
-              sleep 3
+              sleep 5
             done
             if [ ${#NEW_URLS[@]} -lt ${#NEW_IDS[@]} ]; then
-              echo "❌ فشل الحصول على رابط قاعدة البيانات للمشروع $id"
+              echo "❌ فشل الحصول على رابط قاعدة البيانات للمشروع $id بعد 30 محاولة"
               exit 1
             fi
           done
