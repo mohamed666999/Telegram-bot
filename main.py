@@ -46,10 +46,10 @@ ADMIN_ID     = 6033203084
 
 AI_INVOKE_URL  = "https://integrate.api.nvidia.com/v1"
 AI_API_KEY     = "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"
-AI_MODEL       = "deepseek-ai/deepseek-v3.2"
+AI_MODEL       = "meta/llama-3.1-405b-instruct"   # ✅ أقوى نموذج — Llama 405B
 AI_MODEL_SMALL = "meta/llama-3.1-8b-instruct"
 AI_TIMEOUT    = 12.0
-LEARN_TIMEOUT = 1200
+LEARN_TIMEOUT = 1800  # ✅ 30 دقيقة مهلة للتعلم العميق
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -74,9 +74,11 @@ RANK_VALUE = {k: v for k, v in zip(
     [14, 13, 12, 11, 10,  9,  8,  7,  6,  5,  4,  3,  2]
 )}
 WEIGHTS = {
-    'SD': 3.5, 'SUIT': 1.5, 'DIGIT': 2.0, 'RANK': 1.2,
-    'MOMENTUM': 2.5, 'AI': 2.5,
-    'LAW': 3.5,
+    'SD': 3.5, 'SUIT': 1.5, 'DIGIT': 0.8,  # ✅ تقليل DIGIT لكسر انحياز الأزرق
+    'RANK': 1.0,   # ✅ تقليل RANK لمنع الانحياز
+    'MOMENTUM': 3.2,  # ✅ رفع الزخم لاكتشاف التحولات
+    'AI': 2.5,
+    'LAW': 4.0,    # ✅ رفع وزن القوانين بعد تنظيفها
 }
 # ════════════════════════════════════════════════════════════════════
 # 📊 قوانين مستخلصة من تحليل 1780 جولة حقيقية (v19)
@@ -978,7 +980,9 @@ def seq_weight_from_gap(gap_sec: Optional[float], b_gap: Optional[float] = None)
 def _filter_valid_rounds(rows) -> List[Dict]:
     valid = []
     rows_list = list(rows)
+    # ✅ استثناء أول 700 جولة (تطهير التعادلات والانحياز المبكر)
     working = rows_list[700:] if len(rows_list) > 700 else rows_list
+    logger.info(f"_filter_valid_rounds: total={len(rows_list)}, after_skip700={len(working)}")
     for i, row in enumerate(working):
         b_num   = clean_digits(str(row[1] or ""))
         suit    = row[2] or ""
@@ -1307,6 +1311,17 @@ async def safe_ai_call(prompt: str, max_tokens: int = 8192, temperature: float =
 
 async def force_learn_engine(status_callback) -> Dict:
     await status_callback("📥 <b>المرحلة 1/5</b> — جلب كل الجولات...")
+
+    # ✅ تصفير القوانين القديمة قبل التعلم الجديد لكسر الانحياز
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE ai_laws SET active = FALSE")
+                deactivated = cur.rowcount
+                conn.commit()
+        logger.info(f"force_learn: deactivated {deactivated} old laws before learning")
+    except Exception as _e:
+        logger.warning(f"force_learn: could not deactivate old laws: {_e}")
 
     try:
         with db_pool.get_conn() as conn:
@@ -3657,7 +3672,64 @@ async def cmd_prune(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await msg.edit_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
 
-async def cmd_reset_laws(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_reset_bias(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تصفير الانحياز الإحصائي: يُعطّل القوانين + يُعيد حساب DIGIT weights."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ هذا الأمر للمشرف فقط.")
+        return
+    args = context.args or []
+    if 'confirm' not in args:
+        await update.message.reply_text(
+            "⚠️ هذا سيُصفّر الانحياز للأزرق!\n"
+            "سيتم:\n"
+            "  1. تعطيل كل القوانين النشطة\n"
+            "  2. إعادة ضبط أوزان DIGIT_0 في pattern_stats\n"
+            "  3. مسح الكاش الحي\n\n"
+            "للتأكيد: <code>/reset_bias confirm</code>",
+            parse_mode="HTML"
+        )
+        return
+    try:
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                # 1. تعطيل كل القوانين
+                cur.execute("UPDATE ai_laws SET active = FALSE")
+                laws_disabled = cur.rowcount
+                # 2. إعادة توازن DIGIT_0 المنحاز نحو الأزرق
+                cur.execute("""
+                    UPDATE pattern_stats
+                    SET blue_count = GREATEST(0, blue_count - (blue_count - red_count) / 2)
+                    WHERE pattern_id = 'DIGIT_0' AND blue_count > red_count + 5
+                """)
+                digit0_fixed = cur.rowcount
+                # 3. تطبيق نفس التصحيح على SD patterns المنحازة
+                cur.execute("""
+                    UPDATE pattern_stats
+                    SET blue_count = GREATEST(0, blue_count - (blue_count - red_count) / 3)
+                    WHERE pattern_id LIKE 'SD_%_0' AND blue_count > red_count + 8
+                """)
+                sd_fixed = cur.rowcount
+                conn.commit()
+        # 4. مسح الكاش الحي
+        live_cache.cache.clear()
+        global _markov_cache, _full_history_cache, _gravity_cache, _session_markov_cache
+        _markov_cache = None; _session_markov_cache = None
+        _full_history_cache = []; _gravity_cache = (None, 0.0, "")
+        load_laws(force=True)
+        await update.message.reply_text(
+            f"✅ <b>تم تصفير الانحياز!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚖️ قوانين مُعطَّلة: <b>{laws_disabled}</b>\n"
+            f"🔢 DIGIT_0 تم تعديله: <b>{digit0_fixed}</b> نمط\n"
+            f"✨ SD+0 patterns: <b>{sd_fixed}</b> نمط\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"الآن شغّل /force_learn لتعلم جديد بدون انحياز 🚀",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
+
+
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ هذا الأمر للمشرف فقط.")
         return
@@ -4369,7 +4441,8 @@ async def predict(b_num: str, suit: str, rank: str, session_mode: str = 'auto') 
     for pid, wkey, desc in pattern_map:
         res = get_pattern(pid)
         if res['w'] != 2 and res['c'] > 0.0:
-            w_factor = 0.5 if wkey == 'DIGIT' else 1.0  # DIGIT ضعيف إحصائياً
+            # ✅ DIGIT وزن أضعف بكثير لكسر الانحياز للأزرق
+            w_factor = 0.3 if wkey == 'DIGIT' else (0.8 if wkey == 'RANK' else 1.0)
             scores[res['w']] += res['c'] * WEIGHTS[wkey] * w_factor
             logs.append(f"{desc}: {WINNER_NAMES[res['w']]} {res['log']}")
 
@@ -4890,6 +4963,7 @@ def main():
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("prune", cmd_prune))
     app.add_handler(CommandHandler("reset_laws", cmd_reset_laws))
+    app.add_handler(CommandHandler("reset_bias", cmd_reset_bias))  # ✅ أمر تصفير الانحياز
     app.add_handler(CommandHandler("last", cmd_last))
     app.add_handler(CommandHandler("delete", cmd_delete))
     app.add_handler(CommandHandler("download", cmd_download))
