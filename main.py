@@ -416,6 +416,15 @@ def match_law(law: Dict, suit: str, rank: str, last_digit: int,
     return score / total
 
 MAX_LAW_CONTRIBUTION = 0.35  # حد أقصى لمساهمة قانون واحد (35% من total)
+MIN_EDGE_THRESHOLD   = 0.55  # حد الثقة الأدنى للتنبؤ — تحته نتجاهل الجولة
+
+def should_predict(score_0: float, score_1: float) -> bool:
+    """Decision Gate: لا تتنبأ إذا كانت الإشارة ضعيفة (< 55% ثقة)."""
+    total = score_0 + score_1
+    if total == 0:
+        return False
+    edge = max(score_0, score_1) / total
+    return edge >= MIN_EDGE_THRESHOLD
 
 def classify_law(law: dict) -> str:
     """SEQUENTIAL = يعتمد على streak/cycle/gap | ABSOLUTE = مستقل."""
@@ -3965,21 +3974,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"CB [{query.from_user.id}]: {data!r}")
     try:
         if data in ("choose_suit", "new_connected", "new_disconnected"):
-            context.user_data.pop('suit',None); context.user_data.pop('rank',None)
-            # حفظ نوع الجلسة للـ predict
-            if data == "new_connected":
-                context.user_data['session_mode'] = 'connected'   # جولات متسلسلة — تسلسل بدون انقطاع
-            elif data == "new_disconnected":
-                context.user_data['session_mode'] = 'disconnected' # جولة بعد انقطاع — نعيد بناء السياق
-            else:
-                context.user_data.pop('session_mode', None)        # عادي
+            context.user_data.pop('suit', None); context.user_data.pop('rank', None)
+            context.user_data.pop('session_mode', None)
             kb = InlineKeyboardMarkup([[InlineKeyboardButton(SUITS[i], callback_data=f"suit_{i}") for i in range(len(SUITS))]])
-            if data == "new_connected":
-                await safe_edit(query, "🟢 جولة متصلة\n\n🎴 اختر البذلة:", reply_markup=kb)
-            elif data == "new_disconnected":
-                await safe_edit(query, "🔴 جولة منقطة\n\n🎴 اختر البذلة:", reply_markup=kb)
-            else:
-                await safe_edit(query, "🎴 اختر البذلة:", reply_markup=kb)
+            await safe_edit(query, "🎴 اختر البذلة:", reply_markup=kb)
         elif data.startswith("suit_"):
             idx = int(data.split("_")[1])
             suit = SUITS[idx]
@@ -4081,14 +4079,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 acc_txt = ""
             _uid2 = query.from_user.id if query.from_user else 0
             if _uid2 == ADMIN_ID:
-                buttons = [[InlineKeyboardButton("🟢 جولة متصلة",  callback_data="new_round_connected"),
-                             InlineKeyboardButton("🔴 جولة منقطعة", callback_data="new_round_disconnected")],
+                buttons = [[InlineKeyboardButton("🔄 جولة جديدة", callback_data="choose_suit")],
                             [InlineKeyboardButton("📊 إحصاءات",    callback_data="stats")]]
                 if saved_id:
                     buttons.append([InlineKeyboardButton(f"🗑️ حذف هذه الجولة (#{saved_id})", callback_data=f"del_confirm_{saved_id}")])
             else:
-                buttons = [[InlineKeyboardButton("🟢 جولة متصلة",  callback_data="new_round_connected"),
-                             InlineKeyboardButton("🔴 جولة منقطعة", callback_data="new_round_disconnected")]]
+                buttons = [[InlineKeyboardButton("🔄 جولة جديدة", callback_data="choose_suit")]]
                 if saved_id:
                     buttons.append([InlineKeyboardButton(f"🗑️ حذف هذه الجولة (#{saved_id})", callback_data=f"del_confirm_{saved_id}")])
             save_note = ""
@@ -4137,7 +4133,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     + (f"{'━'*20}\n📡 أفضل محركات:\n{sig_txt}" if sig_txt else "")
                     + f"{'━'*20}"
                 )
-                kb = InlineKeyboardMarkup([[InlineKeyboardButton("🟢 متصلة", callback_data="new_connected"), InlineKeyboardButton("🔴 منقطة", callback_data="new_disconnected"), InlineKeyboardButton("🔄 تحديث", callback_data="stats")]])
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 جولة جديدة", callback_data="choose_suit"), InlineKeyboardButton("🔄 تحديث", callback_data="stats")]])
                 await safe_edit(query, msg_text, reply_markup=kb)
             except Exception as e:
                 await safe_edit(query, f"❌ خطأ: <code>{e}</code>")
@@ -4161,7 +4157,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await safe_edit(
                         query,
                         f"✅ <b>تم الحذف — كأن الجولة لم تحدث</b>\n{'━'*22}\n🔑 B_NUM: <code>{bnum}</code>  |  🕐 {t}\n🃏 {suit or '?'} {rank or '?'}  |  🏆 {winner_str}\n{'━'*22}\n♻️ rollback: <b>{res['rolled_back']}</b> نمط  |  ⚖️ <b>{res['laws_adjusted']}</b> قانون",
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗑️ حذف أخرى", callback_data="del_list"), InlineKeyboardButton("🟢 متصلة", callback_data="new_connected"), InlineKeyboardButton("🔴 منقطة", callback_data="new_disconnected")]])
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗑️ حذف أخرى", callback_data="del_list"), InlineKeyboardButton("🔄 جولة جديدة", callback_data="choose_suit")]])
                     )
             except Exception as e:
                 await safe_edit(query, f"❌ خطأ: <code>{e}</code>")
@@ -4639,6 +4635,13 @@ async def predict(b_num: str, suit: str, rank: str, session_mode: str = 'auto') 
                 scores[1] -= correction
                 scores[0] += correction
 
+    # ── Decision Gate: لا تتنبأ إذا الإشارة ضعيفة ──────────────────
+    if not should_predict(scores[0], scores[1]):
+        total_s = scores[0] + scores[1]
+        edge_pct = max(scores[0], scores[1]) / max(total_s, 0.001) * 100
+        logs.append(f"🚫 إشارة ضعيفة ({edge_pct:.0f}% < {MIN_EDGE_THRESHOLD*100:.0f}%) — تخطي الجولة")
+        return 2, 50, "\n".join(logs)
+
     # ── الحساب النهائي ──────────────────────────────────────────────
     total_score = scores[0] + scores[1]
     if total_score == 0:
@@ -4817,17 +4820,15 @@ def result_keyboard(pred: int, b_num: str, user_id: int = 0) -> InlineKeyboardMa
             [InlineKeyboardButton("✅ الراعي 🔴", callback_data=f"save_0_{b_num}"),
              InlineKeyboardButton("✅ الثور 🔵",  callback_data=f"save_1_{b_num}"),
              InlineKeyboardButton("✅ تعادل ⚪",  callback_data=f"save_2_{b_num}")],
-            [InlineKeyboardButton("🟢 جولة متصلة",   callback_data="new_connected"),
-             InlineKeyboardButton("🔴 جولة منقطعة", callback_data="new_disconnected")],
-            [InlineKeyboardButton("📊 إحصاءات", callback_data="stats")],
+            [InlineKeyboardButton("🔄 جولة جديدة", callback_data="choose_suit"),
+             InlineKeyboardButton("📊 إحصاءات",    callback_data="stats")],
         ])
     else:
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ الراعي 🔴", callback_data=f"save_0_{b_num}"),
              InlineKeyboardButton("✅ الثور 🔵",  callback_data=f"save_1_{b_num}"),
              InlineKeyboardButton("✅ تعادل ⚪",  callback_data=f"save_2_{b_num}")],
-            [InlineKeyboardButton("🟢 جولة متصلة",   callback_data="new_connected"),
-             InlineKeyboardButton("🔴 جولة منقطعة", callback_data="new_disconnected")],
+            [InlineKeyboardButton("🔄 جولة جديدة", callback_data="choose_suit")],
         ])
 
 def _safe(v, fmt=None) -> str:
