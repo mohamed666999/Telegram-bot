@@ -24,9 +24,7 @@ from typing import Tuple, Dict, Optional, List, Any
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from collections import OrderedDict, defaultdict
-
-import psycopg2
-from psycopg2 import pool
+from supabase import create_client
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -41,7 +39,10 @@ from openai import OpenAI
 
 # ==================== الإعدادات ====================
 TOKEN        = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
-DATABASE_URL = "postgresql://postgres:MvqqjPDwAqRkGGLVfBUedIbceHNkcIFx@maglev.proxy.rlwy.net:53865/railway"
+SUPABASE_URL = "https://mamjpudfwhmvqdvrqojb.supabase.co"
+SUPABASE_KEY = "sb_secret_RCzuLqwSlWpMNd8b2waDHg_jKBPCHoG"
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 ADMIN_ID     = 6033203084
 
 AI_INVOKE_URL  = "https://integrate.api.nvidia.com/v1"
