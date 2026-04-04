@@ -1,5 +1,4 @@
 python-telegram-bot[job-queue]==20.7
-psycopg2-binary==2.9.9
 openai==1.6.1
 python-dotenv==1.0.0
 requests
