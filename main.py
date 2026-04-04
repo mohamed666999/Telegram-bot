@@ -33,6 +33,8 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+import aiohttp
+from openai import OpenAI
 
 # ==================== الإعدادات ====================
 TOKEN        = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
