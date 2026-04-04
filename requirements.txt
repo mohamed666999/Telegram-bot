@@ -1,6 +1,5 @@
-python-telegram-bot[job-queue]==20.7
+python-telegram-bot==21.1.1
+supabase==2.3.4
+httpx==0.24.1
+openai>=1.0.0
 python-dotenv
-requests
-aiohttp
-supabase
-openai
