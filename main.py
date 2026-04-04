@@ -40,7 +40,7 @@ from openai import OpenAI
 # ==================== الإعدادات ====================
 TOKEN        = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 SUPABASE_URL = "https://mamjpudfwhmvqdvrqojb.supabase.co"
-SUPABASE_KEY = "sb_publishable_kxAUiusCWSNiLK0YzG9HjQ_MFnPyj_f"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1hbWpwdWRmd2htdnFkdnJxb2piIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUyMTAwNjMsImV4cCI6MjA5MDc4NjA2M30.Y6tajMxbkCgcOx8tQIowg6LjxfjaRrnBAO9DwqZCVLI"
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 ADMIN_ID     = 6033203084
