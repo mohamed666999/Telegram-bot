@@ -3728,7 +3728,8 @@ async def cmd_reset_bias(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
 
-
+# --- السطر الذي تمت إضافته ---
+async def cmd_reset_laws(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ هذا الأمر للمشرف فقط.")
         return
