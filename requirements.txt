@@ -1,6 +1,5 @@
-python-telegram-bot==21.1.1
+python-telegram-bot==20.7
 supabase==2.3.4
 httpx==0.24.1
 openai>=1.0.0
 python-dotenv
-psycopg2-binary
