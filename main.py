@@ -4405,8 +4405,8 @@ async def predict(b_num: str, suit: str, rank: str, session_mode: str = 'auto') 
 
     SESSION_LABELS = {
         'connected':  f"🟢 متصلة ({chain_length} جولة)",
-        'soft_break': f"🟡 كسر ناعم ({gap_sec:.0f}ث)",
-        'hard_break': f"🔴 جلسة جديدة ({gap_sec:.0f}ث)" if gap_sec else "🔴 بداية",
+        'soft_break': f"🟡 كسر ناعم ({gap_sec:.0f}ث)" if gap_sec is not None else "🟡 كسر ناعم",
+        'hard_break': f"🔴 جلسة جديدة ({gap_sec:.0f}ث)" if gap_sec is not None else "🔴 بداية",
     }
     if b_gap is not None:
         logs.append(f"🔗 b_gap={int(b_gap)} | ⏱️ {gap_sec:.0f}ث | {SESSION_LABELS[session_type]} | seq_w={seq_weight}")
