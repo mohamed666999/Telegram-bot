@@ -21,7 +21,6 @@ import random
 import asyncio
 import time
 from typing import Tuple, Dict, Optional, List, Any
-from contextlib import contextmanager
 from datetime import datetime, timedelta
 from collections import OrderedDict, defaultdict
 from supabase import create_client
@@ -183,17 +182,6 @@ EMBEDDED_PATTERNS: Dict[str, Dict] = {
     "SD_♣️_9": {"r": 24, "b": 20, "t": 1},
 }
 
-# ==================== DB Pool ====================
-class DatabasePool:
-    _instance = None
-    _pool     = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._init_pool()
-        return cls._instance
-
 # ==================== TTL Cache ====================
 class TTLCache:
     def __init__(self, ttl_seconds=60):
@@ -215,6 +203,79 @@ class TTLCache:
 
 live_cache = TTLCache(ttl_seconds=30)
 
+# ==================== SB Pool (Supabase Compatibility Layer) ====================
+import os as _os
+_DATABASE_URL = _os.environ.get("DATABASE_URL", "")
+
+class _FakeCursor:
+    """محاكي psycopg2 cursor يستخدم psycopg2 الحقيقي"""
+    def __init__(self, conn):
+        self._cur = conn.cursor()
+        self.rowcount = 0
+        self._results = None
+    def execute(self, sql, params=None):
+        self._cur.execute(sql, params)
+        self.rowcount = self._cur.rowcount
+    def fetchone(self):
+        return self._cur.fetchone()
+    def fetchall(self):
+        return self._cur.fetchall()
+    def __enter__(self): return self
+    def __exit__(self, *a): self._cur.close()
+
+class _FakeConn:
+    def __init__(self, conn):
+        self._conn = conn
+    def cursor(self):
+        return _FakeCursor(self._conn)
+    def commit(self):
+        self._conn.commit()
+    def rollback(self):
+        self._conn.rollback()
+    def __enter__(self): return self
+    def __exit__(self, exc_type, *a):
+        if exc_type:
+            self._conn.rollback()
+        else:
+            self._conn.commit()
+
+class _SBPool:
+    """يحاكي db_pool لكن يتصل بـ Supabase عبر DATABASE_URL"""
+    def __init__(self):
+        self._pool = None
+        self._init()
+    def _init(self):
+        import os
+        url = os.environ.get("DATABASE_URL", "")
+        if not url:
+            logger.error("DATABASE_URL not set in environment variables")
+            return
+        try:
+            import psycopg2
+            import psycopg2.pool
+            self._pool = psycopg2.pool.SimpleConnectionPool(1, 5, url)
+            logger.info("DB pool (Supabase) initialized ✅")
+        except Exception as e:
+            logger.error(f"DB init error: {e}")
+
+    from contextlib import contextmanager
+
+    @__import__('contextlib').contextmanager
+    def get_conn(self):
+        if not self._pool:
+            raise RuntimeError("db_pool: DATABASE_URL not configured")
+        conn = self._pool.getconn()
+        try:
+            yield _FakeConn(conn)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)
+
+db_pool = _SBPool()
+
+
 # ==================== 🧠 الذاكرة السياقية ====================
 _laws_cache: List[Dict] = []
 _laws_loaded_at: float  = 0.0
@@ -224,33 +285,23 @@ def load_laws(force: bool = False) -> List[Dict]:
     if not force and time.time() - _laws_loaded_at < 300:
         return _laws_cache
     try:
-        with db_pool.get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT id, law_type, conditions, prediction,
-                           confidence, accuracy, times_used,
-                           description, created_at
-                    FROM ai_laws
-                    WHERE active = TRUE
-                      AND times_used >= 5
-                      AND accuracy >= 55
-                    ORDER BY accuracy DESC, times_used DESC
-                    LIMIT 10
-                """)
-                proven = cur.fetchall()
+        proven_r = supabase.table("ai_laws").select(
+            "id,law_type,conditions,prediction,confidence,accuracy,times_used,description,created_at"
+        ).eq("active", True).gte("times_used", 5).gte("accuracy", 55).order(
+            "accuracy", desc=True).limit(10).execute()
+        proven = [(r["id"],r["law_type"],r["conditions"],r["prediction"],
+                   r["confidence"],r["accuracy"],r["times_used"],r["description"],r["created_at"])
+                  for r in proven_r.data]
 
-                cur.execute("""
-                    SELECT id, law_type, conditions, prediction,
-                           confidence, accuracy, times_used,
-                           description, created_at
-                    FROM ai_laws
-                    WHERE active = TRUE
-                      AND times_used < 5
-                      AND created_at > NOW() - INTERVAL '48 hours'
-                    ORDER BY confidence DESC
-                    LIMIT 6
-                """)
-                probation = cur.fetchall()
+        from datetime import timedelta
+        cutoff = (datetime.utcnow() - timedelta(hours=48)).isoformat()
+        prob_r = supabase.table("ai_laws").select(
+            "id,law_type,conditions,prediction,confidence,accuracy,times_used,description,created_at"
+        ).eq("active", True).lt("times_used", 5).gte("created_at", cutoff).order(
+            "confidence", desc=True).limit(6).execute()
+        probation = [(r["id"],r["law_type"],r["conditions"],r["prediction"],
+                      r["confidence"],r["accuracy"],r["times_used"],r["description"],r["created_at"])
+                     for r in prob_r.data]
 
         def _is_aliasing_law(cond_raw) -> bool:
             try:
@@ -300,25 +351,10 @@ def load_laws(force: bool = False) -> List[Dict]:
         logger.info(f"✅ Laws loaded: {n_proven} proven + {n_probation} probation")
 
         try:
-            with db_pool.get_conn() as _conn:
-                with _conn.cursor() as _cur:
-                    _cur.execute("""
-                        UPDATE ai_laws SET active = FALSE
-                        WHERE active = TRUE
-                          AND times_used = 0
-                          AND created_at < NOW() - INTERVAL '48 hours'
-                    """)
-                    _d1 = _cur.rowcount
-                    _cur.execute("""
-                        UPDATE ai_laws SET active = FALSE
-                        WHERE active = TRUE
-                          AND times_used >= 5
-                          AND accuracy < 40
-                    """)
-                    _d2 = _cur.rowcount
-                _conn.commit()
-            if _d1 or _d2:
-                logger.info(f"load_laws cleanup: expired={_d1}, harmful={_d2}")
+            from datetime import timedelta
+            cutoff48 = (datetime.utcnow() - timedelta(hours=48)).isoformat()
+            supabase.table("ai_laws").update({"active": False}).eq("active", True).eq("times_used", 0).lt("created_at", cutoff48).execute()
+            supabase.table("ai_laws").update({"active": False}).eq("active", True).gte("times_used", 5).lt("accuracy", 40).execute()
         except Exception as _e:
             logger.debug(f"load_laws cleanup: {_e}")
 
@@ -497,49 +533,29 @@ def apply_laws(suit: str, rank: str, last_digit: int,
 
 def _increment_law_usage(law_id: int):
     try:
-        with db_pool.get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE ai_laws SET times_used = times_used + 1 WHERE id = %s",
-                    (law_id,)
-                )
-                conn.commit()
+        # fetch current then increment
+        r = supabase.table("ai_laws").select("times_used").eq("id", law_id).single().execute()
+        if r.data:
+            supabase.table("ai_laws").update({"times_used": r.data["times_used"] + 1}).eq("id", law_id).execute()
     except Exception:
         pass
 
 def update_law_accuracy(law_id: int, correct: bool):
     try:
-        with db_pool.get_conn() as conn:
-            with conn.cursor() as cur:
-                new_val = 100.0 if correct else 0.0
-                cur.execute("""
-                    UPDATE ai_laws
-                    SET accuracy        = accuracy        * 0.95 + %s * 0.05,
-                        accuracy_recent = COALESCE(accuracy_recent, accuracy) * 0.85 + %s * 0.15,
-                        active   = CASE
-                            WHEN accuracy * 0.90 + %s * 0.10 < 30 THEN FALSE
-                            ELSE active
-                        END
-                    WHERE id = %s
-                """, (new_val, new_val, new_val, law_id))
-                conn.commit()
+        new_val = 100.0 if correct else 0.0
+        r = supabase.table("ai_laws").select("accuracy,accuracy_recent").eq("id", law_id).single().execute()
+        if r.data:
+            acc = float(r.data.get("accuracy") or 70)
+            acc_r = float(r.data.get("accuracy_recent") or acc)
+            new_acc = acc * 0.95 + new_val * 0.05
+            new_acc_r = acc_r * 0.85 + new_val * 0.15
+            supabase.table("ai_laws").update({
+                "accuracy": round(new_acc, 2),
+                "accuracy_recent": round(new_acc_r, 2),
+                "active": new_acc >= 30
+            }).eq("id", law_id).execute()
     except Exception as e:
-        try:
-            with db_pool.get_conn() as conn:
-                with conn.cursor() as cur:
-                    new_val = 100.0 if correct else 0.0
-                    cur.execute("""
-                        UPDATE ai_laws
-                        SET accuracy = accuracy * 0.95 + %s * 0.05,
-                            active   = CASE
-                                WHEN accuracy * 0.90 + %s * 0.10 < 30 THEN FALSE
-                                ELSE active
-                            END
-                        WHERE id = %s
-                    """, (new_val, new_val, law_id))
-                    conn.commit()
-        except Exception as e2:
-            logger.error(f"update_law_accuracy error: {e2}")
+        logger.error(f"update_law_accuracy error: {e}")
 
 # ==================== DB Tables ====================
 def ensure_tables():
@@ -3728,8 +3744,7 @@ async def cmd_reset_bias(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
 
-# --- السطر الذي تمت إضافته ---
-async def cmd_reset_laws(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ هذا الأمر للمشرف فقط.")
         return
@@ -4405,8 +4420,8 @@ async def predict(b_num: str, suit: str, rank: str, session_mode: str = 'auto') 
 
     SESSION_LABELS = {
         'connected':  f"🟢 متصلة ({chain_length} جولة)",
-        'soft_break': f"🟡 كسر ناعم ({gap_sec:.0f}ث)" if gap_sec is not None else "🟡 كسر ناعم",
-        'hard_break': f"🔴 جلسة جديدة ({gap_sec:.0f}ث)" if gap_sec is not None else "🔴 بداية",
+        'soft_break': f"🟡 كسر ناعم ({gap_sec:.0f}ث)",
+        'hard_break': f"🔴 جلسة جديدة ({gap_sec:.0f}ث)" if gap_sec else "🔴 بداية",
     }
     if b_gap is not None:
         logs.append(f"🔗 b_gap={int(b_gap)} | ⏱️ {gap_sec:.0f}ث | {SESSION_LABELS[session_type]} | seq_w={seq_weight}")
