@@ -194,22 +194,6 @@ class DatabasePool:
             cls._instance._init_pool()
         return cls._instance
 
-    def _init_pool(self):
-        self._pool = psycopg2.pool.SimpleConnectionPool(
-            1, 10, dsn=DATABASE_URL, sslmode='require', connect_timeout=3
-        )
-        logger.info("✅ Database pool created")
-
-    @contextmanager
-    def get_conn(self):
-        conn = self._pool.getconn()
-        try:
-            yield conn
-        finally:
-            self._pool.putconn(conn)
-
-db_pool = DatabasePool()
-
 # ==================== TTL Cache ====================
 class TTLCache:
     def __init__(self, ttl_seconds=60):
@@ -985,20 +969,34 @@ def _filter_valid_rounds(rows) -> List[Dict]:
     working = rows_list[700:] if len(rows_list) > 700 else rows_list
     logger.info(f"_filter_valid_rounds: total={len(rows_list)}, after_skip700={len(working)}")
     for i, row in enumerate(working):
-        b_num   = clean_digits(str(row[1] or ""))
-        suit    = row[2] or ""
-        rank    = row[3] or ""
-        digit   = int(row[4]) if row[4] is not None else -1
-        winner  = WINNER_MAP.get(row[5], 2)
-        ts      = row[6]
+        # Supabase returns dicts — support both dict and tuple
+        if isinstance(row, dict):
+            b_num   = clean_digits(str(row.get("b_num") or ""))
+            suit    = row.get("suit") or ""
+            rank    = row.get("rank") or ""
+            _dig    = row.get("bonus_last_digit")
+            digit   = int(_dig) if _dig is not None else -1
+            winner  = WINNER_MAP.get(row.get("winner"), 2)
+            ts      = row.get("created_at")
+        else:
+            b_num   = clean_digits(str(row[1] or ""))
+            suit    = row[2] or ""
+            rank    = row[3] or ""
+            digit   = int(row[4]) if row[4] is not None else -1
+            winner  = WINNER_MAP.get(row[5], 2)
+            ts      = row[6]
         if winner == 2 or not b_num or not suit:
             continue
         gap_sec = None
-        if i > 0 and working[i-1][6] and ts:
-            gap_sec = abs((ts - working[i-1][6]).total_seconds())
+        prev = working[i-1] if i > 0 else None
+        if prev is not None:
+            prev_ts = prev.get("created_at") if isinstance(prev, dict) else prev[6]
+            if prev_ts and ts:
+                gap_sec = abs((ts - prev_ts).total_seconds())
         b_gap = None
-        if i > 0:
-            prev_b = clean_digits(str(working[i-1][1] or ""))
+        if prev is not None:
+            prev_b_raw = prev.get("b_num") if isinstance(prev, dict) else prev[1]
+            prev_b = clean_digits(str(prev_b_raw or ""))
             if b_num and prev_b:
                 try:
                     b_gap = abs(int(b_num) - int(prev_b))
