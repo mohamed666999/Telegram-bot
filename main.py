@@ -35,7 +35,18 @@ from telegram.ext import (
 )
 import aiohttp
 from openai import OpenAI
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive")
+
+def run_web():
+    server = HTTPServer(("0.0.0.0", 10000), Handler)
+    server.serve_forever()
 # ==================== الإعدادات ====================
 TOKEN        = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 SUPABASE_URL = "https://mamjpudfwhmvqdvrqojb.supabase.co"
@@ -4939,18 +4950,7 @@ def main():
     # ✅ التشغيل داخل main
     from telegram.error import Conflict
     try:
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is alive")
-
-def run_web():
-    server = HTTPServer(("0.0.0.0", 10000), Handler)
-    server.serve_forever()
+      threading.Thread(target=run_web, daemon=True).start()
         app.run_polling()
     except Conflict:
         print("Bot already running elsewhere")
