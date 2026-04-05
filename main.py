@@ -4908,7 +4908,6 @@ def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.job_queue.run_repeating(auto_learn_job, interval=3600, first=300)
-
     logger.info("⏰ Auto-learn job: every 60min, starts after 5min")
 
     app.add_handler(CommandHandler("start", cmd_start))
@@ -4937,11 +4936,13 @@ def main():
 
     logger.info("🚀 HADES V19.0 is running...")
 
-    # ✅ شغل البوت هنا
+    # ✅ التشغيل داخل main
     from telegram.error import Conflict
     try:
         app.run_polling()
     except Conflict:
         print("Bot already running elsewhere")
-      if __name__ == "__main__":
+
+
+if __name__ == "__main__":
     main()
