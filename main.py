@@ -4359,15 +4359,17 @@ async def predict(b_num: str, suit: str, rank: str, session_mode: str = 'auto') 
     seq_weight     = seq_weight_from_gap(gap_sec)
     chain_length   = len(recent_history)    # عدد الجولات في السلسلة الحالية
 
+    # ── حماية gap_sec من None ──
+    gap_str = f"{gap_sec:.0f}" if gap_sec is not None else "?"
     SESSION_LABELS = {
         'connected':  f"🟢 متصلة ({chain_length} جولة)",
-        'soft_break': f"🟡 كسر ناعم ({gap_sec:.0f}ث)",
-        'hard_break': f"🔴 جلسة جديدة ({gap_sec:.0f}ث)" if gap_sec else "🔴 بداية",
+        'soft_break': f"🟡 كسر ناعم ({gap_str}ث)",
+        'hard_break': f"🔴 جلسة جديدة ({gap_str}ث)" if gap_sec is not None else "🔴 بداية",
     }
     if b_gap is not None:
-        logs.append(f"🔗 b_gap={int(b_gap)} | ⏱️ {gap_sec:.0f}ث | {SESSION_LABELS[session_type]} | seq_w={seq_weight}")
+        logs.append(f"🔗 b_gap={int(b_gap)} | ⏱️ {gap_str}ث | {SESSION_LABELS[session_type]} | seq_w={seq_weight}")
     elif gap_sec is not None:
-        logs.append(f"⏱️ فجوة: {gap_sec:.0f}ث | {SESSION_LABELS[session_type]}")
+        logs.append(f"⏱️ فجوة: {gap_str}ث | {SESSION_LABELS[session_type]}")
 
     # ── AI متوازٍ ────────────────────────────────────────────────────
     ai_task = asyncio.create_task(ai_predict(all_history[-20:] if all_history else recent_history))
