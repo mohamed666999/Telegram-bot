@@ -1497,11 +1497,10 @@ prediction=1 = الثور 🔵 (Player/Blue)
                     law_name = f"{law.get('law_type', 'COMBINED')}_{saved}_{int(time.time())}"
                     cur.execute("""
                         INSERT INTO ai_laws
-                            (law_name, law_type, conditions, prediction, confidence,
+                            (law_type, conditions, prediction, confidence,
                              accuracy, description, source)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, 'force_learn')
+                        VALUES (%s, %s, %s, %s, %s, %s, 'force_learn')
                     """, (
-                        law_name,
                         law.get("law_type", "COMBINED"),
                         cond_str,
                         int(pred),
@@ -2846,11 +2845,10 @@ async def run_council_debate(status_callback) -> Dict:
                     continue
                 cur.execute("""
                     INSERT INTO ai_laws
-                        (law_name, law_type, conditions, prediction, confidence,
+                        (law_type, conditions, prediction, confidence,
                          accuracy, description, source, times_used)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, 'COUNCIL_DEBATE', %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'COUNCIL_DEBATE', %s)
                 """, (
-                    f"COUNCIL_{saved}_{int(time.time())}",
                     law.get("law_type", "COUNCIL_RULE"),
                     json.dumps(law.get("conditions", {}), ensure_ascii=False),
                     int(law["prediction"]),
@@ -3848,7 +3846,7 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     cur.execute(f"SELECT COUNT(*) FROM {tbl}")
                     counts[tbl] = cur.fetchone()[0]
                 cur.execute("""
-                    SELECT SUM(CASE WHEN winner = CASE prediction WHEN 0 THEN 'الراعي 🔴' WHEN 1 THEN 'الثور 🔵' END THEN 1 ELSE 0 END) AS correct,
+                    SELECT SUM(CASE WHEN winner = CASE prediction::text WHEN '0' THEN 'الراعي 🔴' WHEN '1' THEN 'الثور 🔵' END THEN 1 ELSE 0 END) AS correct,
                            COUNT(*) AS total
                     FROM history
                     WHERE winner IS NOT NULL AND prediction IN (0,1) AND winner IN ('الراعي 🔴','الثور 🔵') AND rank IS NOT NULL AND rank NOT IN ('NULL','')
@@ -4127,7 +4125,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         cur.execute("SELECT COUNT(*) FROM history"); total = cur.fetchone()[0]
                         cur.execute("SELECT winner, COUNT(*) FROM history WHERE winner IS NOT NULL GROUP BY winner"); dist = {r[0]:r[1] for r in cur.fetchall()}
                         cur.execute("""
-                            SELECT SUM(CASE WHEN winner = CASE prediction WHEN 0 THEN 'الراعي 🔴' WHEN 1 THEN 'الثور 🔵' END THEN 1 ELSE 0 END) AS correct,
+                            SELECT SUM(CASE WHEN winner = CASE prediction::text WHEN '0' THEN 'الراعي 🔴' WHEN '1' THEN 'الثور 🔵' END THEN 1 ELSE 0 END) AS correct,
                                    COUNT(*) AS total
                             FROM history
                             WHERE winner IS NOT NULL AND prediction IN (0,1) AND winner IN ('الراعي 🔴','الثور 🔵') AND rank IS NOT NULL AND rank NOT IN ('NULL','')
