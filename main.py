@@ -212,7 +212,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # رابط قاعدة بياناتك مع كلمة المرور
-SUPABASE_DB_URL = "postgresql://postgres:Loploplop909090.@db.mamjpudfwhmvqdvrqojb.supabase.co:5432/postgres"
+SUPABASE_DB_URL = "postgresql://postgres.mamjpudfwhmvqdvrqojb:Loploplop909090.@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
 
 class DatabasePool:
     _instance = None
