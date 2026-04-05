@@ -203,77 +203,45 @@ class TTLCache:
 
 live_cache = TTLCache(ttl_seconds=30)
 
-# ==================== SB Pool (Supabase Compatibility Layer) ====================
-import os as _os
-_DATABASE_URL = _os.environ.get("DATABASE_URL", "")
+# ==================== Database Connection Pool ====================
+import psycopg2
+from psycopg2 import pool
+from contextlib import contextmanager
+import logging
 
-class _FakeCursor:
-    """محاكي psycopg2 cursor يستخدم psycopg2 الحقيقي"""
-    def __init__(self, conn):
-        self._cur = conn.cursor()
-        self.rowcount = 0
-        self._results = None
-    def execute(self, sql, params=None):
-        self._cur.execute(sql, params)
-        self.rowcount = self._cur.rowcount
-    def fetchone(self):
-        return self._cur.fetchone()
-    def fetchall(self):
-        return self._cur.fetchall()
-    def __enter__(self): return self
-    def __exit__(self, *a): self._cur.close()
+logger = logging.getLogger(__name__)
 
-class _FakeConn:
-    def __init__(self, conn):
-        self._conn = conn
-    def cursor(self):
-        return _FakeCursor(self._conn)
-    def commit(self):
-        self._conn.commit()
-    def rollback(self):
-        self._conn.rollback()
-    def __enter__(self): return self
-    def __exit__(self, exc_type, *a):
-        if exc_type:
-            self._conn.rollback()
-        else:
-            self._conn.commit()
+# رابط قاعدة بياناتك مع كلمة المرور
+SUPABASE_DB_URL = "postgresql://postgres:Loploplop909090.@db.mamjpudfwhmvqdvrqojb.supabase.co:5432/postgres"
 
-class _SBPool:
-    """يحاكي db_pool لكن يتصل بـ Supabase عبر DATABASE_URL"""
-    def __init__(self):
-        self._pool = None
-        self._init()
-    def _init(self):
-        import os
-        url = os.environ.get("DATABASE_URL", "")
-        if not url:
-            logger.error("DATABASE_URL not set in environment variables")
-            return
+class DatabasePool:
+    _instance = None
+    _pool     = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._init_pool()
+        return cls._instance
+
+    def _init_pool(self):
         try:
-            import psycopg2
-            import psycopg2.pool
-            self._pool = psycopg2.pool.SimpleConnectionPool(1, 5, url)
-            logger.info("DB pool (Supabase) initialized ✅")
+            self._pool = psycopg2.pool.ThreadedConnectionPool(1, 20, SUPABASE_DB_URL)
+            logger.info("✅ تم الاتصال بقاعدة بيانات Supabase بنجاح!")
         except Exception as e:
-            logger.error(f"DB init error: {e}")
+            logger.error(f"❌ فشل الاتصال بقاعدة بيانات Supabase: {e}")
 
-    from contextlib import contextmanager
-
-    @__import__('contextlib').contextmanager
+    @contextmanager
     def get_conn(self):
-        if not self._pool:
-            raise RuntimeError("db_pool: DATABASE_URL not configured")
+        if self._pool is None:
+            self._init_pool()
         conn = self._pool.getconn()
         try:
-            yield _FakeConn(conn)
-        except Exception:
-            conn.rollback()
-            raise
+            yield conn
         finally:
             self._pool.putconn(conn)
 
-db_pool = _SBPool()
+db_pool = DatabasePool()
 
 
 # ==================== 🧠 الذاكرة السياقية ====================
@@ -3695,56 +3663,30 @@ async def cmd_reset_bias(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args or []
     if 'confirm' not in args:
         await update.message.reply_text(
-            "⚠️ هذا سيُصفّر الانحياز للأزرق!\n"
-            "سيتم:\n"
-            "  1. تعطيل كل القوانين النشطة\n"
-            "  2. إعادة ضبط أوزان DIGIT_0 في pattern_stats\n"
-            "  3. مسح الكاش الحي\n\n"
-            "للتأكيد: <code>/reset_bias confirm</code>",
+            "⚠️ هذا سيُصفّر الانحياز للأزرق!\nللتأكيد: <code>/reset_bias confirm</code>",
             parse_mode="HTML"
         )
         return
     try:
         with db_pool.get_conn() as conn:
             with conn.cursor() as cur:
-                # 1. تعطيل كل القوانين
                 cur.execute("UPDATE ai_laws SET active = FALSE")
                 laws_disabled = cur.rowcount
-                # 2. إعادة توازن DIGIT_0 المنحاز نحو الأزرق
-                cur.execute("""
-                    UPDATE pattern_stats
-                    SET blue_count = GREATEST(0, blue_count - (blue_count - red_count) / 2)
-                    WHERE pattern_id = 'DIGIT_0' AND blue_count > red_count + 5
-                """)
+                cur.execute("UPDATE pattern_stats SET blue_count = GREATEST(0, blue_count - (blue_count - red_count) / 2) WHERE pattern_id = 'DIGIT_0' AND blue_count > red_count + 5")
                 digit0_fixed = cur.rowcount
-                # 3. تطبيق نفس التصحيح على SD patterns المنحازة
-                cur.execute("""
-                    UPDATE pattern_stats
-                    SET blue_count = GREATEST(0, blue_count - (blue_count - red_count) / 3)
-                    WHERE pattern_id LIKE 'SD_%_0' AND blue_count > red_count + 8
-                """)
+                cur.execute("UPDATE pattern_stats SET blue_count = GREATEST(0, blue_count - (blue_count - red_count) / 3) WHERE pattern_id LIKE 'SD_%_0' AND blue_count > red_count + 8")
                 sd_fixed = cur.rowcount
                 conn.commit()
-        # 4. مسح الكاش الحي
         live_cache.cache.clear()
         global _markov_cache, _full_history_cache, _gravity_cache, _session_markov_cache
         _markov_cache = None; _session_markov_cache = None
         _full_history_cache = []; _gravity_cache = (None, 0.0, "")
         load_laws(force=True)
-        await update.message.reply_text(
-            f"✅ <b>تم تصفير الانحياز!</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"⚖️ قوانين مُعطَّلة: <b>{laws_disabled}</b>\n"
-            f"🔢 DIGIT_0 تم تعديله: <b>{digit0_fixed}</b> نمط\n"
-            f"✨ SD+0 patterns: <b>{sd_fixed}</b> نمط\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"الآن شغّل /force_learn لتعلم جديد بدون انحياز 🚀",
-            parse_mode="HTML"
-        )
+        await update.message.reply_text(f"✅ <b>تم تصفير الانحياز!</b>\nقوانين مُعطَّلة: {laws_disabled}\nالآن شغّل /force_learn", parse_mode="HTML")
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
 
-
+async def cmd_reset_laws(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ هذا الأمر للمشرف فقط.")
         return
@@ -3759,10 +3701,9 @@ async def cmd_reset_bias(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 n = cur.rowcount
                 conn.commit()
         load_laws(force=True)
-        await update.message.reply_text(f"✅ تم تعطيل <b>{n}</b> قانون.\nالآن شغّل /force_learn لبدء تعلم جديد.", parse_mode="HTML")
+        await update.message.reply_text(f"✅ تم تعطيل <b>{n}</b> قانون.\nالآن شغّل /force_learn", parse_mode="HTML")
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
-
 async def cmd_mine_gold(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ هذا الأمر للمشرف فقط.")
