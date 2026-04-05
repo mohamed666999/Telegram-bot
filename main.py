@@ -4939,6 +4939,18 @@ def main():
     # ✅ التشغيل داخل main
     from telegram.error import Conflict
     try:
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive")
+
+def run_web():
+    server = HTTPServer(("0.0.0.0", 10000), Handler)
+    server.serve_forever()
         app.run_polling()
     except Conflict:
         print("Bot already running elsewhere")
