@@ -4933,5 +4933,10 @@ def main():
     logger.info("🚀 HADES V19.0 is running...")
     app.run_polling()
 
+from telegram.error import Conflict
+
 if __name__ == "__main__":
-    main()
+    try:
+        app.run_polling()
+    except Conflict:
+        print("Bot already running elsewhere")
