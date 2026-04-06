@@ -33,8 +33,10 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+import threading
 import aiohttp
 from openai import OpenAI
+from flask import Flask
 
 # ==================== الإعدادات ====================
 TOKEN        = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
@@ -4900,43 +4902,76 @@ async def auto_learn_job(context) -> None:
         except Exception as e:
             logger.error(f"auto_learn_job error: {e}")
 
+
+# ==================== Keep-Alive Web Server ====================
+_flask_app = Flask(__name__)
+
+@_flask_app.route("/")
+def _health():
+    return "🟢 HADES V19 is alive", 200
+
+@_flask_app.route("/health")
+def _health2():
+    return "OK", 200
+
+def _run_web():
+    """تشغيل Flask في خيط منفصل لإبقاء Render مستيقظاً."""
+    import os
+    port = int(os.environ.get("PORT", 10000))
+    _flask_app.run(host="0.0.0.0", port=port, use_reloader=False)
+
+# ==================== التشغيل الرئيسي ====================
 def main():
+    from telegram.error import Conflict
+
     ensure_tables()
     load_laws()
     load_signal_perf_from_db()
+
+    # ── بدء سيرفر Keep-Alive في خيط خلفي ──────────────────────────
+    web_thread = threading.Thread(target=_run_web, daemon=True)
+    web_thread.start()
+    logger.info("🌐 Keep-alive web server started")
+
+    # ── بناء التطبيق ──────────────────────────────────────────────
     app = ApplicationBuilder().token(TOKEN).build()
+
     app.job_queue.run_repeating(auto_learn_job, interval=3600, first=300)
     logger.info("⏰ Auto-learn job: every 60min, starts after 5min")
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("force_learn", cmd_force_learn))
-    app.add_handler(CommandHandler("mine_gold", cmd_mine_gold))
+
+    app.add_handler(CommandHandler("start",         cmd_start))
+    app.add_handler(CommandHandler("force_learn",   cmd_force_learn))
+    app.add_handler(CommandHandler("mine_gold",     cmd_mine_gold))
     app.add_handler(CommandHandler("council_learn", cmd_council_learn))
-    app.add_handler(CommandHandler("set_key", cmd_set_key))
-    app.add_handler(CommandHandler("get_key", cmd_get_key))
-    app.add_handler(CommandHandler("revoke_key", cmd_revoke_key))
-    app.add_handler(CommandHandler("laws", cmd_laws))
-    app.add_handler(CommandHandler("deactivate", cmd_deactivate_law))
-    app.add_handler(CommandHandler("stats", cmd_stats))
-    app.add_handler(CommandHandler("prune", cmd_prune))
-    app.add_handler(CommandHandler("reset_laws", cmd_reset_laws))
-    app.add_handler(CommandHandler("reset_bias", cmd_reset_bias))  # ✅ أمر تصفير الانحياز
-    app.add_handler(CommandHandler("last", cmd_last))
-    app.add_handler(CommandHandler("delete", cmd_delete))
-    app.add_handler(CommandHandler("download", cmd_download))
-    app.add_handler(CommandHandler("engine", cmd_engine_status))
-    app.add_handler(CommandHandler("add_sub",    cmd_add_sub))
-    app.add_handler(CommandHandler("revoke_sub", cmd_revoke_sub))
-    app.add_handler(CommandHandler("list_subs",  cmd_list_subs))
-    app.add_handler(CommandHandler("my_sub",     cmd_my_sub))
+    app.add_handler(CommandHandler("set_key",       cmd_set_key))
+    app.add_handler(CommandHandler("get_key",       cmd_get_key))
+    app.add_handler(CommandHandler("revoke_key",    cmd_revoke_key))
+    app.add_handler(CommandHandler("laws",          cmd_laws))
+    app.add_handler(CommandHandler("deactivate",    cmd_deactivate_law))
+    app.add_handler(CommandHandler("stats",         cmd_stats))
+    app.add_handler(CommandHandler("prune",         cmd_prune))
+    app.add_handler(CommandHandler("reset_laws",    cmd_reset_laws))
+    app.add_handler(CommandHandler("reset_bias",    cmd_reset_bias))
+    app.add_handler(CommandHandler("last",          cmd_last))
+    app.add_handler(CommandHandler("delete",        cmd_delete))
+    app.add_handler(CommandHandler("download",      cmd_download))
+    app.add_handler(CommandHandler("engine",        cmd_engine_status))
+    app.add_handler(CommandHandler("add_sub",       cmd_add_sub))
+    app.add_handler(CommandHandler("revoke_sub",    cmd_revoke_sub))
+    app.add_handler(CommandHandler("list_subs",     cmd_list_subs))
+    app.add_handler(CommandHandler("my_sub",        cmd_my_sub))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+
     logger.info("🚀 HADES V19.0 is running...")
-    app.run_polling(drop_pending_updates=True)
+
+    try:
+        app.run_polling(drop_pending_updates=True)
+    except Conflict:
+        logger.error("❌ Conflict: البوت يعمل في مكان آخر — أوقف النسخة الأخرى أولاً")
+    except Exception as e:
+        logger.error(f"❌ خطأ في run_polling: {e}", exc_info=True)
+
 
 if __name__ == "__main__":
-    from telegram.error import Conflict
-    import threading
-    try:
-        main()
-    except Conflict:
-        print("Bot already running elsewhere")
+    main()
