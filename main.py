@@ -4931,6 +4931,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     logger.info("🚀 HADES V19.0 is running...")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     from telegram.error import Conflict
