@@ -23,7 +23,6 @@ import time
 from typing import Tuple, Dict, Optional, List, Any
 from datetime import datetime, timedelta
 from collections import OrderedDict, defaultdict
-from supabase import create_client
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -42,7 +41,6 @@ TOKEN        = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 SUPABASE_URL = "https://mamjpudfwhmvqdvrqojb.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1hbWpwdWRmd2htdnFkdnJxb2piIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUyMTAwNjMsImV4cCI6MjA5MDc4NjA2M30.Y6tajMxbkCgcOx8tQIowg6LjxfjaRrnBAO9DwqZCVLI"
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 ADMIN_ID     = 6033203084
 
 AI_INVOKE_URL  = "https://integrate.api.nvidia.com/v1"
@@ -254,23 +252,42 @@ def load_laws(force: bool = False) -> List[Dict]:
     if not force and time.time() - _laws_loaded_at < 300:
         return _laws_cache
     try:
-        proven_r = supabase.table("ai_laws").select(
-            "id,law_type,conditions,prediction,confidence,accuracy,times_used,description,created_at"
-        ).eq("active", True).gte("times_used", 5).gte("accuracy", 55).order(
-            "accuracy", desc=True).limit(10).execute()
-        proven = [(r["id"],r["law_type"],r["conditions"],r["prediction"],
-                   r["confidence"],r["accuracy"],r["times_used"],r["description"],r["created_at"])
-                  for r in proven_r.data]
-
-        from datetime import timedelta
         cutoff = (datetime.utcnow() - timedelta(hours=48)).isoformat()
-        prob_r = supabase.table("ai_laws").select(
-            "id,law_type,conditions,prediction,confidence,accuracy,times_used,description,created_at"
-        ).eq("active", True).lt("times_used", 5).gte("created_at", cutoff).order(
-            "confidence", desc=True).limit(6).execute()
-        probation = [(r["id"],r["law_type"],r["conditions"],r["prediction"],
-                      r["confidence"],r["accuracy"],r["times_used"],r["description"],r["created_at"])
-                     for r in prob_r.data]
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                # Proven laws
+                cur.execute("""
+                    SELECT id, law_type, conditions, prediction, confidence,
+                           accuracy, times_used, description, created_at
+                    FROM ai_laws
+                    WHERE active = TRUE AND times_used >= 5 AND accuracy >= 55
+                    ORDER BY accuracy DESC LIMIT 10
+                """)
+                proven = cur.fetchall()
+
+                # Probation laws (new, not yet proven)
+                cur.execute("""
+                    SELECT id, law_type, conditions, prediction, confidence,
+                           accuracy, times_used, description, created_at
+                    FROM ai_laws
+                    WHERE active = TRUE AND times_used < 5 AND created_at >= %s
+                    ORDER BY confidence DESC LIMIT 6
+                """, (cutoff,))
+                probation = cur.fetchall()
+
+                # Cleanup: deactivate expired/bad laws
+                try:
+                    cur.execute("""
+                        UPDATE ai_laws SET active = FALSE
+                        WHERE active = TRUE AND times_used = 0 AND created_at < %s
+                    """, (cutoff,))
+                    cur.execute("""
+                        UPDATE ai_laws SET active = FALSE
+                        WHERE active = TRUE AND times_used >= 5 AND accuracy < 40
+                    """)
+                    conn.commit()
+                except Exception as _e:
+                    logger.debug(f"load_laws cleanup: {_e}")
 
         def _is_aliasing_law(cond_raw) -> bool:
             try:
@@ -318,15 +335,6 @@ def load_laws(force: bool = False) -> List[Dict]:
         n_proven    = sum(1 for l in laws if l.get('tier') == 'proven')
         n_probation = sum(1 for l in laws if l.get('tier') == 'probation')
         logger.info(f"✅ Laws loaded: {n_proven} proven + {n_probation} probation")
-
-        try:
-            from datetime import timedelta
-            cutoff48 = (datetime.utcnow() - timedelta(hours=48)).isoformat()
-            supabase.table("ai_laws").update({"active": False}).eq("active", True).eq("times_used", 0).lt("created_at", cutoff48).execute()
-            supabase.table("ai_laws").update({"active": False}).eq("active", True).gte("times_used", 5).lt("accuracy", 40).execute()
-        except Exception as _e:
-            logger.debug(f"load_laws cleanup: {_e}")
-
         return laws
     except Exception as e:
         logger.error(f"load_laws error: {e}")
@@ -502,27 +510,37 @@ def apply_laws(suit: str, rank: str, last_digit: int,
 
 def _increment_law_usage(law_id: int):
     try:
-        # fetch current then increment
-        r = supabase.table("ai_laws").select("times_used").eq("id", law_id).single().execute()
-        if r.data:
-            supabase.table("ai_laws").update({"times_used": r.data["times_used"] + 1}).eq("id", law_id).execute()
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE ai_laws SET times_used = times_used + 1 WHERE id = %s",
+                    (law_id,)
+                )
+                conn.commit()
     except Exception:
         pass
 
 def update_law_accuracy(law_id: int, correct: bool):
     try:
         new_val = 100.0 if correct else 0.0
-        r = supabase.table("ai_laws").select("accuracy,accuracy_recent").eq("id", law_id).single().execute()
-        if r.data:
-            acc = float(r.data.get("accuracy") or 70)
-            acc_r = float(r.data.get("accuracy_recent") or acc)
-            new_acc = acc * 0.95 + new_val * 0.05
-            new_acc_r = acc_r * 0.85 + new_val * 0.15
-            supabase.table("ai_laws").update({
-                "accuracy": round(new_acc, 2),
-                "accuracy_recent": round(new_acc_r, 2),
-                "active": new_acc >= 30
-            }).eq("id", law_id).execute()
+        with db_pool.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT accuracy, accuracy_recent FROM ai_laws WHERE id = %s",
+                    (law_id,)
+                )
+                row = cur.fetchone()
+                if row:
+                    acc   = float(row[0] or 70)
+                    acc_r = float(row[1] or acc)
+                    new_acc   = acc   * 0.95 + new_val * 0.05
+                    new_acc_r = acc_r * 0.85 + new_val * 0.15
+                    cur.execute("""
+                        UPDATE ai_laws
+                        SET accuracy = %s, accuracy_recent = %s, active = %s
+                        WHERE id = %s
+                    """, (round(new_acc, 2), round(new_acc_r, 2), new_acc >= 30, law_id))
+                    conn.commit()
     except Exception as e:
         logger.error(f"update_law_accuracy error: {e}")
 
