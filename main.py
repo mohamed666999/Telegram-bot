@@ -203,8 +203,11 @@ class TTLCache:
 live_cache = TTLCache(ttl_seconds=30)
 
 # ==================== Database Connection Pool ====================
-import psycopg2
-from psycopg2 import pool
+import pg8000.dbapi as pg8000
+import threading
+import ssl
+from queue import Queue, Empty
+from urllib.parse import urlparse
 from contextlib import contextmanager
 import logging
 
@@ -213,34 +216,90 @@ logger = logging.getLogger(__name__)
 # رابط قاعدة بياناتك مع كلمة المرور
 SUPABASE_DB_URL = "postgresql://postgres.mamjpudfwhmvqdvrqojb:Loploplop909090.@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
 
+def _parse_db_url(url: str) -> dict:
+    """يحول رابط PostgreSQL إلى معاملات اتصال."""
+    p = urlparse(url)
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode    = ssl.CERT_NONE
+    return {
+        "host":        p.hostname,
+        "port":        p.port or 5432,
+        "database":    p.path.lstrip("/"),
+        "user":        p.username,
+        "password":    p.password,
+        "ssl_context": ssl_ctx,
+    }
+
 class DatabasePool:
+    """Connection pool بسيط وآمن يعمل في Termux بدون Rust أو C."""
     _instance = None
-    _pool     = None
+    _lock      = threading.Lock()
 
     def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._init_pool()
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._init_pool()
         return cls._instance
 
     def _init_pool(self):
+        self._params   = _parse_db_url(SUPABASE_DB_URL)
+        self._pool     = Queue(maxsize=20)
+        self._pool_lock = threading.Lock()
+        # افتح 2 اتصالات مسبقاً
+        for _ in range(2):
+            try:
+                self._pool.put(self._new_conn())
+            except Exception as e:
+                logger.warning(f"Pool warm-up: {e}")
+        logger.info("✅ pg8000 pool جاهز (بدون psycopg2 أو Rust)")
+
+    def _new_conn(self):
+        conn = pg8000.connect(**self._params)
+        conn.autocommit = False
+        return conn
+
+    def _test_conn(self, conn) -> bool:
         try:
-            self._pool = psycopg2.pool.ThreadedConnectionPool(1, 20, SUPABASE_DB_URL)
-            logger.info("✅ تم الاتصال بقاعدة بيانات Supabase بنجاح!")
-        except Exception as e:
-            logger.error(f"❌ فشل الاتصال بقاعدة بيانات Supabase: {e}")
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            cur.close()
+            return True
+        except Exception:
+            return False
 
     @contextmanager
     def get_conn(self):
-        if self._pool is None:
-            self._init_pool()
-        conn = self._pool.getconn()
+        conn = None
         try:
+            # جرّب أخذ اتصال من الـ pool
+            try:
+                conn = self._pool.get(timeout=3)
+                if not self._test_conn(conn):
+                    try: conn.close()
+                    except Exception: pass
+                    conn = self._new_conn()
+            except Empty:
+                conn = self._new_conn()
             yield conn
+        except Exception:
+            # في حالة خطأ — تراجع عن المعاملة
+            try:
+                if conn: conn.rollback()
+            except Exception:
+                pass
+            raise
         finally:
-            self._pool.putconn(conn)
+            if conn:
+                try:
+                    self._pool.put_nowait(conn)
+                except Exception:
+                    try: conn.close()
+                    except Exception: pass
 
 db_pool = DatabasePool()
+
 
 
 # ==================== 🧠 الذاكرة السياقية ====================
