@@ -35,18 +35,7 @@ from telegram.ext import (
 )
 import aiohttp
 from openai import OpenAI
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is alive")
-
-def run_web():
-    server = HTTPServer(("0.0.0.0", 10000), Handler)
-    server.serve_forever()
 # ==================== الإعدادات ====================
 TOKEN        = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 SUPABASE_URL = "https://mamjpudfwhmvqdvrqojb.supabase.co"
@@ -4915,12 +4904,9 @@ def main():
     ensure_tables()
     load_laws()
     load_signal_perf_from_db()
-
     app = ApplicationBuilder().token(TOKEN).build()
-
     app.job_queue.run_repeating(auto_learn_job, interval=3600, first=300)
     logger.info("⏰ Auto-learn job: every 60min, starts after 5min")
-
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("force_learn", cmd_force_learn))
     app.add_handler(CommandHandler("mine_gold", cmd_mine_gold))
@@ -4933,28 +4919,23 @@ def main():
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("prune", cmd_prune))
     app.add_handler(CommandHandler("reset_laws", cmd_reset_laws))
-    app.add_handler(CommandHandler("reset_bias", cmd_reset_bias))
+    app.add_handler(CommandHandler("reset_bias", cmd_reset_bias))  # ✅ أمر تصفير الانحياز
     app.add_handler(CommandHandler("last", cmd_last))
     app.add_handler(CommandHandler("delete", cmd_delete))
     app.add_handler(CommandHandler("download", cmd_download))
     app.add_handler(CommandHandler("engine", cmd_engine_status))
-    app.add_handler(CommandHandler("add_sub", cmd_add_sub))
+    app.add_handler(CommandHandler("add_sub",    cmd_add_sub))
     app.add_handler(CommandHandler("revoke_sub", cmd_revoke_sub))
-    app.add_handler(CommandHandler("list_subs", cmd_list_subs))
-    app.add_handler(CommandHandler("my_sub", cmd_my_sub))
+    app.add_handler(CommandHandler("list_subs",  cmd_list_subs))
+    app.add_handler(CommandHandler("my_sub",     cmd_my_sub))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-
     logger.info("🚀 HADES V19.0 is running...")
 
-    # ✅ التشغيل داخل main
+if __name__ == "__main__":
     from telegram.error import Conflict
+    import threading
     try:
-      threading.Thread(target=run_web, daemon=True).start()
-        app.run_polling()
+        main()
     except Conflict:
         print("Bot already running elsewhere")
-
-
-if __name__ == "__main__":
-    main()
