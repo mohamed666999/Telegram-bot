@@ -4,3 +4,4 @@ requests
 aiohttp
 supabase
 openai
+psycopg2-binary
