@@ -43,7 +43,6 @@ from openai import OpenAI
 TOKEN           = os.environ.get("TELEGRAM_TOKEN",  "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s")
 SUPABASE_URL    = os.environ.get("SUPABASE_URL",    "https://mamjpudfwhmvqdvrqojb.supabase.co")
 SUPABASE_KEY    = os.environ.get("SUPABASE_KEY",    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1hbWpwdWRmd2htdnFkdnJxb2piIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUyMTAwNjMsImV4cCI6MjA5MDc4NjA2M30.Y6tajMxbkCgcOx8tQIowg6LjxfjaRrnBAO9DwqZCVLI")
-SUPABASE_DB_URL = "postgresql://postgres.mamjpudfwhmvqdvrqojb:Loploplop909090.@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
 ADMIN_ID        = 6033203084
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
