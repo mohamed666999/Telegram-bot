@@ -11,6 +11,9 @@ HADES V19.0 - Neural Hybrid + Deep Learning Memory
   - البوت يطبّق القوانين آلياً بجانب الأنماط الإحصائية
 """
 
+import os
+from dotenv import load_dotenv
+load_dotenv()
 import itertools
 import re
 import json
@@ -37,15 +40,16 @@ import aiohttp
 from openai import OpenAI
 
 # ==================== الإعدادات ====================
-TOKEN        = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
-SUPABASE_URL = "https://mamjpudfwhmvqdvrqojb.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1hbWpwdWRmd2htdnFkdnJxb2piIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUyMTAwNjMsImV4cCI6MjA5MDc4NjA2M30.Y6tajMxbkCgcOx8tQIowg6LjxfjaRrnBAO9DwqZCVLI"
+TOKEN           = os.environ.get("TELEGRAM_TOKEN",  "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s")
+SUPABASE_URL    = os.environ.get("SUPABASE_URL",    "https://mamjpudfwhmvqdvrqojb.supabase.co")
+SUPABASE_KEY    = os.environ.get("SUPABASE_KEY",    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1hbWpwdWRmd2htdnFkdnJxb2piIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUyMTAwNjMsImV4cCI6MjA5MDc4NjA2M30.Y6tajMxbkCgcOx8tQIowg6LjxfjaRrnBAO9DwqZCVLI")
+SUPABASE_DB_URL = os.environ.get("SUPABASE_DB_URL", "postgresql://postgres.mamjpudfwhmvqdvrqojb:Loploplop909090.@aws-0-eu-west-1.pooler.supabase.com:6543/postgres")
+ADMIN_ID        = 6033203084
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-ADMIN_ID     = 6033203084
 
 AI_INVOKE_URL  = "https://integrate.api.nvidia.com/v1"
-AI_API_KEY     = "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"
+AI_API_KEY     = os.environ.get("NVIDIA_API_KEY",   "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")
 AI_MODEL       = "meta/llama-3.1-405b-instruct"   # ✅ أقوى نموذج — Llama 405B
 AI_MODEL_SMALL = "meta/llama-3.1-8b-instruct"
 AI_TIMEOUT    = 12.0
@@ -211,8 +215,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# رابط قاعدة بياناتك مع كلمة المرور
-SUPABASE_DB_URL = "postgresql://postgres.mamjpudfwhmvqdvrqojb:Loploplop909090.@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
+# SUPABASE_DB_URL مُعرَّف أعلى الملف في قسم الإعدادات
 
 class DatabasePool:
     _instance = None
