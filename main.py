@@ -23,6 +23,7 @@ import time
 from typing import Tuple, Dict, Optional, List, Any
 from datetime import datetime, timedelta
 from collections import OrderedDict, defaultdict
+from supabase import create_client
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -32,7 +33,6 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-import threading
 import aiohttp
 from openai import OpenAI
 
@@ -41,6 +41,7 @@ TOKEN        = "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s"
 SUPABASE_URL = "https://mamjpudfwhmvqdvrqojb.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1hbWpwdWRmd2htdnFkdnJxb2piIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUyMTAwNjMsImV4cCI6MjA5MDc4NjA2M30.Y6tajMxbkCgcOx8tQIowg6LjxfjaRrnBAO9DwqZCVLI"
 
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 ADMIN_ID     = 6033203084
 
 AI_INVOKE_URL  = "https://integrate.api.nvidia.com/v1"
@@ -203,11 +204,8 @@ class TTLCache:
 live_cache = TTLCache(ttl_seconds=30)
 
 # ==================== Database Connection Pool ====================
-import pg8000.dbapi as pg8000
-import threading
-import ssl
-from queue import Queue, Empty
-from urllib.parse import urlparse
+import psycopg2
+from psycopg2 import pool
 from contextlib import contextmanager
 import logging
 
@@ -216,90 +214,34 @@ logger = logging.getLogger(__name__)
 # رابط قاعدة بياناتك مع كلمة المرور
 SUPABASE_DB_URL = "postgresql://postgres.mamjpudfwhmvqdvrqojb:Loploplop909090.@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
 
-def _parse_db_url(url: str) -> dict:
-    """يحول رابط PostgreSQL إلى معاملات اتصال."""
-    p = urlparse(url)
-    ssl_ctx = ssl.create_default_context()
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode    = ssl.CERT_NONE
-    return {
-        "host":        p.hostname,
-        "port":        p.port or 5432,
-        "database":    p.path.lstrip("/"),
-        "user":        p.username,
-        "password":    p.password,
-        "ssl_context": ssl_ctx,
-    }
-
 class DatabasePool:
-    """Connection pool بسيط وآمن يعمل في Termux بدون Rust أو C."""
     _instance = None
-    _lock      = threading.Lock()
+    _pool     = None
 
     def __new__(cls):
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super().__new__(cls)
-                cls._instance._init_pool()
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._init_pool()
         return cls._instance
 
     def _init_pool(self):
-        self._params   = _parse_db_url(SUPABASE_DB_URL)
-        self._pool     = Queue(maxsize=20)
-        self._pool_lock = threading.Lock()
-        # افتح 2 اتصالات مسبقاً
-        for _ in range(2):
-            try:
-                self._pool.put(self._new_conn())
-            except Exception as e:
-                logger.warning(f"Pool warm-up: {e}")
-        logger.info("✅ pg8000 pool جاهز (بدون psycopg2 أو Rust)")
-
-    def _new_conn(self):
-        conn = pg8000.connect(**self._params)
-        conn.autocommit = False
-        return conn
-
-    def _test_conn(self, conn) -> bool:
         try:
-            cur = conn.cursor()
-            cur.execute("SELECT 1")
-            cur.close()
-            return True
-        except Exception:
-            return False
+            self._pool = psycopg2.pool.ThreadedConnectionPool(1, 20, SUPABASE_DB_URL)
+            logger.info("✅ تم الاتصال بقاعدة بيانات Supabase بنجاح!")
+        except Exception as e:
+            logger.error(f"❌ فشل الاتصال بقاعدة بيانات Supabase: {e}")
 
     @contextmanager
     def get_conn(self):
-        conn = None
+        if self._pool is None:
+            self._init_pool()
+        conn = self._pool.getconn()
         try:
-            # جرّب أخذ اتصال من الـ pool
-            try:
-                conn = self._pool.get(timeout=3)
-                if not self._test_conn(conn):
-                    try: conn.close()
-                    except Exception: pass
-                    conn = self._new_conn()
-            except Empty:
-                conn = self._new_conn()
             yield conn
-        except Exception:
-            # في حالة خطأ — تراجع عن المعاملة
-            try:
-                if conn: conn.rollback()
-            except Exception:
-                pass
-            raise
         finally:
-            if conn:
-                try:
-                    self._pool.put_nowait(conn)
-                except Exception:
-                    try: conn.close()
-                    except Exception: pass
+            self._pool.putconn(conn)
 
 db_pool = DatabasePool()
-
 
 
 # ==================== 🧠 الذاكرة السياقية ====================
@@ -311,42 +253,23 @@ def load_laws(force: bool = False) -> List[Dict]:
     if not force and time.time() - _laws_loaded_at < 300:
         return _laws_cache
     try:
+        proven_r = supabase.table("ai_laws").select(
+            "id,law_type,conditions,prediction,confidence,accuracy,times_used,description,created_at"
+        ).eq("active", True).gte("times_used", 5).gte("accuracy", 55).order(
+            "accuracy", desc=True).limit(10).execute()
+        proven = [(r["id"],r["law_type"],r["conditions"],r["prediction"],
+                   r["confidence"],r["accuracy"],r["times_used"],r["description"],r["created_at"])
+                  for r in proven_r.data]
+
+        from datetime import timedelta
         cutoff = (datetime.utcnow() - timedelta(hours=48)).isoformat()
-        with db_pool.get_conn() as conn:
-            with conn.cursor() as cur:
-                # Proven laws
-                cur.execute("""
-                    SELECT id, law_type, conditions, prediction, confidence,
-                           accuracy, times_used, description, created_at
-                    FROM ai_laws
-                    WHERE active = TRUE AND times_used >= 5 AND accuracy >= 55
-                    ORDER BY accuracy DESC LIMIT 10
-                """)
-                proven = cur.fetchall()
-
-                # Probation laws (new, not yet proven)
-                cur.execute("""
-                    SELECT id, law_type, conditions, prediction, confidence,
-                           accuracy, times_used, description, created_at
-                    FROM ai_laws
-                    WHERE active = TRUE AND times_used < 5 AND created_at >= %s
-                    ORDER BY confidence DESC LIMIT 6
-                """, (cutoff,))
-                probation = cur.fetchall()
-
-                # Cleanup: deactivate expired/bad laws
-                try:
-                    cur.execute("""
-                        UPDATE ai_laws SET active = FALSE
-                        WHERE active = TRUE AND times_used = 0 AND created_at < %s
-                    """, (cutoff,))
-                    cur.execute("""
-                        UPDATE ai_laws SET active = FALSE
-                        WHERE active = TRUE AND times_used >= 5 AND accuracy < 40
-                    """)
-                    conn.commit()
-                except Exception as _e:
-                    logger.debug(f"load_laws cleanup: {_e}")
+        prob_r = supabase.table("ai_laws").select(
+            "id,law_type,conditions,prediction,confidence,accuracy,times_used,description,created_at"
+        ).eq("active", True).lt("times_used", 5).gte("created_at", cutoff).order(
+            "confidence", desc=True).limit(6).execute()
+        probation = [(r["id"],r["law_type"],r["conditions"],r["prediction"],
+                      r["confidence"],r["accuracy"],r["times_used"],r["description"],r["created_at"])
+                     for r in prob_r.data]
 
         def _is_aliasing_law(cond_raw) -> bool:
             try:
@@ -394,6 +317,15 @@ def load_laws(force: bool = False) -> List[Dict]:
         n_proven    = sum(1 for l in laws if l.get('tier') == 'proven')
         n_probation = sum(1 for l in laws if l.get('tier') == 'probation')
         logger.info(f"✅ Laws loaded: {n_proven} proven + {n_probation} probation")
+
+        try:
+            from datetime import timedelta
+            cutoff48 = (datetime.utcnow() - timedelta(hours=48)).isoformat()
+            supabase.table("ai_laws").update({"active": False}).eq("active", True).eq("times_used", 0).lt("created_at", cutoff48).execute()
+            supabase.table("ai_laws").update({"active": False}).eq("active", True).gte("times_used", 5).lt("accuracy", 40).execute()
+        except Exception as _e:
+            logger.debug(f"load_laws cleanup: {_e}")
+
         return laws
     except Exception as e:
         logger.error(f"load_laws error: {e}")
@@ -569,37 +501,27 @@ def apply_laws(suit: str, rank: str, last_digit: int,
 
 def _increment_law_usage(law_id: int):
     try:
-        with db_pool.get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE ai_laws SET times_used = times_used + 1 WHERE id = %s",
-                    (law_id,)
-                )
-                conn.commit()
+        # fetch current then increment
+        r = supabase.table("ai_laws").select("times_used").eq("id", law_id).single().execute()
+        if r.data:
+            supabase.table("ai_laws").update({"times_used": r.data["times_used"] + 1}).eq("id", law_id).execute()
     except Exception:
         pass
 
 def update_law_accuracy(law_id: int, correct: bool):
     try:
         new_val = 100.0 if correct else 0.0
-        with db_pool.get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT accuracy, accuracy_recent FROM ai_laws WHERE id = %s",
-                    (law_id,)
-                )
-                row = cur.fetchone()
-                if row:
-                    acc   = float(row[0] or 70)
-                    acc_r = float(row[1] or acc)
-                    new_acc   = acc   * 0.95 + new_val * 0.05
-                    new_acc_r = acc_r * 0.85 + new_val * 0.15
-                    cur.execute("""
-                        UPDATE ai_laws
-                        SET accuracy = %s, accuracy_recent = %s, active = %s
-                        WHERE id = %s
-                    """, (round(new_acc, 2), round(new_acc_r, 2), new_acc >= 30, law_id))
-                    conn.commit()
+        r = supabase.table("ai_laws").select("accuracy,accuracy_recent").eq("id", law_id).single().execute()
+        if r.data:
+            acc = float(r.data.get("accuracy") or 70)
+            acc_r = float(r.data.get("accuracy_recent") or acc)
+            new_acc = acc * 0.95 + new_val * 0.05
+            new_acc_r = acc_r * 0.85 + new_val * 0.15
+            supabase.table("ai_laws").update({
+                "accuracy": round(new_acc, 2),
+                "accuracy_recent": round(new_acc_r, 2),
+                "active": new_acc >= 30
+            }).eq("id", law_id).execute()
     except Exception as e:
         logger.error(f"update_law_accuracy error: {e}")
 
@@ -4997,7 +4919,7 @@ def main():
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("prune", cmd_prune))
     app.add_handler(CommandHandler("reset_laws", cmd_reset_laws))
-    app.add_handler(CommandHandler("reset_bias", cmd_reset_bias))
+    app.add_handler(CommandHandler("reset_bias", cmd_reset_bias))  # ✅ أمر تصفير الانحياز
     app.add_handler(CommandHandler("last", cmd_last))
     app.add_handler(CommandHandler("delete", cmd_delete))
     app.add_handler(CommandHandler("download", cmd_download))
@@ -5011,33 +4933,10 @@ def main():
     logger.info("🚀 HADES V19.0 is running...")
     app.run_polling(drop_pending_updates=True)
 
-# ==================== Keep-Alive Server ====================
-async def _keepalive_handler(request):
-    return aiohttp.web.Response(text="OK")
-
-def _start_keepalive():
-    import os
-    async def _run():
-        port = int(os.environ.get("PORT", 10000))
-        app_web = aiohttp.web.Application()
-        app_web.router.add_get("/", _keepalive_handler)
-        app_web.router.add_get("/health", _keepalive_handler)
-        runner = aiohttp.web.AppRunner(app_web)
-        await runner.setup()
-        await aiohttp.web.TCPSite(runner, "0.0.0.0", port).start()
-        logger.info(f"🌐 Keep-alive on port {port}")
-        await asyncio.Event().wait()
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(_run())
-
-from telegram.error import Conflict
-
 if __name__ == "__main__":
-    threading.Thread(target=_start_keepalive, daemon=True).start()
+    from telegram.error import Conflict
+    import threading
     try:
         main()
     except Conflict:
-        logger.error("❌ Bot already running elsewhere")
-    except Exception as e:
-        logger.error(f"❌ {e}", exc_info=True)
+        print("Bot already running elsewhere")
