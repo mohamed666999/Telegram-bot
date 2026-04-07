@@ -43,7 +43,7 @@ from openai import OpenAI
 TOKEN           = os.environ.get("TELEGRAM_TOKEN",  "8706937528:AAHVug63kujbf2t2ntKiQzpa3IN6Wr5b16s")
 SUPABASE_URL    = os.environ.get("SUPABASE_URL",    "https://mamjpudfwhmvqdvrqojb.supabase.co")
 SUPABASE_KEY    = os.environ.get("SUPABASE_KEY",    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1hbWpwdWRmd2htdnFkdnJxb2piIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUyMTAwNjMsImV4cCI6MjA5MDc4NjA2M30.Y6tajMxbkCgcOx8tQIowg6LjxfjaRrnBAO9DwqZCVLI")
-SUPABASE_DB_URL = os.environ.get("SUPABASE_DB_URL", "postgresql://postgres:Loploplop909090.@db.mamjpudfwhmvqdvrqojb.supabase.co:5432/postgres")
+SUPABASE_DB_URL = "postgresql://postgres:Loploplop909090.@db.mamjpudfwhmvqdvrqojb.supabase.co:5432/postgres"
 ADMIN_ID        = 6033203084
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -208,14 +208,13 @@ class TTLCache:
 live_cache = TTLCache(ttl_seconds=30)
 
 # ==================== Database Connection Pool ====================
+# ==================== Database Connection Pool ====================
 import psycopg2
 from psycopg2 import pool
 from contextlib import contextmanager
 import logging
 
 logger = logging.getLogger(__name__)
-
-# SUPABASE_DB_URL مُعرَّف أعلى الملف في قسم الإعدادات
 
 class DatabasePool:
     _instance = None
@@ -224,20 +223,27 @@ class DatabasePool:
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            cls._instance._init_pool()
         return cls._instance
 
     def _init_pool(self):
         try:
-            self._pool = psycopg2.pool.ThreadedConnectionPool(1, 20, SUPABASE_DB_URL)
+            # استخدام SimpleConnectionPool بدلاً من Threaded لتوافق أفضل مع بيئة Railway
+            self._pool = psycopg2.pool.SimpleConnectionPool(1, 20, SUPABASE_DB_URL)
             logger.info("✅ تم الاتصال بقاعدة بيانات Supabase بنجاح!")
         except Exception as e:
             logger.error(f"❌ فشل الاتصال بقاعدة بيانات Supabase: {e}")
+            self._pool = None # تأكيد الفشل
 
     @contextmanager
     def get_conn(self):
-        if self._pool is None:
+        # محاولة الاتصال إذا كان الـ Pool فارغاً أو مغلقاً
+        if self._pool is None or self._pool.closed:
+            logger.warning("⚠️ محاولة إعادة الاتصال بقاعدة البيانات...")
             self._init_pool()
+            
+        if self._pool is None:
+             raise Exception("تعذر الوصول إلى قاعدة البيانات (الرابط خاطئ أو الشبكة محجوبة).")
+             
         conn = self._pool.getconn()
         try:
             yield conn
